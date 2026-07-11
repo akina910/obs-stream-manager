@@ -1,0 +1,28 @@
+node_modules/
+dist/
+coverage/
+output/
+.playwright-cli/
+.DS_Store
+*.log
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Personal runtime data (created under the OS app-data directory by default)
+config/
+profiles/
+thumbnails/
+descriptions/
+logs/
+backups/
+database/
+.runtime/
+
+# IDE / local tools
+.idea/
+.vscode/
+.claude/
+.wrangler/

@@ -1,0 +1,156 @@
+import OBSWebSocket from 'obs-websocket-js'
+import type { AppConfig, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import { SecretStore } from './secrets.js'
+
+const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+
+export class ObsController {
+  private readonly obs = new OBSWebSocket()
+  private connected = false
+  private started = { stream: false, record: false, replay: false }
+
+  constructor(private readonly secrets: SecretStore) {
+    this.obs.on('ConnectionClosed', () => { this.connected = false })
+  }
+
+  async connect(config: AppConfig): Promise<void> {
+    if (this.connected) return
+    const password = this.secrets.get('obs-password') ?? undefined
+    await this.obs.connect(config.obs.url, password)
+    this.connected = true
+  }
+
+  async disconnect(): Promise<void> {
+    if (this.connected) await this.obs.disconnect()
+    this.connected = false
+  }
+
+  private captureSource(profile: GameProfile, method: CaptureMethod): string {
+    if (method === 'geforce_now') return profile.capture.geforceNowSourceName
+    if (method === 'window') return profile.capture.windowSourceName ?? profile.capture.localSourceName
+    if (method === 'display') return profile.capture.displaySourceName
+    return profile.capture.localSourceName
+  }
+
+  private async setSceneItem(sceneName: string, sourceName: string, enabled: boolean): Promise<boolean> {
+    try {
+      const { sceneItemId } = await this.obs.call('GetSceneItemId', { sceneName, sourceName })
+      await this.obs.call('SetSceneItemEnabled', { sceneName, sceneItemId, sceneItemEnabled: enabled })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async setVolume(inputName: string, inputVolumeDb: number): Promise<void> {
+    try { await this.obs.call('SetInputVolume', { inputName, inputVolumeDb }) } catch { /* optional/missing input */ }
+  }
+
+  private async setMuted(inputName: string, muted: boolean): Promise<void> {
+    try { await this.obs.call('SetInputMute', { inputName, inputMuted: muted }) } catch { /* optional/missing input */ }
+  }
+
+  async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
+    await this.connect(config)
+    const warnings: string[] = []
+    await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.sceneName })
+
+    const selectedSource = this.captureSource(profile, method)
+    const captureSources = new Set([
+      profile.capture.localSourceName,
+      profile.capture.geforceNowSourceName,
+      profile.capture.windowSourceName,
+      profile.capture.displaySourceName,
+      'Elgato Game Capture',
+    ].filter((name): name is string => Boolean(name)))
+    for (const source of captureSources) await this.setSceneItem(profile.obs.sceneName, source, source === selectedSource)
+    const sourceActive = await this.obs.call('GetSourceActive', { sourceName: selectedSource }).catch(() => null)
+    if (!sourceActive?.videoActive) warnings.push(`映像ソース「${selectedSource}」がアクティブではありません`)
+
+    await Promise.all([
+      this.setVolume(config.sources.microphone, profile.audio.microphoneDb),
+      this.setVolume(config.sources.discord, profile.audio.discordDb),
+      this.setVolume(config.sources.bgm, profile.audio.bgmDb),
+      this.setVolume(method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame, profile.audio.gameDb),
+    ])
+
+    const activeAudio = method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame
+    for (const source of [config.sources.pcGame, config.sources.geforceNow, config.sources.switchGame]) await this.setMuted(source, source !== activeAudio)
+
+    const { outputActive } = await this.obs.call('GetRecordStatus')
+    if (!outputActive && profile.recording.directory) {
+      for (const [parameterCategory, parameterName] of [['AdvOut', 'RecFilePath'], ['SimpleOutput', 'FilePath']] as const) {
+        await this.obs.call('SetProfileParameter', { parameterCategory, parameterName, parameterValue: profile.recording.directory }).catch(() => undefined)
+      }
+    }
+    if (!outputActive) {
+      for (const category of ['AdvOut', 'SimpleOutput']) {
+        await this.obs.call('SetProfileParameter', { parameterCategory: category, parameterName: 'RecRBTime', parameterValue: String(profile.recording.replayBufferSeconds) }).catch(() => undefined)
+      }
+    }
+    return warnings
+  }
+
+  async start(config: AppConfig, profile: GameProfile, selectedSource: string): Promise<void> {
+    await this.connect(config)
+    const active = await this.obs.call('GetSourceActive', { sourceName: selectedSource }).catch(() => null)
+    if (!active?.videoActive) throw new Error(`キャプチャ映像「${selectedSource}」を確認できないため、配信を開始しません`)
+
+    await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.startingScene })
+    const startedNow = { stream: false, record: false, replay: false }
+    try {
+      const record = await this.obs.call('GetRecordStatus')
+      if (config.features.recording && profile.recording.enabled && !record.outputActive) { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }
+      const replay = await this.obs.call('GetReplayBufferStatus')
+      if (config.features.replayBuffer && !replay.outputActive) { await this.obs.call('StartReplayBuffer'); this.started.replay = true; startedNow.replay = true }
+      const stream = await this.obs.call('GetStreamStatus')
+      if (!stream.outputActive) { await this.obs.call('StartStream'); this.started.stream = true; startedNow.stream = true }
+      await wait(config.obs.startDelaySeconds * 1000)
+      await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.sceneName })
+    } catch (error) {
+      if (startedNow.stream) await this.obs.call('StopStream').catch(() => undefined)
+      if (startedNow.replay) await this.obs.call('StopReplayBuffer').catch(() => undefined)
+      if (startedNow.record) await this.obs.call('StopRecord').catch(() => undefined)
+      if (startedNow.stream) this.started.stream = false
+      if (startedNow.replay) this.started.replay = false
+      if (startedNow.record) this.started.record = false
+      throw error
+    }
+  }
+
+  async stop(config: AppConfig, profile: GameProfile | null): Promise<void> {
+    await this.connect(config)
+    await this.obs.call('SetCurrentProgramScene', { sceneName: profile?.obs.endingScene ?? '90_ENDING' })
+    await wait(config.obs.endDelaySeconds * 1000)
+    const [stream, record, replay] = await Promise.all([
+      this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.obs.call('GetReplayBufferStatus'),
+    ])
+    if (replay.outputActive && this.started.replay) await this.obs.call('StopReplayBuffer')
+    if (record.outputActive && this.started.record) await this.obs.call('StopRecord')
+    if (stream.outputActive) await this.obs.call('StopStream')
+    this.started = { stream: false, record: false, replay: false }
+  }
+
+  async saveReplay(config: AppConfig): Promise<void> {
+    await this.connect(config)
+    await this.obs.call('SaveReplayBuffer')
+  }
+
+  async switchScene(config: AppConfig, sceneName: string): Promise<void> {
+    await this.connect(config)
+    await this.obs.call('SetCurrentProgramScene', { sceneName })
+  }
+
+  async status(config: AppConfig, selectedGameId: string | null, captureMethod: CaptureMethod | null, busy: boolean, warning: string | null): Promise<RuntimeStatus> {
+    try {
+      await this.connect(config)
+      const [stream, record, replay, scene] = await Promise.all([
+        this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.obs.call('GetReplayBufferStatus'), this.obs.call('GetCurrentProgramScene'),
+      ])
+      return { obsConnected: true, streaming: stream.outputActive, recording: record.outputActive, replayBuffer: replay.outputActive, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy }
+    } catch {
+      this.connected = false
+      return { obsConnected: false, streaming: false, recording: false, replayBuffer: false, selectedGameId, captureMethod, currentScene: null, warning, busy }
+    }
+  }
+}
