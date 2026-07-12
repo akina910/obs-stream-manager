@@ -153,10 +153,12 @@ export class DataStore {
     let updated = 0
     for (const game of games.values()) {
       const normalized = game.name.trim().toLocaleLowerCase()
-      const match = existing.find((profile) => profile.library.steamAppId === game.appId || profile.displayName.trim().toLocaleLowerCase() === normalized)
+      const matchByAppId = existing.find((profile) => profile.library.steamAppId === game.appId)
+      const matchByUnlinkedName = existing.find((profile) => profile.library.steamAppId === undefined && profile.displayName.trim().toLocaleLowerCase() === normalized)
+      const match = matchByAppId ?? matchByUnlinkedName
       const base = match ?? createPcProfile(`steam_${game.appId}`, game.name)
       const local = installedById.get(game.appId)
-      await this.saveProfile({
+      const saved = await this.saveProfile({
         ...base,
         coverUrl: base.coverUrl ?? `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appId}/header.jpg`,
         library: {
@@ -166,8 +168,14 @@ export class DataStore {
           installDirectory: local?.installDir,
         },
       })
-      if (match) updated += 1
-      else created += 1
+      if (match) {
+        const index = existing.findIndex((profile) => profile.id === match.id)
+        existing[index] = saved
+        updated += 1
+      } else {
+        existing.push(saved)
+        created += 1
+      }
     }
     return { profiles: await this.listProfiles(), created, updated }
   }

@@ -98,4 +98,15 @@ describe('DataStore', () => {
     expect(result.profiles.filter((profile) => profile.library.steamAppId === 2399830)).toHaveLength(1)
     expect(result.profiles.find((profile) => profile.library.steamAppId === 1234)?.library).toMatchObject({ installed: true, installDirectory: 'D:\\SteamLibrary\\steamapps\\common\\New Steam Game' })
   })
+
+  it('does not overwrite an existing Steam link when distinct App IDs share a display name', async () => {
+    const store = await createStore()
+    const ark = (await store.listProfiles()).find((profile) => profile.id === 'ark_survival_ascended')!
+    const result = await store.syncSteamLibrary(
+      [{ appId: ark.library.steamAppId!, name: ark.displayName }, { appId: 999999, name: ark.displayName }],
+      [],
+    )
+    expect(result.profiles.filter((profile) => profile.displayName === ark.displayName)).toHaveLength(2)
+    expect(result.profiles.filter((profile) => [ark.library.steamAppId, 999999].includes(profile.library.steamAppId))).toHaveLength(2)
+  })
 })

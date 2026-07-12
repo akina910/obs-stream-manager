@@ -157,7 +157,8 @@ export class ObsController {
       if (startedNow.sourceRecord) { this.started.sourceRecord = false; this.started.sourceRecordSource = null }
       if (startedNow.replay) this.started.replay = false
       if (startedNow.record) this.started.record = false
-      throw error
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(warnings.length ? `${message} / 先行警告: ${warnings.join(' / ')}` : message, { cause: error })
     }
   }
 
