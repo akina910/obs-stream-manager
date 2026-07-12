@@ -71,7 +71,20 @@ app.post<{ Params: { id: string }; Body: { mime: string; data: string } }>('/api
   const profile = await store.getProfile(request.params.id)
   if (!profile) throw Object.assign(new Error('ゲームプロファイルが見つかりません'), { statusCode: 404 })
   if (!request.body?.data || !request.body?.mime) throw Object.assign(new Error('画像がありません'), { statusCode: 400 })
-  return store.saveThumbnail(profile, Buffer.from(request.body.data, 'base64'), request.body.mime)
+  const saved = await store.saveThumbnail(profile, Buffer.from(request.body.data, 'base64'), request.body.mime)
+  orchestrator.invalidateProfile(profile.id)
+  await logger.write('thumbnail.saved', { gameId: profile.id, filename: saved.state.thumbnailFilename })
+  return saved
+})
+
+app.delete<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (request, reply) => {
+  await orchestrator.assertNotStreaming()
+  const profile = await store.getProfile(request.params.id)
+  if (!profile) return reply.status(404).send({ error: 'Profile not found' })
+  const saved = await store.removeThumbnail(profile)
+  orchestrator.invalidateProfile(profile.id)
+  await logger.write('thumbnail.removed', { gameId: profile.id })
+  return saved
 })
 
 app.get<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (request, reply) => {
@@ -86,8 +99,8 @@ app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', as
   const override = request.body.captureMethod ? CaptureMethodSchema.parse(request.body.captureMethod) : undefined
   return orchestrator.select(request.body.gameId, override)
 })
-app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => { await orchestrator.start(Boolean(request.body?.allowServiceFailures)); return { ok: true } })
-app.post('/api/stream/stop', async () => { await orchestrator.stop(); return { ok: true } })
+app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
+app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(request.body.sceneName); return { ok: true } })
 
@@ -118,6 +131,20 @@ app.get('/api/steam/sync', async () => {
   const config = await store.getConfig()
   const [owned, installed] = await Promise.all([platforms.steamOwnedGames(config).catch(() => []), platforms.steamInstalledGames(config).catch(() => [])])
   return { owned, installed }
+})
+app.post('/api/steam/sync', async () => {
+  await orchestrator.assertNotStreaming()
+  const config = await store.getConfig()
+  const [ownedResult, installedResult] = await Promise.allSettled([platforms.steamOwnedGames(config), platforms.steamInstalledGames(config)])
+  const owned = ownedResult.status === 'fulfilled' ? ownedResult.value : []
+  const installed = installedResult.status === 'fulfilled' ? installedResult.value : []
+  const warnings = [
+    ...(ownedResult.status === 'rejected' ? [`Steam Web API: ${ownedResult.reason instanceof Error ? ownedResult.reason.message : String(ownedResult.reason)}`] : []),
+    ...(installedResult.status === 'rejected' ? [`Steamローカル: ${installedResult.reason instanceof Error ? installedResult.reason.message : String(installedResult.reason)}`] : []),
+  ]
+  const { profiles, created, updated } = await store.syncSteamLibrary(owned, installed)
+  await logger.write('steam.synced', { owned: owned.length, installed: installed.length, created, updated, warnings })
+  return { profiles, owned: owned.length, installed: installed.length, created, updated, warnings }
 })
 app.post('/api/backup/export', async () => store.exportBackup())
 app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
