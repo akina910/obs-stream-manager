@@ -6,6 +6,9 @@ export type PlatformGroup = z.infer<typeof PlatformGroupSchema>
 export const CaptureMethodSchema = z.enum(['auto', 'local', 'geforce_now', 'window', 'display', 'elgato'])
 export type CaptureMethod = z.infer<typeof CaptureMethodSchema>
 
+export const ThumbnailApplyStatusSchema = z.enum(['not_registered', 'pending', 'applied', 'failed', 'disabled'])
+export type ThumbnailApplyStatus = z.infer<typeof ThumbnailApplyStatusSchema>
+
 const ServiceConfigSchema = z.object({
   enabled: z.boolean().default(true),
   titleTemplate: z.string().default('{game}｜ゲーム配信'),
@@ -22,7 +25,9 @@ export const GameProfileSchema = z.object({
     steamAppId: z.number().int().positive().optional(),
     gamePass: z.boolean().default(false),
     exception: z.boolean().default(false),
-  }).default({ gamePass: false, exception: false }),
+    installed: z.boolean().default(false),
+    installDirectory: z.string().optional(),
+  }).default({ gamePass: false, exception: false, installed: false }),
   capture: z.object({
     preferred: CaptureMethodSchema.default('auto'),
     executableNames: z.array(z.string()).default([]),
@@ -65,7 +70,11 @@ export const GameProfileSchema = z.object({
     lastCaptureMethod: CaptureMethodSchema.optional(),
     lastUsedAt: z.string().datetime().nullable().default(null),
     thumbnailFilename: z.string().optional(),
-  }).default({ lastUsedAt: null }),
+    thumbnailAutoApply: z.boolean().default(true),
+    thumbnailApplyStatus: ThumbnailApplyStatusSchema.default('not_registered'),
+    thumbnailLastAppliedAt: z.string().datetime().nullable().default(null),
+    thumbnailLastError: z.string().optional(),
+  }).default({ lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null }),
 })
 
 export type GameProfile = z.infer<typeof GameProfileSchema>
@@ -120,6 +129,8 @@ export const RuntimeStatusSchema = z.object({
   streaming: z.boolean(),
   recording: z.boolean(),
   replayBuffer: z.boolean(),
+  sourceRecord: z.boolean(),
+  verticalRecording: z.boolean(),
   selectedGameId: z.string().nullable(),
   captureMethod: CaptureMethodSchema.nullable(),
   currentScene: z.string().nullable(),

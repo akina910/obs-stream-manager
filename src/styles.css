@@ -120,8 +120,10 @@ main, .settings-view { padding: 16px 14px 30px; }
 .settings-card h3 svg { color: var(--accent); }
 .settings-card p { color: var(--muted); font-size: 10px; }
 label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 11px; color: #8e95a2; font-size: 10px; }
-input, select { width: 100%; height: 37px; padding: 0 10px; border: 1px solid #292e38; outline: none; border-radius: 7px; color: #eef0f4; background: #0c0e13; font-size: 11px; }
-input:focus, select:focus { border-color: #525966; }
+input, select, textarea { width: 100%; padding: 0 10px; border: 1px solid #292e38; outline: none; border-radius: 7px; color: #eef0f4; background: #0c0e13; font-size: 11px; }
+input, select { height: 37px; }
+textarea { min-height: 72px; padding-block: 9px; resize: vertical; font-family: inherit; line-height: 1.45; }
+input:focus, select:focus, textarea:focus { border-color: #525966; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .button-row { display: flex; gap: 8px; }
 .primary, .secondary { min-height: 35px; padding: 0 13px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer; font-size: 11px; font-weight: 600; }
@@ -143,6 +145,16 @@ input:focus, select:focus { border-color: #525966; }
 .thumbnail-drop svg { color: var(--accent); }
 .thumbnail-drop span { font-size: 11px; }
 .thumbnail-drop small { color: #5f6673; font-size: 8px; }
+.thumbnail-controls { margin: -3px 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.thumbnail-controls .check-row { margin: 0; }
+.thumbnail-controls .danger-link { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.thumbnail-first-register { width: 100%; margin: 9px 0 2px; }
+.profile-flags { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 2px 0 10px; }
+.profile-flags .check-row { margin: 0; }
+.form-section { margin: 15px 0; padding-top: 13px; border-top: 1px solid var(--line); }
+.form-section h3 { margin: 0 0 11px; color: #c5cad3; font-size: 11px; }
+.settings-toggle-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 14px; }
+.settings-toggle-grid .check-row { margin: 0; }
 .check-row { height: 30px; flex-direction: row; align-items: center; gap: 7px; }
 .check-row input { width: 15px; height: 15px; accent-color: var(--accent); }
 

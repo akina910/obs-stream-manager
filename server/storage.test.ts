@@ -75,4 +75,38 @@ describe('DataStore', () => {
     expect(await store.getProfile('temporary_game')).toBeNull()
     expect((await store.getProfile(profile.id))?.state.thumbnailFilename).toBe('default.png')
   })
+
+  it('removes a saved thumbnail and resets its automatic-application state', async () => {
+    const store = await createStore()
+    const profile = (await store.listProfiles())[0]
+    const thumbnail = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#123456' } }).png().toBuffer()
+    const saved = await store.saveThumbnail(profile, thumbnail, 'image/png')
+    expect(saved.state.thumbnailApplyStatus).toBe('pending')
+    const removed = await store.removeThumbnail(saved)
+    expect(removed.state.thumbnailFilename).toBeUndefined()
+    expect(removed.state.thumbnailApplyStatus).toBe('not_registered')
+  })
+
+  it('merges Steam games by App ID or name without duplicating existing profiles', async () => {
+    const store = await createStore()
+    const result = await store.syncSteamLibrary(
+      [{ appId: 2399830, name: 'ARK: Survival Ascended' }, { appId: 1234, name: 'New Steam Game' }],
+      [{ appId: 1234, name: 'New Steam Game', installDir: 'D:\\SteamLibrary\\steamapps\\common\\New Steam Game' }],
+    )
+    expect(result.created).toBe(1)
+    expect(result.updated).toBe(1)
+    expect(result.profiles.filter((profile) => profile.library.steamAppId === 2399830)).toHaveLength(1)
+    expect(result.profiles.find((profile) => profile.library.steamAppId === 1234)?.library).toMatchObject({ installed: true, installDirectory: 'D:\\SteamLibrary\\steamapps\\common\\New Steam Game' })
+  })
+
+  it('does not overwrite an existing Steam link when distinct App IDs share a display name', async () => {
+    const store = await createStore()
+    const ark = (await store.listProfiles()).find((profile) => profile.id === 'ark_survival_ascended')!
+    const result = await store.syncSteamLibrary(
+      [{ appId: ark.library.steamAppId!, name: ark.displayName }, { appId: 999999, name: ark.displayName }],
+      [],
+    )
+    expect(result.profiles.filter((profile) => profile.displayName === ark.displayName)).toHaveLength(2)
+    expect(result.profiles.filter((profile) => [ark.library.steamAppId, 999999].includes(profile.library.steamAppId))).toHaveLength(2)
+  })
 })

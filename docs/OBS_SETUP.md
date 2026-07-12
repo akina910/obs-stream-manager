@@ -66,10 +66,10 @@ Track 6: 予備 / Switch
 - OBS 録画形式は MKV にします。
 - リプレイバッファを有効にします。秒数はゲーム選択時にアプリが更新します。
 - Aitum Multistream は OBS 本体の開始・停止にリンクし、YouTube と Twitch を同時に開始する設定にします。
-- Source Record はゲーム映像ソース一系統だけを対象にし、OBS 録画開始・停止へリンクします。
-- Aitum Vertical は 1080×1920 の録画を作り、OBS 録画開始・停止へリンクします。
+- Source Record はゲーム映像ソース一系統だけへフィルターを設定します。アプリは Source Record の公式 WebSocket vendor request で選択ソースの録画を開始・停止します。
+- Aitum Vertical は 1080×1920 の録画を作ります。アプリは Aitum Vertical の公式 WebSocket vendor request で縦録画を開始・停止します。
 
-プラグイン固有の WebSocket API はバージョン間で互換性が保証されないため、本アプリは OBS の標準開始・停止を呼び、各プラグインの公式連動機能を起動トリガーとして使います。
+プラグインが未導入、無効、または vendor request 非対応の場合は警告を表示しますが、通常配信と通常録画は継続します。Aitum Multistream は引き続き OBS 本体の配信開始・停止への公式連動機能を使います。
 
 ## 7. Advanced Scene Switcher
 

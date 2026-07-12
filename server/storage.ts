@@ -3,7 +3,7 @@ import path from 'node:path'
 import sharp from 'sharp'
 import YAML from 'yaml'
 import { AppConfigSchema, GameProfileSchema, type AppConfig, type GameProfile, type PlatformGroup } from '../shared/contracts.js'
-import { defaultConfig, starterProfiles } from './defaults.js'
+import { createPcProfile, defaultConfig, starterProfiles } from './defaults.js'
 import { runtimeDirectories } from './paths.js'
 
 const thumbnailFormats: Record<string, { ext: string; signature: (data: Uint8Array) => boolean }> = {
@@ -104,6 +104,7 @@ export class DataStore {
     const profile = await this.getProfile(id)
     if (!profile) return false
     await rm(path.join(this.dataDir, 'profiles', profile.platformGroup, `${profile.id}.yaml`), { force: true })
+    await rm(path.join(this.dataDir, 'thumbnails', profile.platformGroup, profile.id), { recursive: true, force: true })
     return true
   }
 
@@ -114,7 +115,69 @@ export class DataStore {
     for (const old of ['default.png', 'default.jpg', 'default.webp']) await rm(path.join(directory, old), { force: true })
     const filename = `default.${format.ext}`
     await atomicWrite(path.join(directory, filename), bytes)
-    return this.saveProfile({ ...profile, state: { ...profile.state, thumbnailFilename: filename } })
+    return this.saveProfile({
+      ...profile,
+      state: {
+        ...profile.state,
+        thumbnailFilename: filename,
+        thumbnailApplyStatus: profile.state.thumbnailAutoApply ? 'pending' : 'disabled',
+        thumbnailLastError: undefined,
+      },
+    })
+  }
+
+  async removeThumbnail(profile: GameProfile): Promise<GameProfile> {
+    await rm(path.join(this.dataDir, 'thumbnails', profile.platformGroup, profile.id), { recursive: true, force: true })
+    return this.saveProfile({
+      ...profile,
+      state: {
+        ...profile.state,
+        thumbnailFilename: undefined,
+        thumbnailApplyStatus: 'not_registered',
+        thumbnailLastAppliedAt: null,
+        thumbnailLastError: undefined,
+      },
+    })
+  }
+
+  async syncSteamLibrary(
+    owned: Array<{ appId: number; name: string }>,
+    installed: Array<{ appId: number; name: string; installDir: string }>,
+  ): Promise<{ profiles: GameProfile[]; created: number; updated: number }> {
+    const installedById = new Map(installed.map((game) => [game.appId, game]))
+    const games = new Map<number, { appId: number; name: string }>()
+    for (const game of owned) games.set(game.appId, game)
+    for (const game of installed) games.set(game.appId, game)
+    const existing = await this.listProfiles()
+    let created = 0
+    let updated = 0
+    for (const game of games.values()) {
+      const normalized = game.name.trim().toLocaleLowerCase()
+      const matchByAppId = existing.find((profile) => profile.library.steamAppId === game.appId)
+      const matchByUnlinkedName = existing.find((profile) => profile.library.steamAppId === undefined && profile.displayName.trim().toLocaleLowerCase() === normalized)
+      const match = matchByAppId ?? matchByUnlinkedName
+      const base = match ?? createPcProfile(`steam_${game.appId}`, game.name)
+      const local = installedById.get(game.appId)
+      const saved = await this.saveProfile({
+        ...base,
+        coverUrl: base.coverUrl ?? `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appId}/header.jpg`,
+        library: {
+          ...base.library,
+          steamAppId: game.appId,
+          installed: Boolean(local),
+          installDirectory: local?.installDir,
+        },
+      })
+      if (match) {
+        const index = existing.findIndex((profile) => profile.id === match.id)
+        existing[index] = saved
+        updated += 1
+      } else {
+        existing.push(saved)
+        created += 1
+      }
+    }
+    return { profiles: await this.listProfiles(), created, updated }
   }
 
   getThumbnailPath(profile: GameProfile): string | null {

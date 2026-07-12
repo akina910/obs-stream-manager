@@ -6,7 +6,18 @@ import type { AppConfig, ChatMessage, GameProfile } from '../shared/contracts.js
 import { SecretStore } from './secrets.js'
 import type { DataStore } from './storage.js'
 
-type Preparation = { service: 'youtube' | 'twitch'; ok: boolean; message: string }
+export type ThumbnailPreparation = {
+  status: 'not_registered' | 'applied' | 'failed' | 'disabled'
+  message: string
+  appliedAt?: string
+}
+
+export type Preparation = {
+  service: 'youtube' | 'twitch'
+  ok: boolean
+  message: string
+  thumbnail?: ThumbnailPreparation
+}
 type YouTubeBroadcast = { id: string; snippet: Record<string, unknown>; status: Record<string, unknown>; contentDetails: Record<string, unknown> }
 
 async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
@@ -43,8 +54,37 @@ export class PlatformServices {
     return token.access_token
   }
 
-  private async prepareYouTube(config: AppConfig, profile: GameProfile): Promise<void> {
-    if (!config.features.youtube || !profile.youtube.enabled) return
+  private async applyYouTubeThumbnail(accessToken: string, videoId: string, profile: GameProfile): Promise<ThumbnailPreparation> {
+    if (!profile.state.thumbnailFilename) return { status: 'not_registered', message: 'サムネイル未登録のため YouTube の前回画像を維持します' }
+    if (!profile.state.thumbnailAutoApply) return { status: 'disabled', message: 'サムネイル自動適用は無効です' }
+    const thumbnail = this.store.getThumbnailPath(profile)
+    if (!thumbnail) return { status: 'not_registered', message: 'サムネイル未登録のため YouTube の前回画像を維持します' }
+
+    try {
+      let bytes: Buffer<ArrayBufferLike> = await readFile(thumbnail)
+      let contentType = thumbnail.endsWith('.png') ? 'image/png' : 'image/jpeg'
+      if (thumbnail.endsWith('.webp') || bytes.byteLength > 2_000_000) {
+        bytes = await sharp(bytes).resize({ width: 1280, height: 720, fit: 'cover', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer()
+        if (bytes.byteLength > 2_000_000) bytes = await sharp(bytes).jpeg({ quality: 65 }).toBuffer()
+        contentType = 'image/jpeg'
+      }
+      if (bytes.byteLength > 2_000_000) throw new Error('2 MB 以下に変換できませんでした')
+      const upload = new URL('https://www.googleapis.com/upload/youtube/v3/thumbnails/set')
+      upload.search = new URLSearchParams({ videoId, uploadType: 'media' }).toString()
+      let lastError = ''
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await fetch(upload, { method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': contentType }, body: new Uint8Array(bytes) })
+        if (response.ok) return { status: 'applied', message: '保存済みサムネイルを自動適用しました', appliedAt: new Date().toISOString() }
+        lastError = `${response.status} ${await response.text()}`
+      }
+      throw new Error(lastError)
+    } catch (error) {
+      return { status: 'failed', message: `サムネイル適用に失敗しました。YouTube の前回画像を維持します: ${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
+  private async prepareYouTube(config: AppConfig, profile: GameProfile): Promise<ThumbnailPreparation> {
+    if (!config.features.youtube || !profile.youtube.enabled) return { status: 'disabled', message: 'YouTube またはサムネイル自動適用が無効です' }
     const accessToken = await this.youtubeAccessToken(config)
     const headers = { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' }
     let broadcast: YouTubeBroadcast | undefined
@@ -82,21 +122,7 @@ export class PlatformServices {
       bindUrl.search = new URLSearchParams({ id: broadcast.id, streamId: stream.id, part: 'id,contentDetails' }).toString()
       await apiJson(bindUrl.toString(), { method: 'POST', headers })
     }
-    const thumbnail = this.store.getThumbnailPath(profile)
-    if (thumbnail) {
-      let bytes: Buffer<ArrayBufferLike> = await readFile(thumbnail)
-      let contentType = thumbnail.endsWith('.png') ? 'image/png' : 'image/jpeg'
-      if (thumbnail.endsWith('.webp') || bytes.byteLength > 2_000_000) {
-        bytes = await sharp(bytes).resize({ width: 1280, height: 720, fit: 'cover', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer()
-        if (bytes.byteLength > 2_000_000) bytes = await sharp(bytes).jpeg({ quality: 65 }).toBuffer()
-        contentType = 'image/jpeg'
-      }
-      if (bytes.byteLength > 2_000_000) throw new Error('YouTube サムネイルを 2 MB 以下に変換できませんでした')
-      const upload = new URL('https://www.googleapis.com/upload/youtube/v3/thumbnails/set')
-      upload.search = new URLSearchParams({ videoId: broadcast.id, uploadType: 'media' }).toString()
-      const response = await fetch(upload, { method: 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': contentType }, body: new Uint8Array(bytes) })
-      if (!response.ok) throw new Error(`YouTube thumbnail: ${response.status} ${await response.text()}`)
-    }
+    return this.applyYouTubeThumbnail(accessToken, broadcast.id, profile)
   }
 
   private async prepareTwitch(config: AppConfig, profile: GameProfile): Promise<void> {
@@ -136,8 +162,12 @@ export class PlatformServices {
       ['youtube', () => this.prepareYouTube(config, profile)],
       ['twitch', () => this.prepareTwitch(config, profile)],
     ] as const).map(async ([service, operation]) => {
-      try { await operation(); return { service, ok: true, message: '適用済み' } }
-      catch (error) { return { service, ok: false, message: error instanceof Error ? error.message : String(error) } }
+      try {
+        const result = await operation()
+        return { service, ok: true, message: '適用済み', ...(service === 'youtube' ? { thumbnail: result as ThumbnailPreparation } : {}) }
+      } catch (error) {
+        return { service, ok: false, message: error instanceof Error ? error.message : String(error) }
+      }
     }))
   }
 

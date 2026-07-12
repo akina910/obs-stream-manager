@@ -14,34 +14,53 @@ export const defaultConfig: AppConfig = {
 const pcBase = {
   favorite: false,
   hidden: false,
-  library: { gamePass: false, exception: false },
+  library: { gamePass: false, exception: false, installed: false },
   obs: { sceneName: '10_GAME_PC', startingScene: '00_STARTING', endingScene: '90_ENDING' },
   youtube: { enabled: true, titleTemplate: '{game}｜ゲーム配信', description: '', privacy: 'public' as const, categoryId: '20' },
   twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: '', tags: ['日本語'] },
   audio: { microphoneDb: -3, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
   recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: true, verticalRecording: true },
-  state: { lastUsedAt: null },
+  state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered' as const, thumbnailLastAppliedAt: null },
+}
+
+export function createPcProfile(id: string, displayName: string): GameProfile {
+  return {
+    ...structuredClone(pcBase),
+    id,
+    displayName,
+    platformGroup: 'pc',
+    capture: {
+      preferred: 'auto',
+      executableNames: [],
+      localSourceName: 'PC Game Capture',
+      geforceNowEnabled: false,
+      geforceNowSourceName: 'GFN Capture',
+      displaySourceName: 'Display Capture',
+      allowDisplayFallback: false,
+    },
+    twitch: { ...pcBase.twitch, categoryName: displayName },
+  }
 }
 
 export const starterProfiles: GameProfile[] = [
   {
     ...pcBase,
     id: 'ark_survival_ascended', displayName: 'ARK: Survival Ascended', platformGroup: 'pc', favorite: true,
-    library: { steamAppId: 2399830, gamePass: false, exception: false },
+    library: { steamAppId: 2399830, gamePass: false, exception: false, installed: false },
     capture: { preferred: 'auto', executableNames: ['ArkAscended.exe'], localSourceName: 'PC Game Capture', geforceNowEnabled: true, geforceNowSourceName: 'GFN Capture', displaySourceName: 'Display Capture', allowDisplayFallback: false },
     twitch: { ...pcBase.twitch, categoryName: 'ARK: Survival Ascended' },
   },
   {
     ...pcBase,
     id: 'minecraft', displayName: 'Minecraft', platformGroup: 'pc', favorite: true,
-    library: { gamePass: true, exception: false },
+    library: { gamePass: true, exception: false, installed: false },
     capture: { preferred: 'auto', executableNames: ['Minecraft.Windows.exe', 'javaw.exe'], localSourceName: 'PC Game Capture', geforceNowEnabled: false, geforceNowSourceName: 'GFN Capture', displaySourceName: 'Display Capture', allowDisplayFallback: false },
     twitch: { ...pcBase.twitch, categoryName: 'Minecraft' },
   },
   {
     ...pcBase,
     id: 'diablo_iv', displayName: 'Diablo IV', platformGroup: 'pc',
-    library: { gamePass: true, exception: false },
+    library: { gamePass: true, exception: false, installed: false },
     capture: { preferred: 'auto', executableNames: ['Diablo IV.exe'], localSourceName: 'PC Game Capture', geforceNowEnabled: true, geforceNowSourceName: 'GFN Capture', displaySourceName: 'Display Capture', allowDisplayFallback: false },
     twitch: { ...pcBase.twitch, categoryName: 'Diablo IV' },
   },
@@ -55,7 +74,7 @@ export const starterProfiles: GameProfile[] = [
   ...['VALORANT', 'Roblox'].map((name): GameProfile => ({
     ...pcBase,
     id: name.toLowerCase(), displayName: name, platformGroup: 'exception',
-    library: { gamePass: false, exception: true },
+    library: { gamePass: false, exception: true, installed: false },
     capture: { preferred: 'window', executableNames: name === 'VALORANT' ? ['VALORANT-Win64-Shipping.exe'] : ['RobloxPlayerBeta.exe'], localSourceName: 'PC Game Capture', geforceNowEnabled: false, geforceNowSourceName: 'GFN Capture', windowSourceName: 'PC Window Capture', displaySourceName: 'Display Capture', allowDisplayFallback: false },
     twitch: { ...pcBase.twitch, categoryName: name },
   })),

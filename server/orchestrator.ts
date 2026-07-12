@@ -46,34 +46,48 @@ export class StreamOrchestrator {
       const obsWarnings = await this.obs.applyProfile(config, profile, detection.method)
       const services = await this.platforms.prepare(config, profile)
       this.serviceFailures = services.filter((service) => !service.ok).map((service) => `${service.service}: ${service.message}`)
-      const thumbnailWarning = profile.state.thumbnailFilename ? [] : ['サムネイル未登録です。YouTube の前回画像を維持します']
-      const updated = await this.store.saveProfile({ ...profile, state: { ...profile.state, lastCaptureMethod: detection.method, lastUsedAt: new Date().toISOString() } })
+      const thumbnail = services.find((service) => service.service === 'youtube')?.thumbnail
+      const thumbnailWarning = thumbnail?.status === 'failed' || thumbnail?.status === 'not_registered' ? [thumbnail.message] : []
+      const updated = await this.store.saveProfile({
+        ...profile,
+        state: {
+          ...profile.state,
+          lastCaptureMethod: detection.method,
+          lastUsedAt: new Date().toISOString(),
+          thumbnailApplyStatus: thumbnail?.status ?? (profile.state.thumbnailFilename ? 'failed' : 'not_registered'),
+          thumbnailLastAppliedAt: thumbnail?.appliedAt ?? profile.state.thumbnailLastAppliedAt,
+          thumbnailLastError: thumbnail?.status === 'failed' ? thumbnail.message : undefined,
+        },
+      })
       this.selected = updated
       this.method = detection.method
       const warnings = [...detection.warnings, ...obsWarnings, ...thumbnailWarning, ...this.serviceFailures]
       this.warning = warnings[0] ?? null
-      await this.logger.write('profile.applied', { gameId, captureMethod: detection.method, warnings, services })
+      await this.logger.write('profile.applied', { gameId, captureMethod: detection.method, warnings, services, thumbnail })
       return { profile: updated, captureMethod: detection.method, warnings, services }
     })
   }
 
-  async start(allowServiceFailures = false): Promise<void> {
+  async start(allowServiceFailures = false): Promise<string[]> {
     return this.exclusive(async () => {
       if (!this.selected || !this.method) throw new Error('先にゲームを選択してください')
       if (this.serviceFailures.length && !allowServiceFailures) throw new Error(`配信サービスの設定に失敗しています: ${this.serviceFailures.join(' / ')}`)
       const config = await this.store.getConfig()
-      await this.obs.start(config, this.selected, this.captureSource(this.selected, this.method))
+      const warnings = await this.obs.start(config, this.selected, this.captureSource(this.selected, this.method))
       await this.platforms.startComments(config)
-      this.warning = this.serviceFailures[0] ?? null
-      await this.logger.write('stream.started', { gameId: this.selected.id, captureMethod: this.method, serviceFailures: this.serviceFailures })
+      this.warning = warnings[0] ?? this.serviceFailures[0] ?? null
+      await this.logger.write('stream.started', { gameId: this.selected.id, captureMethod: this.method, serviceFailures: this.serviceFailures, warnings })
+      return warnings
     })
   }
 
-  async stop(): Promise<void> {
+  async stop(): Promise<string[]> {
     return this.exclusive(async () => {
-      await this.obs.stop(await this.store.getConfig(), this.selected)
+      const warnings = await this.obs.stop(await this.store.getConfig(), this.selected)
       await this.platforms.stopComments()
-      await this.logger.write('stream.stopped', { gameId: this.selected?.id ?? null })
+      this.warning = warnings[0] ?? null
+      await this.logger.write('stream.stopped', { gameId: this.selected?.id ?? null, warnings })
+      return warnings
     })
   }
 
