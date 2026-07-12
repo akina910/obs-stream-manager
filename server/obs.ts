@@ -58,6 +58,15 @@ export class ObsController {
     }
   }
 
+  private async getReplayBufferStatus(): Promise<{ outputActive: boolean }> {
+    try {
+      return await this.obs.call('GetReplayBufferStatus')
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 604) return { outputActive: false }
+      throw error
+    }
+  }
+
   async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
     await this.connect(config)
     const warnings: string[] = []
@@ -124,7 +133,7 @@ export class ObsController {
         try { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }
         catch (error) { warnings.push(`通常録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
       }
-      const replay = await this.obs.call('GetReplayBufferStatus')
+      const replay = await this.getReplayBufferStatus()
       if (config.features.replayBuffer && !replay.outputActive) {
         try { await this.obs.call('StartReplayBuffer'); this.started.replay = true; startedNow.replay = true }
         catch (error) { warnings.push(`リプレイバッファを開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
@@ -168,7 +177,7 @@ export class ObsController {
     await this.obs.call('SetCurrentProgramScene', { sceneName: profile?.obs.endingScene ?? '90_ENDING' })
     await wait(config.obs.endDelaySeconds * 1000)
     const [stream, record, replay] = await Promise.all([
-      this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.obs.call('GetReplayBufferStatus'),
+      this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.getReplayBufferStatus(),
     ])
     if (this.started.sourceRecord && this.started.sourceRecordSource) await this.callVendor('source-record', 'record_stop', { source: this.started.sourceRecordSource }).catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (this.started.vertical) await this.callVendor('aitum-vertical-canvas', 'stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
@@ -193,7 +202,10 @@ export class ObsController {
     try {
       await this.connect(config)
       const [stream, record, replay, scene] = await Promise.all([
-        this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.obs.call('GetReplayBufferStatus'), this.obs.call('GetCurrentProgramScene'),
+        this.obs.call('GetStreamStatus'),
+        this.obs.call('GetRecordStatus'),
+        this.getReplayBufferStatus(),
+        this.obs.call('GetCurrentProgramScene'),
       ])
       return { obsConnected: true, streaming: stream.outputActive, recording: record.outputActive, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy }
     } catch {
