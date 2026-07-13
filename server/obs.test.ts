@@ -105,6 +105,66 @@ describe('ObsController recording fallbacks', () => {
     })
   })
 
+  it('treats an empty Source Record stop as idempotent and falls back to the Aitum stop hotkey', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'CallVendorRequest') {
+          const vendorName = (data as { vendorName: string }).vendorName
+          if (vendorName === 'source-record') return { responseData: { success: false, error: 'no source found' } }
+          throw new Error('No vendor was found by that name.')
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(new SecretStore())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    config.obs.endDelaySeconds = 0
+
+    await expect(controller.stop(config, null)).resolves.toEqual([])
+    expect(calls).toContainEqual({
+      request: 'TriggerHotkeyByName',
+      data: { hotkeyName: 'VerticalCanvasDockStopRecording' },
+    })
+  })
+
+  it('falls back to the Aitum start hotkey when its websocket vendor is unavailable', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus' || request === 'GetStreamStatus') return { outputActive: false }
+        if (request === 'CallVendorRequest') throw new Error('No vendor was found by that name.')
+        return {}
+      }),
+    }
+    const controller = new ObsController(new SecretStore())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const profile = structuredClone(starterProfiles[0])
+    const config = structuredClone(defaultConfig)
+    config.obs.startDelaySeconds = 0
+    config.features.recording = false
+    config.features.replayBuffer = false
+    config.features.sourceRecord = false
+
+    await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
+    expect(calls).toContainEqual({
+      request: 'TriggerHotkeyByName',
+      data: { hotkeyName: 'VerticalCanvasDockStartRecording' },
+    })
+    expect(calls.map(({ request }) => request)).toContain('StartStream')
+  })
+
   it('disables an existing ducking filter when the selected profile requests zero dB', async () => {
     const toggles: Array<{ filterEnabled: boolean }> = []
     const fake = {
