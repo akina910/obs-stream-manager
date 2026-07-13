@@ -2,6 +2,18 @@ import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus 
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
 export type OAuthProvider = 'youtube' | 'twitch'
+export type OAuthConnectionStage = 'setup_required' | 'ready' | 'authorizing' | 'partial' | 'connected'
+export type OAuthConnectionStatus = {
+  provider: OAuthProvider
+  stage: OAuthConnectionStage
+  appConfigured: boolean
+  authorizationInProgress: boolean
+  accessTokenStored: boolean
+  refreshTokenStored: boolean
+  accountLinked: boolean
+  detail: string
+}
+export type OAuthConnectionStatuses = Record<OAuthProvider, OAuthConnectionStatus>
 export type OAuthStartResult =
   | { mode: 'redirect'; url: string }
   | { mode: 'device'; url: string; userCode: string; requestId: string; intervalMs: number; expiresAt: number }
@@ -17,6 +29,7 @@ export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   status: () => request<RuntimeStatus>('/api/status'),
   comments: () => request<ChatMessage[]>('/api/comments'),
+  oauthStatus: () => request<OAuthConnectionStatuses>('/api/oauth/status'),
   oauthStart: (provider: OAuthProvider, openerOrigin: string) => request<OAuthStartResult>(`/api/oauth/${provider}/start`, { method: 'POST', body: JSON.stringify({ openerOrigin }) }),
   oauthPollTwitch: (requestId: string) => request<{ status: 'pending' | 'complete' }>(`/api/oauth/twitch/device/${encodeURIComponent(requestId)}`),
   profiles: () => request<GameProfile[]>('/api/profiles'),

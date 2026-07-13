@@ -134,12 +134,31 @@ input:focus, select:focus, textarea:focus { border-color: #525966; }
 .file-button { margin: 0; }
 .oauth-row { margin: -2px 0 14px; padding: 8px 0; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #1f232c; }
 .oauth-row span { display: flex; align-items: center; gap: 7px; color: #8e95a2; font-size: 10px; }
-.oauth-connect-grid { display: grid; gap: 8px; }
-.oauth-service { min-width: 0; padding: 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #2a2f3a; border-radius: 9px; background: #0d1016; }
-.oauth-service > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.oauth-service strong { display: flex; align-items: center; gap: 7px; color: #eef1f5; font-size: 11px; }
-.oauth-service small { color: var(--muted); font-size: 9px; }
-.oauth-service button { flex: 0 0 auto; }
+.settings-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.settings-card-heading h3 { margin-bottom: 0; }
+.oauth-refresh { min-height: 30px; padding-inline: 10px; }
+.oauth-connect-grid { display: grid; gap: 10px; margin-top: 12px; }
+.oauth-service { min-width: 0; padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px 14px; border: 1px solid #2a2f3a; border-radius: 10px; background: #0d1016; }
+.oauth-service.oauth-connected { border-color: rgba(140,255,63,.35); background: linear-gradient(120deg, rgba(140,255,63,.055), #0d1016 58%); }
+.oauth-service.oauth-partial { border-color: rgba(255,189,74,.4); }
+.oauth-service-heading { min-width: 0; grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.oauth-service-heading strong { display: flex; align-items: center; gap: 7px; color: #eef1f5; font-size: 12px; }
+.oauth-stage { flex: 0 0 auto; padding: 3px 7px; border: 1px solid #343a46; border-radius: 999px; color: #9299a6; background: #151821; font: 600 8px 'IBM Plex Mono', monospace; }
+.oauth-stage-connected { border-color: rgba(140,255,63,.36); color: var(--accent); background: rgba(140,255,63,.07); }
+.oauth-stage-authorizing { border-color: rgba(97,179,255,.38); color: #79bfff; background: rgba(97,179,255,.07); }
+.oauth-stage-partial { border-color: rgba(255,189,74,.4); color: var(--warning); background: rgba(255,189,74,.07); }
+.oauth-steps { grid-column: 1 / -1; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; list-style: none; }
+.oauth-steps li { min-width: 0; padding: 7px; display: flex; align-items: flex-start; gap: 6px; border: 1px solid #222731; border-radius: 7px; color: #7d8491; background: #0a0c11; font-size: 9px; line-height: 1.35; }
+.oauth-steps li.complete { border-color: rgba(140,255,63,.2); color: #cbd0d8; }
+.oauth-steps li.current { border-color: rgba(97,179,255,.32); color: #dceafa; }
+.oauth-step-marker { width: 17px; height: 17px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #353b47; border-radius: 50%; color: #717886; font: 600 8px 'IBM Plex Mono', monospace; }
+.oauth-steps li.complete .oauth-step-marker { border-color: rgba(140,255,63,.38); color: var(--accent); background: rgba(140,255,63,.08); }
+.oauth-steps li.current .oauth-step-marker { border-color: rgba(97,179,255,.42); color: #79bfff; }
+.oauth-steps li > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.oauth-steps small { overflow: hidden; color: #5f6673; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.oauth-steps li.complete small { color: #8e95a2; }
+.oauth-detail { min-width: 0; margin: 0; line-height: 1.5; }
+.oauth-service > button { flex: 0 0 auto; }
 
 .modal-backdrop { position: fixed; z-index: 100; inset: 0; padding: 18px 12px; display: grid; place-items: center; background: rgba(0,0,0,.72); backdrop-filter: blur(5px); }
 .modal { width: min(520px, 100%); max-height: 92vh; display: flex; flex-direction: column; border: 1px solid #343945; border-radius: 15px; background: #101218; box-shadow: 0 28px 80px rgba(0,0,0,.6); overflow: hidden; }

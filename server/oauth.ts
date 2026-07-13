@@ -10,6 +10,21 @@ export type OAuthStartResult =
 
 export type OAuthPollResult = { status: 'pending' } | { status: 'complete' }
 
+export type OAuthConnectionStage = 'setup_required' | 'ready' | 'authorizing' | 'partial' | 'connected'
+
+export type OAuthConnectionStatus = {
+  provider: OAuthProvider
+  stage: OAuthConnectionStage
+  appConfigured: boolean
+  authorizationInProgress: boolean
+  accessTokenStored: boolean
+  refreshTokenStored: boolean
+  accountLinked: boolean
+  detail: string
+}
+
+export type OAuthConnectionStatuses = Record<OAuthProvider, OAuthConnectionStatus>
+
 type GoogleState = { expiresAt: number; openerOrigin: string; codeVerifier: string }
 type TwitchDeviceSession = {
   clientId: string
@@ -47,16 +62,101 @@ export class OAuthManager {
     return `${this.callbackOrigin}/api/oauth/youtube/callback`
   }
 
-  private prepareStart(openerOrigin: string): void {
-    if (!this.allowedOpenerOrigins.has(openerOrigin)) {
-      throw Object.assign(new Error('OAuth opener origin is not allowed'), { statusCode: 400 })
-    }
+  private purgeExpiredSessions(): void {
     const now = Date.now()
     for (const [state, session] of this.googleStates) {
       if (session.expiresAt < now) this.googleStates.delete(state)
     }
     for (const [requestId, session] of this.twitchDevices) {
       if (session.expiresAt < now) this.twitchDevices.delete(requestId)
+    }
+  }
+
+  private prepareStart(openerOrigin: string): void {
+    if (!this.allowedOpenerOrigins.has(openerOrigin)) {
+      throw Object.assign(new Error('OAuth opener origin is not allowed'), { statusCode: 400 })
+    }
+    this.purgeExpiredSessions()
+  }
+
+  async status(): Promise<OAuthConnectionStatuses> {
+    this.purgeExpiredSessions()
+    const config = await this.store.getConfig()
+    const youtubeRefreshTokenStored = Boolean(this.secrets.get('youtube-refresh-token'))
+    const twitchAccessTokenStored = Boolean(this.secrets.get('twitch-access-token'))
+    const twitchRefreshTokenStored = Boolean(this.secrets.get('twitch-refresh-token'))
+
+    const youtubeAppConfigured = Boolean(config.youtube.clientId)
+    const youtubeAuthorizing = this.googleStates.size > 0
+    const youtubeMetadataMismatch = config.youtube.refreshTokenStored !== youtubeRefreshTokenStored
+    const youtubeStage: OAuthConnectionStage = youtubeAuthorizing
+      ? 'authorizing'
+      : youtubeRefreshTokenStored && youtubeAppConfigured
+        ? 'connected'
+        : youtubeRefreshTokenStored || youtubeMetadataMismatch
+          ? 'partial'
+          : youtubeAppConfigured
+            ? 'ready'
+            : 'setup_required'
+
+    const twitchAppConfigured = Boolean(config.twitch.clientId)
+    const twitchAuthorizing = this.twitchDevices.size > 0
+    const twitchBroadcasterStored = Boolean(config.twitch.broadcasterId)
+    const twitchAccountLinked = twitchAccessTokenStored && twitchRefreshTokenStored && twitchBroadcasterStored
+    const twitchMetadataMismatch = config.twitch.accessTokenStored !== twitchAccessTokenStored
+      || config.twitch.refreshTokenStored !== twitchRefreshTokenStored
+    const twitchStage: OAuthConnectionStage = twitchAuthorizing
+      ? 'authorizing'
+      : twitchAccountLinked && twitchAppConfigured
+        ? 'connected'
+        : twitchAccessTokenStored || twitchRefreshTokenStored || twitchBroadcasterStored || twitchMetadataMismatch
+          ? 'partial'
+          : twitchAppConfigured
+            ? 'ready'
+            : 'setup_required'
+
+    const youtubeDetail = youtubeStage === 'connected'
+      ? 'Google認証と更新トークンの保存が完了しています'
+      : youtubeStage === 'authorizing'
+        ? 'Googleの認証完了を待っています'
+        : youtubeStage === 'partial'
+          ? '保存状態が不完全です。再接続してください'
+          : youtubeStage === 'ready'
+            ? 'OAuthアプリ準備済みです。Google認証を開始できます'
+            : 'OAuthアプリの初回準備が必要です'
+    const twitchDetail = twitchStage === 'connected'
+      ? 'Twitch認証と配信者情報の取得が完了しています'
+      : twitchStage === 'authorizing'
+        ? 'Twitchのデバイス認証完了を待っています'
+        : twitchStage === 'partial'
+          ? twitchAccessTokenStored && twitchRefreshTokenStored && !twitchBroadcasterStored
+            ? 'トークンは保存済みですが、配信者情報が未取得です'
+            : '保存状態が不完全です。再接続してください'
+          : twitchStage === 'ready'
+            ? 'OAuthアプリ準備済みです。Twitch認証を開始できます'
+            : 'OAuthアプリの初回準備が必要です'
+
+    return {
+      youtube: {
+        provider: 'youtube',
+        stage: youtubeStage,
+        appConfigured: youtubeAppConfigured,
+        authorizationInProgress: youtubeAuthorizing,
+        accessTokenStored: false,
+        refreshTokenStored: youtubeRefreshTokenStored,
+        accountLinked: youtubeRefreshTokenStored && youtubeAppConfigured,
+        detail: youtubeDetail,
+      },
+      twitch: {
+        provider: 'twitch',
+        stage: twitchStage,
+        appConfigured: twitchAppConfigured,
+        authorizationInProgress: twitchAuthorizing,
+        accessTokenStored: twitchAccessTokenStored,
+        refreshTokenStored: twitchRefreshTokenStored,
+        accountLinked: twitchAccountLinked && twitchAppConfigured,
+        detail: twitchDetail,
+      },
     }
   }
 
