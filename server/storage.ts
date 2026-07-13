@@ -108,7 +108,7 @@ export class DataStore {
     return true
   }
 
-  async saveThumbnail(profile: GameProfile, bytes: Uint8Array, mime: string): Promise<GameProfile> {
+  async saveThumbnail(profile: GameProfile, bytes: Uint8Array, mime: string, originalName?: string): Promise<GameProfile> {
     const format = await validateThumbnail(bytes, mime)
     const directory = path.join(this.dataDir, 'thumbnails', profile.platformGroup, profile.id)
     await mkdir(directory, { recursive: true })
@@ -120,6 +120,8 @@ export class DataStore {
       state: {
         ...profile.state,
         thumbnailFilename: filename,
+        thumbnailOriginalName: originalName,
+        thumbnailUpdatedAt: new Date().toISOString(),
         thumbnailApplyStatus: profile.state.thumbnailAutoApply ? 'pending' : 'disabled',
         thumbnailLastError: undefined,
       },
@@ -133,6 +135,8 @@ export class DataStore {
       state: {
         ...profile.state,
         thumbnailFilename: undefined,
+        thumbnailOriginalName: undefined,
+        thumbnailUpdatedAt: undefined,
         thumbnailApplyStatus: 'not_registered',
         thumbnailLastAppliedAt: null,
         thumbnailLastError: undefined,
@@ -238,7 +242,7 @@ export class DataStore {
       const thumbnail = thumbnails.get(profile.id)
       const cleanProfile = thumbnail ? profile : { ...profile, state: { ...profile.state, thumbnailFilename: undefined } }
       const saved = await this.saveProfile(cleanProfile)
-      if (thumbnail) await this.saveThumbnail(saved, thumbnail.bytes, thumbnail.mime)
+      if (thumbnail) await this.saveThumbnail(saved, thumbnail.bytes, thumbnail.mime, saved.state.thumbnailOriginalName)
     }
   }
 
@@ -246,7 +250,7 @@ export class DataStore {
     const extension = path.extname(source).toLowerCase()
     const mime = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg'
     const bytes = await readFile(source)
-    return this.saveThumbnail(profile, bytes, mime)
+    return this.saveThumbnail(profile, bytes, mime, path.basename(source))
   }
 
   async cloneDescription(source: string, profileId: string): Promise<string> {

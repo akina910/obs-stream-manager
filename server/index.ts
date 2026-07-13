@@ -75,12 +75,13 @@ app.delete<{ Params: { id: string } }>('/api/profiles/:id', async (request, repl
   return { ok: true }
 })
 
-app.post<{ Params: { id: string }; Body: { mime: string; data: string } }>('/api/profiles/:id/thumbnail', async (request) => {
+app.post<{ Params: { id: string }; Body: { mime: string; data: string; filename?: string } }>('/api/profiles/:id/thumbnail', async (request) => {
   await orchestrator.assertNotStreaming()
   const profile = await store.getProfile(request.params.id)
   if (!profile) throw Object.assign(new Error('ゲームプロファイルが見つかりません'), { statusCode: 404 })
   if (!request.body?.data || !request.body?.mime) throw Object.assign(new Error('画像がありません'), { statusCode: 400 })
-  const saved = await store.saveThumbnail(profile, Buffer.from(request.body.data, 'base64'), request.body.mime)
+  const originalName = typeof request.body.filename === 'string' ? path.basename(request.body.filename).trim().slice(0, 255) || undefined : undefined
+  const saved = await store.saveThumbnail(profile, Buffer.from(request.body.data, 'base64'), request.body.mime, originalName)
   orchestrator.invalidateProfile(profile.id)
   await logger.write('thumbnail.saved', { gameId: profile.id, filename: saved.state.thumbnailFilename })
   return saved

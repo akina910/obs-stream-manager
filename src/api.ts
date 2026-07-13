@@ -16,7 +16,7 @@ export const api = {
   profiles: () => request<GameProfile[]>('/api/profiles'),
   saveProfile: (profile: GameProfile) => request<GameProfile>('/api/profiles', { method: 'POST', body: JSON.stringify(profile) }),
   deleteProfile: (id: string) => request<{ ok: true }>(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  uploadThumbnail: (id: string, mime: string, data: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'POST', body: JSON.stringify({ mime, data }) }),
+  uploadThumbnail: (id: string, mime: string, data: string, filename: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
   deleteThumbnail: (id: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'DELETE' }),
   select: (gameId: string, captureMethod?: CaptureMethod) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: string; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod }) }),
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
