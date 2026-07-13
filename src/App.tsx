@@ -143,7 +143,7 @@ function ProfileEditor({ profile, onClose, onSave, onDelete, onThumbnail, onDele
   )
 }
 
-function SettingsView({ config, onSave, onBackup, onRestore, onSteamSync }: { config: AppConfig; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamSync: () => Promise<void> }) {
+function SettingsView({ config, onSave, onBackup, onRestore, onSteamSync, onOAuthPopup }: { config: AppConfig; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamSync: () => Promise<void>; onOAuthPopup: (popup: Window | null) => void }) {
   const [draft, setDraft] = useState(config)
   const [secrets, setSecrets] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -157,7 +157,8 @@ function SettingsView({ config, onSave, onBackup, onRestore, onSteamSync }: { co
   }
   const save = () => attempt(async () => { await onSave(draft, secrets); setSecrets({}) })
   const openOAuth = (provider: 'youtube' | 'twitch') => {
-    const popup = window.open(`/api/oauth/${provider}/start`, `${provider}-oauth`, 'width=560,height=720')
+    const popup = window.open(`/api/oauth/${provider}/start?openerOrigin=${encodeURIComponent(window.location.origin)}`, `${provider}-oauth`, 'width=560,height=720')
+    onOAuthPopup(popup)
     if (!popup) setSettingsError('認証ウィンドウを開けませんでした。ポップアップを許可してください')
   }
   return (
@@ -186,6 +187,7 @@ export default function App() {
   const [actionBusy, setActionBusy] = useState(false)
   const [comments, setComments] = useState<ChatMessage[]>([])
   const actionLock = useRef(false)
+  const oauthPopup = useRef<Window | null>(null)
 
   const refresh = async () => {
     const data = await api.bootstrap()
@@ -209,7 +211,15 @@ export default function App() {
   }, [status?.streaming])
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(null), 5000); return () => window.clearTimeout(timer) }, [toast])
   useEffect(() => {
-    const authenticated = (event: MessageEvent) => { if (event.origin === window.location.origin && event.data?.type === 'oauth-complete') void api.bootstrap().then((data) => { setConfig(data.config); setStatus(data.status); setToast({ kind: 'success', text: 'OAuth認証が完了しました' }) }) }
+    const authenticated = (event: MessageEvent) => {
+      let origin: URL
+      try { origin = new URL(event.origin) } catch { return }
+      const trustedLoopback = origin.protocol === 'http:' && (origin.hostname === '127.0.0.1' || origin.hostname === 'localhost')
+      if (event.source === oauthPopup.current && trustedLoopback && event.data?.type === 'oauth-complete') {
+        oauthPopup.current = null
+        void api.bootstrap().then((data) => { setConfig(data.config); setStatus(data.status); setToast({ kind: 'success', text: 'OAuth認証が完了しました' }) })
+      }
+    }
     window.addEventListener('message', authenticated)
     return () => window.removeEventListener('message', authenticated)
   }, [])
@@ -262,7 +272,7 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header"><div className="brand"><div className="brand-mark"><Clapperboard size={19} /></div><div><strong>STREAM MANAGER</strong><span>OBS CONTROL DOCK</span></div></div><div className="header-status"><StatusDot active={status.obsConnected} /><span>OBS {status.obsConnected ? '接続中' : '未接続'}</span></div></header>
       <nav className="tabs">{groups.map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} /><span>{label}</span></button>)}</nav>
-      {tab === 'settings' ? <SettingsView key={JSON.stringify(config)} config={config} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamSync={async () => { const result = await api.steamSync(); setProfiles(result.profiles); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : (
+      {tab === 'settings' ? <SettingsView key={JSON.stringify(config)} config={config} onOAuthPopup={(popup) => { oauthPopup.current = popup }} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamSync={async () => { const result = await api.steamSync(); setProfiles(result.profiles); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : (
         <main>
           <div className="search-row"><div className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ゲームを検索" />{search && <button aria-label="検索をクリア" onClick={() => setSearch('')}><X size={14} /></button>}</div><button className="icon-button add" aria-label="ゲームを追加" onClick={addProfile} title="ゲームを追加"><Plus size={18} /></button></div>
           {filtered.some((profile) => profile.favorite) && !search && <section className="library-section"><div className="mini-heading"><Star size={13} />お気に入り</div><div className="game-list">{filtered.filter((profile) => profile.favorite).map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => void selectGame(profile)} onEdit={() => setEditing(profile)} />)}</div></section>}

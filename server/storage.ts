@@ -152,9 +152,10 @@ export class DataStore {
     let created = 0
     let updated = 0
     for (const game of games.values()) {
-      const normalized = game.name.trim().toLocaleLowerCase()
+      const normalized = game.name.trim().toLowerCase()
       const matchByAppId = existing.find((profile) => profile.library.steamAppId === game.appId)
-      const matchByUnlinkedName = existing.find((profile) => profile.library.steamAppId === undefined && profile.displayName.trim().toLocaleLowerCase() === normalized)
+      const unlinkedNameMatches = existing.filter((profile) => profile.library.steamAppId === undefined && profile.displayName.trim().toLowerCase() === normalized)
+      const matchByUnlinkedName = unlinkedNameMatches.length === 1 ? unlinkedNameMatches[0] : undefined
       const match = matchByAppId ?? matchByUnlinkedName
       const base = match ?? createPcProfile(`steam_${game.appId}`, game.name)
       const local = installedById.get(game.appId)

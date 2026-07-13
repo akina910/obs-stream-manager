@@ -9,13 +9,16 @@ export type CaptureMethod = z.infer<typeof CaptureMethodSchema>
 export const ThumbnailApplyStatusSchema = z.enum(['not_registered', 'pending', 'applied', 'failed', 'disabled'])
 export type ThumbnailApplyStatus = z.infer<typeof ThumbnailApplyStatusSchema>
 
+export const GameIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9_-]*$/)
+export const ObsSceneNameSchema = z.string().trim().min(1).max(256)
+
 const ServiceConfigSchema = z.object({
   enabled: z.boolean().default(true),
   titleTemplate: z.string().default('{game}｜ゲーム配信'),
 })
 
 export const GameProfileSchema = z.object({
-  id: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/),
+  id: GameIdSchema,
   displayName: z.string().min(1),
   platformGroup: PlatformGroupSchema,
   favorite: z.boolean().default(false),
@@ -39,9 +42,9 @@ export const GameProfileSchema = z.object({
     allowDisplayFallback: z.boolean().default(false),
   }),
   obs: z.object({
-    sceneName: z.string(),
-    startingScene: z.string().default('00_STARTING'),
-    endingScene: z.string().default('90_ENDING'),
+    sceneName: ObsSceneNameSchema,
+    startingScene: ObsSceneNameSchema.default('00_STARTING'),
+    endingScene: ObsSceneNameSchema.default('90_ENDING'),
   }),
   youtube: ServiceConfigSchema.extend({
     description: z.string().default(''),

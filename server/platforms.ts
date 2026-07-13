@@ -37,6 +37,8 @@ export class PlatformServices {
   private youtubeChatId: string | null = null
   private youtubePageToken: string | undefined
   private youtubeToken: { value: string; expiresAt: number; credentialKey: string } | null = null
+  private twitchToken: { value: string; expiresAt: number; credentialKey: string } | null = null
+  private twitchTokenRefresh: { credentialKey: string; promise: Promise<string> } | null = null
   private commentsGeneration = 0
   private twitchReconnectTimer: NodeJS.Timeout | null = null
 
@@ -145,12 +147,25 @@ export class PlatformServices {
     const clientSecret = this.secrets.get('twitch-client-secret')
     const refreshToken = this.secrets.get('twitch-refresh-token')
     if (config.twitch.clientId && clientSecret && refreshToken) {
-      const response = await fetch('https://id.twitch.tv/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: config.twitch.clientId, client_secret: clientSecret, grant_type: 'refresh_token', refresh_token: refreshToken }) })
-      const token = await response.json() as { access_token?: string; refresh_token?: string; message?: string }
-      if (!response.ok || !token.access_token) throw new Error(token.message ?? 'Twitch token refresh failed')
-      this.secrets.set('twitch-access-token', token.access_token)
-      if (token.refresh_token) this.secrets.set('twitch-refresh-token', token.refresh_token)
-      return token.access_token
+      const credentialKey = crypto.createHash('sha256').update(`${config.twitch.clientId}\0${refreshToken}`).digest('hex')
+      if (this.twitchToken?.credentialKey === credentialKey && this.twitchToken.expiresAt > Date.now() + 60_000) return this.twitchToken.value
+      if (this.twitchTokenRefresh?.credentialKey === credentialKey) return this.twitchTokenRefresh.promise
+      const promise = (async () => {
+        const refreshStartedAt = Date.now()
+        const response = await fetch('https://id.twitch.tv/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: config.twitch.clientId, client_secret: clientSecret, grant_type: 'refresh_token', refresh_token: refreshToken }) })
+        const token = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; message?: string }
+        if (!response.ok || !token.access_token) throw new Error(token.message ?? 'Twitch token refresh failed')
+        const nextRefreshToken = token.refresh_token ?? refreshToken
+        this.secrets.set('twitch-access-token', token.access_token)
+        if (token.refresh_token) this.secrets.set('twitch-refresh-token', token.refresh_token)
+        const nextCredentialKey = crypto.createHash('sha256').update(`${config.twitch.clientId}\0${nextRefreshToken}`).digest('hex')
+        this.twitchToken = { value: token.access_token, expiresAt: refreshStartedAt + (token.expires_in ?? 3600) * 1000, credentialKey: nextCredentialKey }
+        return token.access_token
+      })()
+      this.twitchTokenRefresh = { credentialKey, promise }
+      try { return await promise } finally {
+        if (this.twitchTokenRefresh?.promise === promise) this.twitchTokenRefresh = null
+      }
     }
     const accessToken = this.secrets.get('twitch-access-token')
     if (!accessToken) throw new Error('Twitch OAuth が未設定です')
