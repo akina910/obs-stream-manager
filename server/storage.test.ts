@@ -81,11 +81,70 @@ describe('DataStore', () => {
     const store = await createStore()
     const profile = (await store.listProfiles())[0]
     const thumbnail = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#123456' } }).png().toBuffer()
-    const saved = await store.saveThumbnail(profile, thumbnail, 'image/png')
+    const saved = await store.saveThumbnail(profile, thumbnail, 'image/png', 'my-thumbnail.png')
     expect(saved.state.thumbnailApplyStatus).toBe('pending')
-    const removed = await store.removeThumbnail(saved)
+    expect(saved.state.thumbnailOriginalName).toBe('my-thumbnail.png')
+    expect(saved.state.thumbnailUpdatedAt).toEqual(expect.any(String))
+    const replacedWithoutName = await store.saveThumbnail(saved, thumbnail, 'image/png')
+    expect(replacedWithoutName.state.thumbnailOriginalName).toBeUndefined()
+    const removed = await store.removeThumbnail(replacedWithoutName)
     expect(removed.state.thumbnailFilename).toBeUndefined()
+    expect(removed.state.thumbnailOriginalName).toBeUndefined()
+    expect(removed.state.thumbnailUpdatedAt).toBeUndefined()
     expect(removed.state.thumbnailApplyStatus).toBe('not_registered')
+  })
+
+  it('keeps complete app and game settings with thumbnail metadata across a restart', async () => {
+    const store = await createStore()
+    const config = await store.getConfig()
+    await store.saveConfig({
+      ...config,
+      obs: { ...config.obs, startDelaySeconds: 17, endDelaySeconds: 23 },
+      sources: { ...config.sources, microphone: 'MY_MIC', bgm: 'MY_BGM' },
+      features: { ...config.features, verticalRecording: false },
+    })
+    const profile = (await store.listProfiles()).find((item) => item.id === 'ark_survival_ascended')!
+    const customized = await store.saveProfile({
+      ...profile,
+      capture: { ...profile.capture, localSourceName: 'Persistent Game Capture', allowDisplayFallback: true },
+      obs: { ...profile.obs, sceneName: 'Persistent Scene' },
+      audio: { ...profile.audio, gameDb: -21, duckingDb: 0 },
+      recording: { ...profile.recording, directory: 'D:\\Persistent Recordings', replayBufferSeconds: 240, verticalRecording: false },
+      state: { ...profile.state, thumbnailAutoApply: false },
+    })
+    const thumbnail = await sharp({ create: { width: 16, height: 9, channels: 3, background: '#456789' } }).png().toBuffer()
+    const withThumbnail = await store.saveThumbnail(customized, thumbnail, 'image/png', 'persistent-choice.png')
+    const afterProfileSave = await store.saveProfile({ ...withThumbnail, displayName: 'ARK Persistent Profile' })
+    expect(afterProfileSave.state.thumbnailUpdatedAt).toBe(withThumbnail.state.thumbnailUpdatedAt)
+    expect(afterProfileSave.state.thumbnailOriginalName).toBe('persistent-choice.png')
+
+    const restarted = new DataStore(store.dataDir)
+    await restarted.initialize()
+    const reloadedConfig = await restarted.getConfig()
+    const reloaded = await restarted.getProfile(profile.id)
+
+    expect(reloadedConfig).toMatchObject({
+      obs: { startDelaySeconds: 17, endDelaySeconds: 23 },
+      sources: { microphone: 'MY_MIC', bgm: 'MY_BGM' },
+      features: { verticalRecording: false },
+    })
+    expect(reloaded).toMatchObject({
+      displayName: 'ARK Persistent Profile',
+      capture: { localSourceName: 'Persistent Game Capture', allowDisplayFallback: true },
+      obs: { sceneName: 'Persistent Scene' },
+      audio: { gameDb: -21, duckingDb: 0 },
+      recording: { directory: 'D:\\Persistent Recordings', replayBufferSeconds: 240, verticalRecording: false },
+      state: {
+        thumbnailFilename: withThumbnail.state.thumbnailFilename,
+        thumbnailOriginalName: 'persistent-choice.png',
+        thumbnailUpdatedAt: withThumbnail.state.thumbnailUpdatedAt,
+        thumbnailAutoApply: false,
+        thumbnailApplyStatus: 'disabled',
+      },
+    })
+    expect(reloaded).not.toBeNull()
+    if (!reloaded) throw new Error('Reloaded profile is missing')
+    expect(restarted.getThumbnailPath(reloaded)).not.toBeNull()
   })
 
   it('merges Steam games by App ID or name without duplicating existing profiles', async () => {

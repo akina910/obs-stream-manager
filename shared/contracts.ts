@@ -73,6 +73,8 @@ export const GameProfileSchema = z.object({
     lastCaptureMethod: CaptureMethodSchema.optional(),
     lastUsedAt: z.string().datetime().nullable().default(null),
     thumbnailFilename: z.string().optional(),
+    thumbnailOriginalName: z.string().trim().min(1).max(255).optional(),
+    thumbnailUpdatedAt: z.string().datetime().optional(),
     thumbnailAutoApply: z.boolean().default(true),
     thumbnailApplyStatus: ThumbnailApplyStatusSchema.default('not_registered'),
     thumbnailLastAppliedAt: z.string().datetime().nullable().default(null),

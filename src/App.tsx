@@ -50,13 +50,18 @@ function thumbnailStatusLabel(profile: GameProfile): string {
   return 'サムネ登録済み'
 }
 
+function thumbnailUrl(profile: GameProfile): string {
+  const version = profile.state.thumbnailUpdatedAt ?? profile.state.thumbnailFilename ?? ''
+  return `/api/profiles/${encodeURIComponent(profile.id)}/thumbnail?v=${encodeURIComponent(version)}`
+}
+
 function GameCard({ profile, selected, busy, onSelect, onEdit }: { profile: GameProfile; selected: boolean; busy: boolean; onSelect: () => void; onEdit: () => void }) {
   const initials = profile.displayName.replace(/[^A-Za-z0-9\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu, '').slice(0, 2).toUpperCase()
   return (
     <article className={`game-card ${selected ? 'selected' : ''}`}>
       <button className="game-main" onClick={onSelect} disabled={busy}>
         <div className="cover">
-          {profile.state.thumbnailFilename ? <img src={`/api/profiles/${profile.id}/thumbnail?v=${encodeURIComponent(profile.state.thumbnailFilename)}`} alt="" /> : profile.coverUrl ? <img src={profile.coverUrl} alt="" referrerPolicy="no-referrer" /> : <span>{initials || 'G'}</span>}
+          {profile.state.thumbnailFilename ? <img src={thumbnailUrl(profile)} alt="" /> : profile.coverUrl ? <img src={profile.coverUrl} alt="" referrerPolicy="no-referrer" /> : <span>{initials || 'G'}</span>}
           {profile.favorite && <Star className="favorite-badge" size={13} fill="currentColor" />}
         </div>
         <div className="game-copy">
@@ -70,51 +75,47 @@ function GameCard({ profile, selected, busy, onSelect, onEdit }: { profile: Game
   )
 }
 
-function ProfileEditor({ profile, onClose, onSave, onDelete, onThumbnail, onDeleteThumbnail }: { profile: GameProfile; onClose: () => void; onSave: (profile: GameProfile) => Promise<void>; onDelete: () => Promise<void>; onThumbnail: (file: File, draft: GameProfile) => Promise<void>; onDeleteThumbnail: () => Promise<void> }) {
+function ProfileEditor({ profile, onClose, onSave, onDelete, onThumbnail, onDeleteThumbnail }: { profile: GameProfile; onClose: () => void; onSave: (profile: GameProfile) => Promise<void>; onDelete: () => Promise<void>; onThumbnail: (file: File, draft: GameProfile) => Promise<void>; onDeleteThumbnail: (draft: GameProfile) => Promise<void> }) {
   const [draft, setDraft] = useState(profile)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const savingRef = useRef(false)
+  const modalRef = useRef<HTMLElement>(null)
+  const lastFocusedRef = useRef<HTMLElement | null>(null)
+  useEffect(() => { modalRef.current?.focus() }, [])
   useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !saving) onClose() }
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !savingRef.current) onClose() }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [onClose, saving])
+  }, [onClose])
   const patch = <K extends keyof GameProfile>(key: K, value: GameProfile[K]) => setDraft((current) => ({ ...current, [key]: value }))
-  const save = async () => {
-    if (saving) return
+  const execute = async (operation: () => Promise<void>) => {
+    if (savingRef.current) return
+    savingRef.current = true
+    lastFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setSaving(true); setSaveError(null)
-    try { await onSave(draft); onClose() }
+    try { await operation() }
     catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
-    finally { setSaving(false) }
+    finally {
+      savingRef.current = false; setSaving(false)
+      window.requestAnimationFrame(() => {
+        if (lastFocusedRef.current?.isConnected) lastFocusedRef.current.focus()
+        else modalRef.current?.focus()
+      })
+    }
   }
-  const remove = async () => {
-    if (saving) return
-    setSaving(true); setSaveError(null)
-    try { await onDelete() }
-    catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
-    finally { setSaving(false) }
-  }
-  const upload = async (file: File) => {
-    if (saving) return
-    setSaving(true); setSaveError(null)
-    try { await onThumbnail(file, draft) }
-    catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
-    finally { setSaving(false) }
-  }
-  const removeThumbnail = async () => {
-    if (saving) return
-    setSaving(true); setSaveError(null)
-    try { await onDeleteThumbnail() }
-    catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
-    finally { setSaving(false) }
-  }
+  const save = () => execute(async () => { await onSave(draft); onClose() })
+  const remove = () => execute(onDelete)
+  const upload = (file: File) => execute(() => onThumbnail(file, draft))
+  const removeThumbnail = () => execute(() => onDeleteThumbnail(draft))
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title">
-        <header><div><span className="eyebrow">GAME PROFILE</span><h2 id="profile-editor-title">{profile.displayName}</h2></div><button className="icon-button" aria-label="ゲーム設定を閉じる" onClick={onClose}><X size={18} /></button></header>
-        <div className="modal-body">
-          {saveError && <div className="inline-warning"><AlertTriangle size={14} /><span>{saveError}</span></div>}
+    <div className="modal-backdrop" onMouseDown={(event) => !savingRef.current && event.target === event.currentTarget && onClose()}>
+      <section ref={modalRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title" aria-busy={saving} tabIndex={-1}>
+        <header><div><span className="eyebrow">GAME PROFILE</span><h2 id="profile-editor-title">{profile.displayName}</h2></div><button className="icon-button" aria-label="ゲーム設定を閉じる" disabled={saving} onClick={onClose}><X size={18} /></button></header>
+        <fieldset className="modal-body" disabled={saving}>
+          <span className="sr-only" role="status" aria-live="polite">{saving ? '設定を保存中です' : ''}</span>
+          {saveError && <div className="inline-warning" role="alert"><AlertTriangle size={14} /><span>{saveError}</span></div>}
           <label>表示名<input value={draft.displayName} onChange={(event) => patch('displayName', event.target.value)} /></label>
           <div className="field-row">
             <label>分類<select value={draft.platformGroup} onChange={(event) => patch('platformGroup', event.target.value as PlatformGroup)}><option value="pc">PC</option><option value="switch">Switch</option><option value="exception">例外</option></select></label>
@@ -130,14 +131,16 @@ function ProfileEditor({ profile, onClose, onSave, onDelete, onThumbnail, onDele
           <div className="form-section"><h3>Twitch</h3><label className="check-row"><input type="checkbox" checked={draft.twitch.enabled} onChange={(event) => patch('twitch', { ...draft.twitch, enabled: event.target.checked })} />このゲームで有効</label><label>タイトルテンプレート<input value={draft.twitch.titleTemplate} onChange={(event) => patch('twitch', { ...draft.twitch, titleTemplate: event.target.value })} /></label><div className="field-row"><label>カテゴリ<input value={draft.twitch.categoryName} onChange={(event) => patch('twitch', { ...draft.twitch, categoryName: event.target.value })} /></label><label>タグ（カンマ区切り）<input value={draft.twitch.tags.join(', ')} onChange={(event) => patch('twitch', { ...draft.twitch, tags: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></label></div></div>
           <div className="form-section"><h3>音声</h3><div className="field-row"><label>マイク (dB)<NumericInput value={draft.audio.microphoneDb} onValueChange={(value) => value !== undefined && patch('audio', { ...draft.audio, microphoneDb: value })} /></label><label>ゲーム (dB)<NumericInput value={draft.audio.gameDb} onValueChange={(value) => value !== undefined && patch('audio', { ...draft.audio, gameDb: value })} /></label></div><div className="field-row"><label>Discord (dB)<NumericInput value={draft.audio.discordDb} onValueChange={(value) => value !== undefined && patch('audio', { ...draft.audio, discordDb: value })} /></label><label>BGM (dB)<NumericInput value={draft.audio.bgmDb} onValueChange={(value) => value !== undefined && patch('audio', { ...draft.audio, bgmDb: value })} /></label></div><label>ダッキング目標 (dB)<NumericInput value={draft.audio.duckingDb} onValueChange={(value) => value !== undefined && patch('audio', { ...draft.audio, duckingDb: value })} /></label></div>
           <div className="form-section"><h3>録画</h3><label>録画先<input value={draft.recording.directory} onChange={(event) => patch('recording', { ...draft.recording, directory: event.target.value })} placeholder="D:\Recordings\Game" /></label><label>リプレイ秒数<NumericInput value={draft.recording.replayBufferSeconds} onValueChange={(value) => value !== undefined && patch('recording', { ...draft.recording, replayBufferSeconds: value })} /></label><div className="profile-flags"><label className="check-row"><input type="checkbox" checked={draft.recording.enabled} onChange={(event) => patch('recording', { ...draft.recording, enabled: event.target.checked })} />通常録画</label><label className="check-row"><input type="checkbox" checked={draft.recording.sourceRecord} onChange={(event) => patch('recording', { ...draft.recording, sourceRecord: event.target.checked })} />Source Record</label><label className="check-row"><input type="checkbox" checked={draft.recording.verticalRecording} onChange={(event) => patch('recording', { ...draft.recording, verticalRecording: event.target.checked })} />Aitum Vertical録画</label></div></div>
+          {draft.state.thumbnailFilename && <div className="thumbnail-preview"><img src={thumbnailUrl(draft)} alt={`${draft.displayName}の登録済みサムネイル`} /><div><strong>登録中のサムネイル</strong><span title={draft.state.thumbnailOriginalName ?? draft.state.thumbnailFilename}>{draft.state.thumbnailOriginalName ?? draft.state.thumbnailFilename}</span><small>{thumbnailStatusLabel(draft)}{draft.state.thumbnailUpdatedAt ? ` · ${new Date(draft.state.thumbnailUpdatedAt).toLocaleString('ja-JP')}` : ''}</small></div></div>}
+          {draft.state.thumbnailLastError && <div className="inline-warning" role="status"><AlertTriangle size={14} /><span>{draft.state.thumbnailLastError}</span></div>}
           <button className="thumbnail-drop" disabled={saving} onClick={() => fileRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file) }}>
             <ImagePlus size={22} /><span>{draft.state.thumbnailFilename ? 'サムネイルを差し替える' : 'サムネイルを登録する'}</span><small>PNG / JPG / WEBP · 最大4MB</small>
           </button>
-          <input ref={fileRef} hidden disabled={saving} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file) }} />
+          <input ref={fileRef} hidden disabled={saving} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void upload(file) }} />
           {draft.state.thumbnailFilename && <div className="thumbnail-controls"><label className="check-row"><input type="checkbox" checked={draft.state.thumbnailAutoApply} onChange={(event) => patch('state', { ...draft.state, thumbnailAutoApply: event.target.checked, thumbnailApplyStatus: event.target.checked ? 'pending' : 'disabled', thumbnailLastError: undefined })} />選択時にYouTubeへ自動適用</label><button className="danger-link" disabled={saving} onClick={() => void removeThumbnail()}><Trash2 size={14} />サムネイルを削除</button></div>}
           <label className="check-row"><input type="checkbox" checked={draft.favorite} onChange={(event) => patch('favorite', event.target.checked)} /><Heart size={16} />お気に入りに固定</label>
-        </div>
-        <footer><button className="danger-link" disabled={saving} onClick={() => void remove()}>削除</button><div><button className="secondary" onClick={onClose}>キャンセル</button><button className="primary small" disabled={saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存</button></div></footer>
+        </fieldset>
+        <footer><button className="danger-link" disabled={saving} onClick={() => void remove()}>削除</button><div><button className="secondary" disabled={saving} onClick={onClose}>キャンセル</button><button className="primary small" disabled={saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存</button></div></footer>
       </section>
     </div>
   )
@@ -257,13 +260,33 @@ export default function App() {
   const uploadThumbnail = async (profile: GameProfile, file: File) => {
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('PNG、JPG、WEBPを選択してください')
     if (file.size > 4 * 1024 * 1024) throw new Error('サムネイルは4MB以下にしてください')
-    const existing = profiles.find((item) => item.id === profile.id)
-    const persisted = existing ?? await api.saveProfile(profile)
-    if (!existing) setProfiles((current) => [...current.filter((item) => item.id !== persisted.id), persisted])
-    const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => { const encoded = String(reader.result).split(',')[1]; if (encoded) resolve(encoded); else reject(new Error('サムネイルの読み込みに失敗しました')) }; reader.onerror = () => reject(new Error('サムネイルの読み込みに失敗しました')); reader.readAsDataURL(file) })
-    const saved = await api.uploadThumbnail(persisted.id, file.type, data)
-    const editorProfile = existing ? { ...profile, state: saved.state } : saved
-    setProfiles((current) => current.map((item) => item.id === saved.id ? { ...item, state: saved.state } : item)); setEditing(editorProfile); setStatus(await api.status()); setToast({ kind: 'success', text: 'サムネイルを登録しました。配信前にゲームを選び直してください' })
+    const persisted = await api.saveProfile(profile)
+    setProfiles((current) => [...current.filter((item) => item.id !== persisted.id), persisted])
+    let saved: GameProfile
+    try {
+      const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => { const encoded = String(reader.result).split(',')[1]; if (encoded) resolve(encoded); else reject(new Error('サムネイルの読み込みに失敗しました')) }; reader.onerror = () => reject(new Error('サムネイルの読み込みに失敗しました')); reader.readAsDataURL(file) })
+      saved = await api.uploadThumbnail(persisted.id, file.type, data, file.name)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`設定は保存されましたが、サムネイルの更新に失敗しました: ${message}`)
+    }
+    setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setEditing(saved)
+    const latest = await api.status().catch(() => null); if (latest) setStatus(latest)
+    setToast({ kind: 'success', text: '設定とサムネイルを保存しました。以後は自動で使い回します' })
+  }
+
+  const deleteThumbnail = async (draft: GameProfile) => {
+    if (!window.confirm('登録済みサムネイルを削除しますか？')) return
+    const persisted = await api.saveProfile(draft)
+    let saved: GameProfile
+    try { saved = await api.deleteThumbnail(persisted.id) }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`設定は保存されましたが、サムネイルの削除に失敗しました: ${message}`)
+    }
+    setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setEditing(saved)
+    const latest = await api.status().catch(() => null); if (latest) setStatus(latest)
+    setToast({ kind: 'success', text: '設定を維持したままサムネイルを削除しました' })
   }
 
   if (loading || !config || !status) return <div className="loading-screen"><LoaderCircle className="spin" /><span>ストリーム環境を読み込み中</span></div>
@@ -283,7 +306,7 @@ export default function App() {
       {tab !== 'settings' && <aside className="control-panel">
         {status.streaming && !selected ? <><div className="inline-warning"><AlertTriangle size={14} /><span>アプリ再起動後の配信を検出しました。安全に終了できます。</span></div><div className="main-actions"><button className="stop-button" disabled={actionBusy || status.busy} onClick={() => void run(async () => { const result = await api.stop(); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信を終了しました' }) })}>{actionBusy ? <LoaderCircle className="spin" /> : <CircleStop />}配信終了</button></div></> : selected ? <><div className="selection-summary"><div className="selection-icon">{selected.displayName.slice(0, 1)}</div><div><span>選択中</span><strong>{selected.displayName}</strong><small>{status.captureMethod ? captureLabels[status.captureMethod] : '未判定'} · {thumbnailStatusLabel(selected)}</small></div></div>{!selected.state.thumbnailFilename && !status.streaming && <button className="secondary thumbnail-first-register" onClick={() => setEditing(selected)}><ImagePlus size={15} />初回サムネイルを登録</button>}{status.warning && <div className="inline-warning"><AlertTriangle size={14} /><span>{status.warning}</span></div>}<div className="stream-indicators"><span><StatusDot active={status.streaming} />配信</span><span><StatusDot active={status.recording} />録画</span><span><StatusDot active={status.replayBuffer} />リプレイ</span><span><StatusDot active={status.sourceRecord} />素材</span><span><StatusDot active={status.verticalRecording} />縦録画</span></div><div className="main-actions">{status.streaming ? <button className="stop-button" disabled={actionBusy || status.busy} onClick={() => void run(async () => { const result = await api.stop(); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信を終了しました' }) })}>{actionBusy ? <LoaderCircle className="spin" /> : <CircleStop />}配信終了</button> : <button className="start-button" disabled={actionBusy || status.busy || !status.obsConnected} onClick={start}>{actionBusy ? <LoaderCircle className="spin" /> : <Play fill="currentColor" />}配信開始</button>}<button className="replay-button" aria-label="リプレイを保存" disabled={!status.replayBuffer} onClick={() => void run(async () => { await api.replay(); setToast({ kind: 'success', text: 'クリップを保存しました' }) })}><Clapperboard size={17} /></button></div></> : <div className="no-selection"><Radio size={22} /><div><strong>ゲームを選択</strong><span>プロファイルを適用して配信準備を開始</span></div></div>}
       </aside>}
-      {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}`} profile={editing} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(`${editing.displayName}を削除しますか？`)) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => run(() => uploadThumbnail(draft, file))} onDeleteThumbnail={async () => { if (!window.confirm('登録済みサムネイルを削除しますか？')) return; const saved = await api.deleteThumbnail(editing.id); setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item)); setEditing(saved); setStatus(await api.status()); setToast({ kind: 'success', text: 'サムネイルを削除しました' }) }} />}
+      {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(`${editing.displayName}を削除しますか？`)) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} />}
       {toast && <div className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={17} /> : <AlertTriangle size={17} />}<span>{toast.text}</span><button onClick={() => setToast(null)}><X size={15} /></button></div>}
     </div>
   )
