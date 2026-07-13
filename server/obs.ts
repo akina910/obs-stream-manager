@@ -67,6 +67,20 @@ export class ObsController {
     }
   }
 
+  private async setCompatibleProfileParameter(
+    options: ReadonlyArray<{ parameterCategory: string; parameterName: string }>,
+    parameterValue: string,
+  ): Promise<boolean> {
+    let applied = false
+    for (const { parameterCategory, parameterName } of options) {
+      try {
+        await this.obs.call('SetProfileParameter', { parameterCategory, parameterName, parameterValue })
+        applied = true
+      } catch { /* OBS output modes expose different parameter categories */ }
+    }
+    return applied
+  }
+
   async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
     await this.connect(config)
     const warnings: string[] = []
@@ -93,28 +107,35 @@ export class ObsController {
 
     const activeAudio = method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame
     for (const source of [config.sources.pcGame, config.sources.geforceNow, config.sources.switchGame]) await this.setMuted(source, source !== activeAudio)
-    if (profile.audio.duckingDb < 0) {
-      const filters = await this.obs.call('GetSourceFilterList', { sourceName: activeAudio }).catch(() => null)
-      const compressor = filters?.filters.find((filter) => {
-        const kind = typeof filter.filterKind === 'string' ? filter.filterKind : ''
-        const name = typeof filter.filterName === 'string' ? filter.filterName : ''
-        return kind.includes('compressor') || name.toLowerCase().includes('duck')
-      })
-      const compressorName = typeof compressor?.filterName === 'string' ? compressor.filterName : null
-      if (compressorName) await this.obs.call('SetSourceFilterEnabled', { sourceName: activeAudio, filterName: compressorName, filterEnabled: true }).catch(() => warnings.push(`ゲーム音ダッキングフィルター「${compressorName}」を有効化できませんでした`))
-      else warnings.push(`ゲーム音のダッキング目標 ${profile.audio.duckingDb} dB に対応するコンプレッサーフィルターが「${activeAudio}」にありません`)
+    const filters = await this.obs.call('GetSourceFilterList', { sourceName: activeAudio }).catch(() => null)
+    const compressor = filters?.filters.find((filter) => {
+      const kind = typeof filter.filterKind === 'string' ? filter.filterKind : ''
+      const name = typeof filter.filterName === 'string' ? filter.filterName : ''
+      return kind.includes('compressor') || name.toLowerCase().includes('duck')
+    })
+    const compressorName = typeof compressor?.filterName === 'string' ? compressor.filterName : null
+    const duckingEnabled = profile.audio.duckingDb < 0
+    if (compressorName) {
+      await this.obs.call('SetSourceFilterEnabled', { sourceName: activeAudio, filterName: compressorName, filterEnabled: duckingEnabled })
+        .catch(() => warnings.push(`ゲーム音ダッキングフィルター「${compressorName}」を${duckingEnabled ? '有効化' : '無効化'}できませんでした`))
+    } else if (duckingEnabled) {
+      warnings.push(`ゲーム音のダッキング目標 ${profile.audio.duckingDb} dB に対応するコンプレッサーフィルターが「${activeAudio}」にありません`)
     }
 
     const { outputActive } = await this.obs.call('GetRecordStatus')
     if (!outputActive && profile.recording.directory) {
-      for (const [parameterCategory, parameterName] of [['AdvOut', 'RecFilePath'], ['SimpleOutput', 'FilePath']] as const) {
-        await this.obs.call('SetProfileParameter', { parameterCategory, parameterName, parameterValue: profile.recording.directory }).catch(() => undefined)
-      }
+      const applied = await this.setCompatibleProfileParameter([
+        { parameterCategory: 'AdvOut', parameterName: 'RecFilePath' },
+        { parameterCategory: 'SimpleOutput', parameterName: 'FilePath' },
+      ], profile.recording.directory)
+      if (!applied) warnings.push(`録画保存先「${profile.recording.directory}」をOBSプロファイルへ反映できませんでした`)
     }
     if (!outputActive) {
-      for (const category of ['AdvOut', 'SimpleOutput']) {
-        await this.obs.call('SetProfileParameter', { parameterCategory: category, parameterName: 'RecRBTime', parameterValue: String(profile.recording.replayBufferSeconds) }).catch(() => undefined)
-      }
+      const applied = await this.setCompatibleProfileParameter([
+        { parameterCategory: 'AdvOut', parameterName: 'RecRBTime' },
+        { parameterCategory: 'SimpleOutput', parameterName: 'RecRBTime' },
+      ], String(profile.recording.replayBufferSeconds))
+      if (!applied) warnings.push(`リプレイバッファ時間 ${profile.recording.replayBufferSeconds} 秒をOBSプロファイルへ反映できませんでした`)
     }
     return warnings
   }
@@ -179,10 +200,12 @@ export class ObsController {
     const [stream, record, replay] = await Promise.all([
       this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.getReplayBufferStatus(),
     ])
-    if (this.started.sourceRecord && this.started.sourceRecordSource) await this.callVendor('source-record', 'record_stop', { source: this.started.sourceRecordSource }).catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    if (this.started.vertical) await this.callVendor('aitum-vertical-canvas', 'stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    if (replay.outputActive && this.started.replay) await this.obs.call('StopReplayBuffer').catch((error) => warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    if (record.outputActive && this.started.record) await this.obs.call('StopRecord').catch((error) => warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    // The Stop action is a global teardown by design. OBS remains authoritative after this
+    // process restarts, so do not rely on the controller's transient `started` flags here.
+    await this.callVendor('source-record', 'record_stop').catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    await this.callVendor('aitum-vertical-canvas', 'stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    if (replay.outputActive) await this.obs.call('StopReplayBuffer').catch((error) => warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    if (record.outputActive) await this.obs.call('StopRecord').catch((error) => warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (stream.outputActive) await this.obs.call('StopStream').catch((error) => warnings.push(`配信を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     this.started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
     return warnings

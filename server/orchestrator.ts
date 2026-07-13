@@ -92,13 +92,17 @@ export class StreamOrchestrator {
   }
 
   async saveReplay(): Promise<void> {
-    await this.obs.saveReplay(await this.store.getConfig())
-    await this.logger.write('replay.saved', { gameId: this.selected?.id })
+    return this.exclusive(async () => {
+      await this.obs.saveReplay(await this.store.getConfig())
+      await this.logger.write('replay.saved', { gameId: this.selected?.id })
+    })
   }
 
   async switchScene(sceneName: string): Promise<void> {
-    await this.obs.switchScene(await this.store.getConfig(), sceneName)
-    await this.logger.write('scene.changed', { sceneName })
+    return this.exclusive(async () => {
+      await this.obs.switchScene(await this.store.getConfig(), sceneName)
+      await this.logger.write('scene.changed', { sceneName })
+    })
   }
 
   async getStatus(): Promise<RuntimeStatus> {

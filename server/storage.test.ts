@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import sharp from 'sharp'
 import { afterEach, describe, expect, it } from 'vitest'
-import { starterProfiles } from './defaults.js'
+import { createPcProfile, starterProfiles } from './defaults.js'
 import { DataStore } from './storage.js'
 
 const directories: string[] = []
@@ -35,6 +35,7 @@ describe('DataStore', () => {
     const saved = await store.saveProfile({ ...profile, favorite: !profile.favorite, state: { ...profile.state, lastUsedAt: new Date().toISOString() } })
     expect((await store.getProfile(saved.id))?.favorite).toBe(saved.favorite)
     await expect(store.saveProfile({ ...profile, id: '../escape' })).rejects.toThrow()
+    await expect(store.saveProfile({ ...profile, id: `a${'b'.repeat(128)}` })).rejects.toThrow()
   })
 
   it('moves a profile instead of duplicating it when its platform group changes', async () => {
@@ -108,5 +109,18 @@ describe('DataStore', () => {
     )
     expect(result.profiles.filter((profile) => profile.displayName === ark.displayName)).toHaveLength(2)
     expect(result.profiles.filter((profile) => [ark.library.steamAppId, 999999].includes(profile.library.steamAppId))).toHaveLength(2)
+  })
+
+  it('does not link a Steam App ID to an arbitrary profile when unlinked names are ambiguous', async () => {
+    const store = await createStore()
+    await store.saveProfile(createPcProfile('duplicate_one', 'Duplicate Game'))
+    await store.saveProfile(createPcProfile('duplicate_two', 'Duplicate Game'))
+
+    const result = await store.syncSteamLibrary([{ appId: 777777, name: 'Duplicate Game' }], [])
+
+    expect(result.created).toBe(1)
+    expect(result.updated).toBe(0)
+    expect(result.profiles.find((profile) => profile.library.steamAppId === 777777)?.id).toBe('steam_777777')
+    expect(result.profiles.filter((profile) => profile.displayName === 'Duplicate Game' && profile.library.steamAppId === undefined)).toHaveLength(2)
   })
 })

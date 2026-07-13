@@ -5,7 +5,7 @@ import cors from '@fastify/cors'
 import fastifyStatic from '@fastify/static'
 import Fastify from 'fastify'
 import { ZodError } from 'zod'
-import { AppConfigSchema, CaptureMethodSchema, GameProfileSchema } from '../shared/contracts.js'
+import { AppConfigSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
 import { CaptureDetector } from './capture.js'
 import { AppLogger } from './logger.js'
 import { ObsController } from './obs.js'
@@ -25,9 +25,16 @@ const obs = new ObsController(secrets)
 const platforms = new PlatformServices(secrets, store)
 const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger)
 const listenPort = Number(process.env.PORT ?? 4317)
-const oauth = new OAuthManager(store, secrets, `http://127.0.0.1:${listenPort}`)
+const callbackOrigin = `http://127.0.0.1:${listenPort}`
+const oauth = new OAuthManager(store, secrets, callbackOrigin)
+const allowedOAuthOpenerOrigins = new Set([
+  callbackOrigin,
+  `http://localhost:${listenPort}`,
+  'http://127.0.0.1:4318',
+  'http://localhost:4318',
+])
 
-export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 64 * 1024 * 1024 })
+export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
 
 app.setErrorHandler((error, _request, reply) => {
@@ -42,15 +49,17 @@ app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
 app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
 app.get('/api/status', async () => orchestrator.getStatus())
 app.get('/api/comments', async () => platforms.getComments())
-app.get<{ Params: { provider: 'youtube' | 'twitch' } }>('/api/oauth/:provider/start', async (request, reply) => {
+app.get<{ Params: { provider: 'youtube' | 'twitch' }; Querystring: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
   if (!['youtube', 'twitch'].includes(request.params.provider)) return reply.status(404).send({ error: 'Unknown OAuth provider' })
-  return reply.redirect(await oauth.authorizationUrl(request.params.provider))
+  const openerOrigin = request.query.openerOrigin ?? callbackOrigin
+  if (!allowedOAuthOpenerOrigins.has(openerOrigin)) throw Object.assign(new Error('OAuth opener origin is not allowed'), { statusCode: 400 })
+  return reply.redirect(await oauth.authorizationUrl(request.params.provider, openerOrigin))
 })
 app.get<{ Params: { provider: 'youtube' | 'twitch' }; Querystring: { code?: string; state?: string; error?: string } }>('/api/oauth/:provider/callback', async (request, reply) => {
   if (request.query.error) throw new Error(`OAuth authorization failed: ${request.query.error}`)
   if (!request.query.code || !request.query.state) throw new Error('OAuth callback is incomplete')
-  await oauth.exchange(request.params.provider, request.query.code, request.query.state)
-  return reply.type('text/html').send('<!doctype html><meta charset="utf-8"><title>認証完了</title><body style="background:#0b0d12;color:#fff;font-family:sans-serif;padding:40px"><h1>認証が完了しました</h1><p>このウィンドウは閉じて構いません。</p><script>window.opener?.postMessage({type:"oauth-complete"},"*");setTimeout(()=>window.close(),800)</script></body>')
+  const openerOrigin = await oauth.exchange(request.params.provider, request.query.code, request.query.state)
+  return reply.type('text/html').send(`<!doctype html><meta charset="utf-8"><title>認証完了</title><body style="background:#0b0d12;color:#fff;font-family:sans-serif;padding:40px"><h1>認証が完了しました</h1><p>このウィンドウは閉じて構いません。</p><script>window.opener?.postMessage({type:"oauth-complete"},${JSON.stringify(openerOrigin)});setTimeout(()=>window.close(),800)</script></body>`)
 })
 app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
@@ -97,12 +106,12 @@ app.get<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (reques
 
 app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', async (request) => {
   const override = request.body.captureMethod ? CaptureMethodSchema.parse(request.body.captureMethod) : undefined
-  return orchestrator.select(request.body.gameId, override)
+  return orchestrator.select(GameIdSchema.parse(request.body.gameId), override)
 })
 app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
-app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(request.body.sceneName); return { ok: true } })
+app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })
 
 const secretNames: SecretName[] = ['obs-password', 'steam-api-key', 'youtube-client-secret', 'youtube-refresh-token', 'twitch-client-secret', 'twitch-access-token', 'twitch-refresh-token']
 app.put<{ Body: { config: unknown; secrets?: Partial<Record<SecretName, string>> } }>('/api/config', async (request) => {

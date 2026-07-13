@@ -34,3 +34,33 @@ describe('PlatformServices thumbnail preparation', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('PlatformServices Twitch token management', () => {
+  it('deduplicates refreshes and reuses the rotated refresh-token cache key', async () => {
+    const secrets = new Map([
+      ['twitch-client-secret', 'client-secret'],
+      ['twitch-refresh-token', 'refresh-one'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      access_token: 'access-two',
+      refresh_token: 'refresh-two',
+      expires_in: 3600,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const config = (await import('./defaults.js')).defaultConfig
+    const configured = structuredClone(config)
+    configured.twitch.clientId = 'client-id'
+    const accessToken = (platforms as unknown as { twitchAccessToken: (value: typeof configured) => Promise<string> }).twitchAccessToken.bind(platforms)
+
+    await expect(Promise.all([accessToken(configured), accessToken(configured)])).resolves.toEqual(['access-two', 'access-two'])
+    await expect(accessToken(configured)).resolves.toBe('access-two')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(secrets.get('twitch-refresh-token')).toBe('refresh-two')
+    expect(secrets.get('twitch-access-token')).toBe('access-two')
+  })
+})
