@@ -30,6 +30,50 @@ afterEach(() => {
 })
 
 describe('OAuthManager one-button authorization', () => {
+  it('reports setup, ready, and in-progress stages from the real OAuth session state', async () => {
+    const test = harness()
+
+    await expect(test.oauth.status()).resolves.toMatchObject({
+      youtube: { stage: 'setup_required', appConfigured: false, refreshTokenStored: false },
+      twitch: { stage: 'setup_required', appConfigured: false, accessTokenStored: false, refreshTokenStored: false },
+    })
+
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-public-client'
+    test.setConfig(configured)
+    await expect(test.oauth.status()).resolves.toMatchObject({ youtube: { stage: 'ready', appConfigured: true } })
+
+    await test.oauth.start('youtube', 'http://127.0.0.1:4417')
+    await expect(test.oauth.status()).resolves.toMatchObject({ youtube: { stage: 'authorizing', authorizationInProgress: true } })
+  })
+
+  it('uses the OS secret store as connection truth and exposes incomplete Twitch state', async () => {
+    const test = harness()
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-public-client'
+    configured.youtube.refreshTokenStored = true
+    configured.twitch.clientId = 'twitch-public-client'
+    configured.twitch.accessTokenStored = true
+    test.setConfig(configured)
+
+    await expect(test.oauth.status()).resolves.toMatchObject({
+      youtube: { stage: 'partial', refreshTokenStored: false, accountLinked: false },
+      twitch: { stage: 'partial', accessTokenStored: false, refreshTokenStored: false, accountLinked: false },
+    })
+
+    test.secretValues.set('youtube-refresh-token', 'youtube-refresh')
+    test.secretValues.set('twitch-access-token', 'twitch-access')
+    test.secretValues.set('twitch-refresh-token', 'twitch-refresh')
+    configured.twitch.refreshTokenStored = true
+    configured.twitch.broadcasterId = 'broadcaster-id'
+    test.setConfig(configured)
+
+    await expect(test.oauth.status()).resolves.toMatchObject({
+      youtube: { stage: 'connected', refreshTokenStored: true, accountLinked: true },
+      twitch: { stage: 'connected', accessTokenStored: true, refreshTokenStored: true, accountLinked: true },
+    })
+  })
+
   it('starts and exchanges Google desktop OAuth with PKCE and no required client secret', async () => {
     const test = harness()
     const configured = structuredClone(defaultConfig)

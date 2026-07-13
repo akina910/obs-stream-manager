@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleStop, Clapperboard, Gamepad2,
   Heart, ImagePlus, Library, LoaderCircle, MessageSquareText, MonitorUp, Play, Plus, Radio,
   RefreshCw, Save, Search, Settings, SlidersHorizontal, Sparkles, Star, Trash2, Upload, X, Zap,
 } from 'lucide-react'
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
-import { api, type OAuthProvider } from './api'
+import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider } from './api'
 
 type Tab = PlatformGroup | 'settings'
 type Toast = { kind: 'success' | 'error' | 'warning'; text: string }
+type OAuthProgress = Partial<Record<OAuthProvider, string>>
 
 const groups: Array<{ id: Tab; label: string; icon: typeof Library }> = [
   { id: 'pc', label: 'PC', icon: Library },
@@ -23,6 +24,52 @@ const captureLabels: Record<CaptureMethod, string> = {
 
 function StatusDot({ active }: { active: boolean }) {
   return <span className={`status-dot ${active ? 'active' : ''}`} />
+}
+
+const oauthStageLabels: Record<OAuthConnectionStatus['stage'], string> = {
+  setup_required: '初回準備が必要',
+  ready: '認証開始できます',
+  authorizing: '認証待ち',
+  partial: '一部のみ完了',
+  connected: '接続済み',
+}
+
+function OAuthServiceCard({ status, progress, saving, onConnect }: { status: OAuthConnectionStatus; progress?: string; saving: boolean; onConnect: () => void }) {
+  const isYoutube = status.provider === 'youtube'
+  const serviceName = isYoutube ? 'YouTube' : 'Twitch'
+  const steps = isYoutube
+    ? [
+        { label: 'OAuthアプリ', detail: status.appConfigured ? '設定済み' : '未設定', complete: status.appConfigured },
+        { label: 'Googleアカウント認証', detail: status.refreshTokenStored ? '完了' : status.authorizationInProgress ? '承認待ち' : '未完了', complete: status.refreshTokenStored },
+        { label: '更新トークン', detail: status.refreshTokenStored ? 'Windowsへ保存済み' : '未保存', complete: status.refreshTokenStored },
+      ]
+    : [
+        { label: 'OAuthアプリ', detail: status.appConfigured ? '設定済み' : '未設定', complete: status.appConfigured },
+        { label: 'Twitchアカウント認証', detail: status.accessTokenStored && status.refreshTokenStored ? '完了' : status.authorizationInProgress ? '承認待ち' : '未完了', complete: status.accessTokenStored && status.refreshTokenStored },
+        { label: '配信者情報', detail: status.accountLinked ? '取得済み' : '未取得', complete: status.accountLinked },
+      ]
+  const buttonLabel = status.stage === 'setup_required'
+    ? '初回準備を開く'
+    : status.stage === 'connected'
+      ? `${serviceName}で再接続`
+      : `${serviceName}で接続`
+
+  return (
+    <article className={`oauth-service oauth-${status.stage}`} data-testid={`oauth-${status.provider}`}>
+      <div className="oauth-service-heading">
+        <strong><StatusDot active={status.stage === 'connected'} />{serviceName}</strong>
+        <span className={`oauth-stage oauth-stage-${status.stage}`}>{oauthStageLabels[status.stage]}</span>
+      </div>
+      <ol className="oauth-steps" aria-label={`${serviceName} 接続状況`}>
+        {steps.map((step, index) => {
+          const waiting = status.authorizationInProgress && index === 1
+          return <li key={step.label} className={step.complete ? 'complete' : waiting ? 'current' : 'pending'} aria-current={waiting ? 'step' : undefined}><span className="oauth-step-marker">{step.complete ? <Check size={12} /> : waiting ? <LoaderCircle className="spin" size={12} /> : index + 1}</span><span>{step.label}<small>{step.detail}</small></span></li>
+        })}
+      </ol>
+      <p className="oauth-detail" role="status">{progress ?? status.detail}</p>
+      <button className="secondary" disabled={saving} onClick={onConnect}>{buttonLabel}</button>
+    </article>
+  )
 }
 
 type NumericInputProps = { value: number | undefined; allowEmpty?: boolean; onValueChange: (value: number | undefined) => void }
@@ -146,7 +193,7 @@ function ProfileEditor({ profile, onClose, onSave, onDelete, onThumbnail, onDele
   )
 }
 
-function SettingsView({ config, onSave, onBackup, onRestore, onSteamSync, onOAuthConnect }: { config: AppConfig; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamSync: () => Promise<void>; onOAuthConnect: (provider: OAuthProvider) => Promise<void> }) {
+function SettingsView({ config, oauthStatus, oauthProgress, onSave, onBackup, onRestore, onSteamSync, onOAuthConnect, onOAuthRefresh }: { config: AppConfig; oauthStatus: OAuthConnectionStatuses; oauthProgress: OAuthProgress; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamSync: () => Promise<void>; onOAuthConnect: (provider: OAuthProvider) => Promise<void>; onOAuthRefresh: () => Promise<void> }) {
   const [draft, setDraft] = useState(config)
   const [secrets, setSecrets] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -165,7 +212,7 @@ function SettingsView({ config, onSave, onBackup, onRestore, onSteamSync, onOAut
       <div className="section-heading"><div><span className="eyebrow">CONNECTIONS</span><h2>接続と動作設定</h2></div><button className="primary small" onClick={() => void save()} disabled={saving}>{saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存</button></div>
       {settingsError && <div className="inline-warning" role="alert"><AlertTriangle size={14} /><span>{settingsError}</span></div>}
       <section className="settings-card"><h3><Radio size={17} />OBS WebSocket</h3><label>接続URL<input value={draft.obs.url} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, url: event.target.value } })} /></label><label>パスワード<input type="password" autoComplete="off" placeholder={draft.obs.passwordStored ? '保存済み（変更時のみ入力）' : 'OS資格情報ストアへ保存'} value={secrets['obs-password'] ?? ''} onChange={(event) => secret('obs-password', event.target.value)} /></label><div className="field-row"><label>開始待機（秒）<input type="number" value={draft.obs.startDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, startDelaySeconds: Number(event.target.value) } })} /></label><label>終了待機（秒）<input type="number" value={draft.obs.endDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, endDelaySeconds: Number(event.target.value) } })} /></label></div></section>
-      <section className="settings-card"><h3><MonitorUp size={17} />配信サービス</h3><p>Client ID や Secret の入力は不要です。接続ボタンからアカウントを選ぶだけで、このPCへ安全に認証情報を保存します。</p><div className="oauth-connect-grid"><div className="oauth-service"><div><strong><StatusDot active={draft.youtube.refreshTokenStored} />YouTube</strong><small>{draft.youtube.refreshTokenStored ? '接続済み' : draft.youtube.clientId ? '接続できます' : '初回準備から開始できます'}</small></div><button className="secondary" disabled={saving} onClick={() => void connectOAuth('youtube')}>{draft.youtube.refreshTokenStored ? 'Googleで再接続' : 'Googleで接続'}</button></div><div className="oauth-service"><div><strong><StatusDot active={draft.twitch.accessTokenStored && draft.twitch.refreshTokenStored} />Twitch</strong><small>{draft.twitch.accessTokenStored && draft.twitch.refreshTokenStored ? '接続済み' : draft.twitch.clientId ? '接続できます' : '初回準備から開始できます'}</small></div><button className="secondary" disabled={saving} onClick={() => void connectOAuth('twitch')}>{draft.twitch.accessTokenStored ? 'Twitchで再接続' : 'Twitchで接続'}</button></div></div></section>
+      <section className="settings-card"><div className="settings-card-heading"><h3><MonitorUp size={17} />配信サービス</h3><button className="secondary oauth-refresh" disabled={saving} onClick={() => void attempt(onOAuthRefresh)}><RefreshCw size={14} />状態を再確認</button></div><p>準備画面を開いただけでは接続済みになりません。各サービスの完了地点と、このPCに保存されている認証状態を表示します。</p><div className="oauth-connect-grid"><OAuthServiceCard status={oauthStatus.youtube} progress={oauthProgress.youtube} saving={saving} onConnect={() => void connectOAuth('youtube')} /><OAuthServiceCard status={oauthStatus.twitch} progress={oauthProgress.twitch} saving={saving} onConnect={() => void connectOAuth('twitch')} /></div></section>
       <section className="settings-card"><h3><Radio size={17} />機能</h3><div className="settings-toggle-grid"><label className="check-row"><input type="checkbox" checked={draft.features.youtube} onChange={(event) => setDraft({ ...draft, features: { ...draft.features, youtube: event.target.checked } })} />YouTube</label><label className="check-row"><input type="checkbox" checked={draft.features.twitch} onChange={(event) => setDraft({ ...draft, features: { ...draft.features, twitch: event.target.checked } })} />Twitch</label><label className="check-row"><input type="checkbox" checked={draft.features.recording} onChange={(event) => setDraft({ ...draft, features: { ...draft.features, recording: event.target.checked } })} />通常録画</label><label className="check-row"><input type="checkbox" checked={draft.features.replayBuffer} onChange={(event) => setDraft({ ...draft, features: { ...draft.features, replayBuffer: event.target.checked } })} />リプレイ</label><label className="check-row"><input type="checkbox" checked={draft.features.sourceRecord} onChange={(event) => setDraft({ ...draft, features: { ...draft.features, sourceRecord: event.target.checked } })} />Source Record</label><label className="check-row"><input type="checkbox" checked={draft.features.verticalRecording} onChange={(event) => setDraft({ ...draft, features: { ...draft.features, verticalRecording: event.target.checked } })} />Aitum Vertical</label></div></section>
       <section className="settings-card"><h3><Radio size={17} />音声ソース名</h3><div className="field-row"><label>マイク<input value={draft.sources.microphone} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, microphone: event.target.value } })} /></label><label>PCゲーム<input value={draft.sources.pcGame} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, pcGame: event.target.value } })} /></label></div><div className="field-row"><label>GeForce NOW<input value={draft.sources.geforceNow} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, geforceNow: event.target.value } })} /></label><label>Switch<input value={draft.sources.switchGame} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, switchGame: event.target.value } })} /></label></div><div className="field-row"><label>Discord<input value={draft.sources.discord} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, discord: event.target.value } })} /></label><label>BGM<input value={draft.sources.bgm} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, bgm: event.target.value } })} /></label></div></section>
       <section className="settings-card"><h3><Sparkles size={17} />Steam</h3><label>SteamID64<input value={draft.steam.steamId64} onChange={(event) => setDraft({ ...draft, steam: { ...draft.steam, steamId64: event.target.value } })} /></label><label>Steam Web API Key<input type="password" autoComplete="off" value={secrets['steam-api-key'] ?? ''} onChange={(event) => secret('steam-api-key', event.target.value)} placeholder="OS資格情報ストアへ保存" /></label><label>Steamインストール先<input value={draft.steam.installPath} onChange={(event) => setDraft({ ...draft, steam: { ...draft.steam, installPath: event.target.value } })} placeholder="C:\Program Files (x86)\Steam" /></label><div className="button-row"><button className="secondary" disabled={saving} onClick={() => void attempt(async () => { await onSave(draft, secrets); setSecrets({}); await onSteamSync() })}><RefreshCw size={16} />保存してライブラリ同期</button></div><p>所有ゲームとローカル導入状態をApp IDで統合します。Game Passは各ゲーム設定から手動登録できます。</p></section>
@@ -179,6 +226,8 @@ export default function App() {
   const [profiles, setProfiles] = useState<GameProfile[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
+  const [oauthStatus, setOAuthStatus] = useState<OAuthConnectionStatuses | null>(null)
+  const [oauthProgress, setOAuthProgress] = useState<OAuthProgress>({})
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<GameProfile | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
@@ -187,20 +236,45 @@ export default function App() {
   const [comments, setComments] = useState<ChatMessage[]>([])
   const actionLock = useRef(false)
   const oauthPopup = useRef<Window | null>(null)
+  const oauthStatusRequest = useRef(0)
+
+  const loadOAuthStatus = useCallback(async (): Promise<OAuthConnectionStatuses | null> => {
+    const requestId = ++oauthStatusRequest.current
+    const connections = await api.oauthStatus()
+    if (requestId !== oauthStatusRequest.current) return null
+    setOAuthStatus(connections)
+    return connections
+  }, [])
 
   const refresh = async () => {
-    const data = await api.bootstrap()
+    const [data] = await Promise.all([api.bootstrap(), loadOAuthStatus()])
     setProfiles(data.profiles); setConfig(data.config); setStatus(data.status); setLoading(false)
+  }
+  const refreshOAuth = async () => {
+    const connections = await loadOAuthStatus()
+    if (!connections) return
+    setOAuthProgress((current) => ({
+      youtube: connections.youtube.authorizationInProgress ? current.youtube : undefined,
+      twitch: connections.twitch.authorizationInProgress ? current.twitch : undefined,
+    }))
   }
   useEffect(() => {
     void api.bootstrap().then((data) => {
       setProfiles(data.profiles); setConfig(data.config); setStatus(data.status); setLoading(false)
+      void loadOAuthStatus().catch((error: Error) => setToast({ kind: 'error', text: `OAuth接続状態を取得できません: ${error.message}` }))
     }).catch((error: Error) => { setToast({ kind: 'error', text: error.message }); setLoading(false) })
-  }, [])
+  }, [loadOAuthStatus])
   useEffect(() => {
     const timer = window.setInterval(() => void api.status().then(setStatus).catch(() => undefined), 2000)
     return () => window.clearInterval(timer)
   }, [])
+  useEffect(() => {
+    if (tab !== 'settings') return
+    const load = () => void loadOAuthStatus().catch(() => undefined)
+    load()
+    const timer = window.setInterval(load, 2000)
+    return () => window.clearInterval(timer)
+  }, [loadOAuthStatus, tab])
   useEffect(() => {
     if (!status?.streaming) return
     const load = () => void api.comments().then(setComments).catch(() => undefined)
@@ -216,12 +290,14 @@ export default function App() {
       const trustedLoopback = origin.protocol === 'http:' && (origin.hostname === '127.0.0.1' || origin.hostname === 'localhost')
       if (event.source === oauthPopup.current && trustedLoopback && event.data?.type === 'oauth-complete') {
         oauthPopup.current = null
-        void api.bootstrap().then((data) => { setConfig(data.config); setStatus(data.status); setToast({ kind: 'success', text: 'OAuth認証が完了しました' }) })
+        void Promise.all([api.bootstrap(), loadOAuthStatus()]).then(([data, connections]) => {
+          setConfig(data.config); setStatus(data.status); if (connections) setOAuthProgress((current) => ({ ...current, youtube: connections.youtube.detail })); setToast({ kind: 'success', text: 'YouTube 接続が完了しました' })
+        })
       }
     }
     window.addEventListener('message', authenticated)
     return () => window.removeEventListener('message', authenticated)
-  }, [])
+  }, [loadOAuthStatus])
 
   const filtered = useMemo(() => profiles.filter((profile) => profile.platformGroup === tab && !profile.hidden && profile.displayName.toLocaleLowerCase().includes(search.toLocaleLowerCase())), [profiles, search, tab])
   const selected = profiles.find((profile) => profile.id === status?.selectedGameId) ?? null
@@ -246,7 +322,7 @@ export default function App() {
   })
 
   const connectOAuth = async (provider: OAuthProvider) => {
-    const configured = provider === 'youtube' ? Boolean(config?.youtube.clientId) : Boolean(config?.twitch.clientId)
+    const configured = Boolean(oauthStatus?.[provider].appConfigured)
     if (!configured) {
       const setupUrl = provider === 'youtube'
         ? 'https://console.cloud.google.com/apis/credentials'
@@ -254,7 +330,9 @@ export default function App() {
       const setupPopup = window.open(setupUrl, `${provider}-oauth-setup`, 'width=1120,height=820')
       if (!setupPopup) throw new Error('初回接続の準備画面を開けませんでした。ポップアップを許可してください')
       setupPopup.focus()
-      setToast({ kind: 'warning', text: `${provider === 'youtube' ? 'Google' : 'Twitch'} の初回接続画面を開きました。ログイン後、この画面へ戻ってください` })
+      const service = provider === 'youtube' ? 'Google' : 'Twitch'
+      setOAuthProgress((current) => ({ ...current, [provider]: `${service}の開発者画面を開きました。まだ接続は完了していません` }))
+      setToast({ kind: 'warning', text: `${service} の初回準備画面を開きました。アプリ登録後に「状態を再確認」を押してください` })
       return
     }
     if (oauthPopup.current && !oauthPopup.current.closed) {
@@ -264,10 +342,16 @@ export default function App() {
     const popup = window.open('about:blank', `${provider}-oauth`, 'width=560,height=720')
     if (!popup) throw new Error('認証ウィンドウを開けませんでした。ポップアップを許可してください')
     oauthPopup.current = popup
+    setOAuthProgress((current) => ({ ...current, [provider]: `${provider === 'youtube' ? 'Google' : 'Twitch'}認証を開始しています` }))
     try {
       const started = await api.oauthStart(provider, window.location.origin)
+      await loadOAuthStatus()
       popup.location.href = started.url
-      if (started.mode === 'redirect') return
+      if (started.mode === 'redirect') {
+        setOAuthProgress((current) => ({ ...current, [provider]: 'Googleのアカウント選択と権限承認を待っています' }))
+        return
+      }
+      setOAuthProgress((current) => ({ ...current, [provider]: `Twitchの承認待ちです。確認コード: ${started.userCode}` }))
       setToast({ kind: 'warning', text: `Twitch 認証コード: ${started.userCode}（画面で求められた場合）` })
       while (Date.now() < started.expiresAt) {
         await new Promise((resolve) => window.setTimeout(resolve, started.intervalMs))
@@ -276,6 +360,7 @@ export default function App() {
         if (result.status === 'complete') {
           popup.close(); oauthPopup.current = null
           await refresh()
+          setOAuthProgress((current) => ({ ...current, [provider]: 'Twitch認証と配信者情報の取得が完了しました' }))
           setToast({ kind: 'success', text: 'Twitch 接続が完了しました' })
           return
         }
@@ -284,6 +369,9 @@ export default function App() {
     } catch (error) {
       if (!popup.closed) popup.close()
       if (oauthPopup.current === popup) oauthPopup.current = null
+      const reason = error instanceof Error ? error.message : String(error)
+      setOAuthProgress((current) => ({ ...current, [provider]: `接続に失敗しました: ${reason}` }))
+      await loadOAuthStatus().catch(() => undefined)
       throw error
     }
   }
@@ -334,7 +422,7 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header"><div className="brand"><div className="brand-mark"><Clapperboard size={19} /></div><div><strong>STREAM MANAGER</strong><span>OBS CONTROL DOCK</span></div></div><div className="header-status"><StatusDot active={status.obsConnected} /><span>OBS {status.obsConnected ? '接続中' : '未接続'}</span></div></header>
       <nav className="tabs">{groups.map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} /><span>{label}</span></button>)}</nav>
-      {tab === 'settings' ? <SettingsView key={JSON.stringify(config)} config={config} onOAuthConnect={connectOAuth} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamSync={async () => { const result = await api.steamSync(); setProfiles(result.profiles); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : (
+      {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} oauthStatus={oauthStatus} oauthProgress={oauthProgress} onOAuthConnect={connectOAuth} onOAuthRefresh={refreshOAuth} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); await loadOAuthStatus(); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamSync={async () => { const result = await api.steamSync(); setProfiles(result.profiles); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : <div className="settings-view"><div className="section-heading"><div><span className="eyebrow">CONNECTIONS</span><h2>接続状態を取得できません</h2></div></div><div className="inline-warning" role="alert"><AlertTriangle size={14} /><span>OBS操作は利用できます。OAuth接続状態だけ再取得してください。</span></div><button className="secondary" onClick={() => void refreshOAuth().catch((error: Error) => setToast({ kind: 'error', text: error.message }))}><RefreshCw size={15} />状態を再確認</button></div>) : (
         <main>
           <div className="search-row"><div className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ゲームを検索" />{search && <button aria-label="検索をクリア" onClick={() => setSearch('')}><X size={14} /></button>}</div><button className="icon-button add" aria-label="ゲームを追加" onClick={addProfile} title="ゲームを追加"><Plus size={18} /></button></div>
           {filtered.some((profile) => profile.favorite) && !search && <section className="library-section"><div className="mini-heading"><Star size={13} />お気に入り</div><div className="game-list">{filtered.filter((profile) => profile.favorite).map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => void selectGame(profile)} onEdit={() => setEditing(profile)} />)}</div></section>}

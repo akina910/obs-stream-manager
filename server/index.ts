@@ -49,6 +49,7 @@ app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
 app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
 app.get('/api/status', async () => orchestrator.getStatus())
 app.get('/api/comments', async () => platforms.getComments())
+app.get('/api/oauth/status', async () => oauth.status())
 app.post<{ Params: { provider: 'youtube' | 'twitch' }; Body: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
   if (!['youtube', 'twitch'].includes(request.params.provider)) return reply.status(404).send({ error: 'Unknown OAuth provider' })
   const openerOrigin = request.body?.openerOrigin ?? callbackOrigin
