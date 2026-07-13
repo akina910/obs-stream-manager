@@ -58,6 +58,28 @@ export class ObsController {
     }
   }
 
+  private async callVertical(requestType: 'start_recording' | 'stop_recording'): Promise<void> {
+    try {
+      await this.callVendor('aitum-vertical-canvas', requestType)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!message.toLowerCase().includes('no vendor was found')) throw error
+      await this.obs.call('TriggerHotkeyByName', {
+        hotkeyName: requestType === 'start_recording' ? 'VerticalCanvasDockStartRecording' : 'VerticalCanvasDockStopRecording',
+      })
+    }
+  }
+
+  private async stopSourceRecord(): Promise<void> {
+    try {
+      await this.callVendor('source-record', 'record_stop')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.toLowerCase().includes('no source found')) return
+      throw error
+    }
+  }
+
   private async getReplayBufferStatus(): Promise<{ outputActive: boolean }> {
     try {
       return await this.obs.call('GetReplayBufferStatus')
@@ -167,7 +189,7 @@ export class ObsController {
       }
       if (config.features.verticalRecording && profile.recording.verticalRecording) {
         try {
-          await this.callVendor('aitum-vertical-canvas', 'start_recording')
+          await this.callVertical('start_recording')
           this.started.vertical = true; startedNow.vertical = true
         } catch (error) { warnings.push(`Aitum Vertical録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
       }
@@ -178,7 +200,7 @@ export class ObsController {
       return warnings
     } catch (error) {
       if (startedNow.stream) await this.obs.call('StopStream').catch(() => undefined)
-      if (startedNow.vertical) await this.callVendor('aitum-vertical-canvas', 'stop_recording').catch(() => undefined)
+      if (startedNow.vertical) await this.callVertical('stop_recording').catch(() => undefined)
       if (startedNow.sourceRecord) await this.callVendor('source-record', 'record_stop', { source: selectedSource }).catch(() => undefined)
       if (startedNow.replay) await this.obs.call('StopReplayBuffer').catch(() => undefined)
       if (startedNow.record) await this.obs.call('StopRecord').catch(() => undefined)
@@ -202,8 +224,8 @@ export class ObsController {
     ])
     // The Stop action is a global teardown by design. OBS remains authoritative after this
     // process restarts, so do not rely on the controller's transient `started` flags here.
-    await this.callVendor('source-record', 'record_stop').catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    await this.callVendor('aitum-vertical-canvas', 'stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    await this.stopSourceRecord().catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    await this.callVertical('stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (replay.outputActive) await this.obs.call('StopReplayBuffer').catch((error) => warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (record.outputActive) await this.obs.call('StopRecord').catch((error) => warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (stream.outputActive) await this.obs.call('StopStream').catch((error) => warnings.push(`配信を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
