@@ -55,15 +55,22 @@ npm run dev
 
 ## YouTube / Twitch 認証
 
-設定画面に各サービスの Client ID と Client Secret を保存し、認証ボタンを押します。
+設定画面では「Googleで接続」「Twitchで接続」を一度押すだけです。Client ID、Client Secret、Broadcaster ID を利用者が入力する必要はありません。Google はデスクトップアプリ向け PKCE、Twitch は公開クライアント向け Device Code Flow を使用します。
+
+アプリ配布者は初回セットアップ時にOAuthアプリを登録し、このPCへクライアント情報を一度だけ構成します。Google CloudからダウンロードしたデスクトップクライアントJSONと、Twitch Developer Consoleの公開Client IDを環境変数へ指定して実行します。
+
+```powershell
+$env:OBS_STREAM_MANAGER_GOOGLE_CLIENT_JSON='C:\path\to\client_secret.json'
+$env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID='your-public-client-id'
+npm run oauth:configure
+```
 
 YouTube Studio では再利用可能な配信ストリームを一つ作成し、そのストリームキーを Aitum Multistream の YouTube 出力へ設定してください。本アプリは配信枠を自動作成しますが、秘密のストリームキーを API から取得して OBS 設定へ書き込むことはしません。
 
-OAuth アプリ側には次のコールバック URL を登録してください。
+Googleのデスクトップアプリはローカルループバックを使用します。TwitchはDevice Code Flowのためコールバック入力を使用しません。
 
 ```text
 http://127.0.0.1:4317/api/oauth/youtube/callback
-http://127.0.0.1:4317/api/oauth/twitch/callback
 ```
 
 Client Secret、更新トークン、アクセストークンは設定 JSON やログには保存されません。Windows Credential Manager、macOS Keychain、Linux Secret Service のいずれかに保存されます。

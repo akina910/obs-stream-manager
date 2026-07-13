@@ -47,10 +47,11 @@ export class PlatformServices {
   private async youtubeAccessToken(config: AppConfig): Promise<string> {
     const clientSecret = this.secrets.get('youtube-client-secret')
     const refreshToken = this.secrets.get('youtube-refresh-token')
-    if (!config.youtube.clientId || !clientSecret || !refreshToken) throw new Error('YouTube OAuth が未設定です')
+    if (!config.youtube.clientId || !refreshToken) throw new Error('YouTube OAuth が未設定です')
     const credentialKey = crypto.createHash('sha256').update(`${config.youtube.clientId}\0${refreshToken}`).digest('hex')
     if (this.youtubeToken?.credentialKey === credentialKey && this.youtubeToken.expiresAt > Date.now() + 60_000) return this.youtubeToken.value
-    const body = new URLSearchParams({ client_id: config.youtube.clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' })
+    const body = new URLSearchParams({ client_id: config.youtube.clientId, refresh_token: refreshToken, grant_type: 'refresh_token' })
+    if (clientSecret) body.set('client_secret', clientSecret)
     const token = await apiJson<{ access_token: string; expires_in?: number }>('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
     this.youtubeToken = { value: token.access_token, expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000, credentialKey }
     return token.access_token
@@ -146,13 +147,15 @@ export class PlatformServices {
   private async twitchAccessToken(config: AppConfig): Promise<string> {
     const clientSecret = this.secrets.get('twitch-client-secret')
     const refreshToken = this.secrets.get('twitch-refresh-token')
-    if (config.twitch.clientId && clientSecret && refreshToken) {
+    if (config.twitch.clientId && refreshToken) {
       const credentialKey = crypto.createHash('sha256').update(`${config.twitch.clientId}\0${refreshToken}`).digest('hex')
       if (this.twitchToken?.credentialKey === credentialKey && this.twitchToken.expiresAt > Date.now() + 60_000) return this.twitchToken.value
       if (this.twitchTokenRefresh?.credentialKey === credentialKey) return this.twitchTokenRefresh.promise
       const promise = (async () => {
         const refreshStartedAt = Date.now()
-        const response = await fetch('https://id.twitch.tv/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: config.twitch.clientId, client_secret: clientSecret, grant_type: 'refresh_token', refresh_token: refreshToken }) })
+        const body = new URLSearchParams({ client_id: config.twitch.clientId, grant_type: 'refresh_token', refresh_token: refreshToken })
+        if (clientSecret) body.set('client_secret', clientSecret)
+        const response = await fetch('https://id.twitch.tv/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
         const token = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; message?: string }
         if (!response.ok || !token.access_token) throw new Error(token.message ?? 'Twitch token refresh failed')
         const nextRefreshToken = token.refresh_token ?? refreshToken

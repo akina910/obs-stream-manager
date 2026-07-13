@@ -26,13 +26,13 @@ const platforms = new PlatformServices(secrets, store)
 const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger)
 const listenPort = Number(process.env.PORT ?? 4317)
 const callbackOrigin = `http://127.0.0.1:${listenPort}`
-const oauth = new OAuthManager(store, secrets, callbackOrigin)
 const allowedOAuthOpenerOrigins = new Set([
   callbackOrigin,
   `http://localhost:${listenPort}`,
   'http://127.0.0.1:4318',
   'http://localhost:4318',
 ])
+const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpenerOrigins)
 
 export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
@@ -49,18 +49,24 @@ app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
 app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
 app.get('/api/status', async () => orchestrator.getStatus())
 app.get('/api/comments', async () => platforms.getComments())
-app.get<{ Params: { provider: 'youtube' | 'twitch' }; Querystring: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
+app.post<{ Params: { provider: 'youtube' | 'twitch' }; Body: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
   if (!['youtube', 'twitch'].includes(request.params.provider)) return reply.status(404).send({ error: 'Unknown OAuth provider' })
+  const openerOrigin = request.body?.openerOrigin ?? callbackOrigin
+  if (!allowedOAuthOpenerOrigins.has(openerOrigin)) throw Object.assign(new Error('OAuth opener origin is not allowed'), { statusCode: 400 })
+  return oauth.start(request.params.provider, openerOrigin)
+})
+app.get<{ Querystring: { openerOrigin?: string } }>('/api/oauth/youtube/start', async (request, reply) => {
   const openerOrigin = request.query.openerOrigin ?? callbackOrigin
   if (!allowedOAuthOpenerOrigins.has(openerOrigin)) throw Object.assign(new Error('OAuth opener origin is not allowed'), { statusCode: 400 })
-  return reply.redirect(await oauth.authorizationUrl(request.params.provider, openerOrigin))
+  return reply.redirect(await oauth.authorizationUrl('youtube', openerOrigin))
 })
-app.get<{ Params: { provider: 'youtube' | 'twitch' }; Querystring: { code?: string; state?: string; error?: string } }>('/api/oauth/:provider/callback', async (request, reply) => {
+app.get<{ Querystring: { code?: string; state?: string; error?: string } }>('/api/oauth/youtube/callback', async (request, reply) => {
   if (request.query.error) throw new Error(`OAuth authorization failed: ${request.query.error}`)
   if (!request.query.code || !request.query.state) throw new Error('OAuth callback is incomplete')
-  const openerOrigin = await oauth.exchange(request.params.provider, request.query.code, request.query.state)
-  return reply.type('text/html').send(`<!doctype html><meta charset="utf-8"><title>認証完了</title><body style="background:#0b0d12;color:#fff;font-family:sans-serif;padding:40px"><h1>認証が完了しました</h1><p>このウィンドウは閉じて構いません。</p><script>window.opener?.postMessage({type:"oauth-complete"},${JSON.stringify(openerOrigin)});setTimeout(()=>window.close(),800)</script></body>`)
+  const openerOrigin = await oauth.exchange('youtube', request.query.code, request.query.state)
+  return reply.type('text/html').send(`<!doctype html><meta charset="utf-8"><title>認証完了</title><body style="background:#0b0d12;color:#fff;font-family:sans-serif;padding:40px"><h1>YouTube 接続が完了しました</h1><p>このウィンドウは自動で閉じます。</p><script>window.opener?.postMessage({type:"oauth-complete",provider:"youtube"},${JSON.stringify(openerOrigin)});setTimeout(()=>window.close(),800)</script></body>`)
 })
+app.get<{ Params: { requestId: string } }>('/api/oauth/twitch/device/:requestId', async (request) => oauth.pollTwitch(request.params.requestId))
 app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
   await orchestrator.assertNotStreaming()
