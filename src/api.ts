@@ -1,6 +1,10 @@
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
+export type OAuthProvider = 'youtube' | 'twitch'
+export type OAuthStartResult =
+  | { mode: 'redirect'; url: string }
+  | { mode: 'device'; url: string; userCode: string; requestId: string; intervalMs: number; expiresAt: number }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
@@ -13,6 +17,8 @@ export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   status: () => request<RuntimeStatus>('/api/status'),
   comments: () => request<ChatMessage[]>('/api/comments'),
+  oauthStart: (provider: OAuthProvider, openerOrigin: string) => request<OAuthStartResult>(`/api/oauth/${provider}/start`, { method: 'POST', body: JSON.stringify({ openerOrigin }) }),
+  oauthPollTwitch: (requestId: string) => request<{ status: 'pending' | 'complete' }>(`/api/oauth/twitch/device/${encodeURIComponent(requestId)}`),
   profiles: () => request<GameProfile[]>('/api/profiles'),
   saveProfile: (profile: GameProfile) => request<GameProfile>('/api/profiles', { method: 'POST', body: JSON.stringify(profile) }),
   deleteProfile: (id: string) => request<{ ok: true }>(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),

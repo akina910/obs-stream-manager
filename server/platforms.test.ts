@@ -38,7 +38,6 @@ describe('PlatformServices thumbnail preparation', () => {
 describe('PlatformServices Twitch token management', () => {
   it('deduplicates refreshes and reuses the rotated refresh-token cache key', async () => {
     const secrets = new Map([
-      ['twitch-client-secret', 'client-secret'],
       ['twitch-refresh-token', 'refresh-one'],
     ])
     const secretStore = {
@@ -60,7 +59,35 @@ describe('PlatformServices Twitch token management', () => {
     await expect(accessToken(configured)).resolves.toBe('access-two')
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    const refreshBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
+    expect(refreshBody.get('client_id')).toBe('client-id')
+    expect(refreshBody.has('client_secret')).toBe(false)
     expect(secrets.get('twitch-refresh-token')).toBe('refresh-two')
     expect(secrets.get('twitch-access-token')).toBe('access-two')
+  })
+})
+
+describe('PlatformServices YouTube token management', () => {
+  it('refreshes an installed-app token without requiring a client secret', async () => {
+    const secrets = new Map([['youtube-refresh-token', 'youtube-refresh']])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ access_token: 'youtube-access', expires_in: 3600 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const config = (await import('./defaults.js')).defaultConfig
+    const configured = structuredClone(config)
+    configured.youtube.clientId = 'youtube-client-id'
+    const accessToken = (platforms as unknown as { youtubeAccessToken: (value: typeof configured) => Promise<string> }).youtubeAccessToken.bind(platforms)
+
+    await expect(accessToken(configured)).resolves.toBe('youtube-access')
+
+    const refreshBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
+    expect(refreshBody.get('client_id')).toBe('youtube-client-id')
+    expect(refreshBody.has('client_secret')).toBe(false)
   })
 })
