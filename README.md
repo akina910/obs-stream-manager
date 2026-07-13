@@ -55,15 +55,23 @@ npm run dev
 
 ## YouTube / Twitch 認証
 
-設定画面では「Googleで接続」「Twitchで接続」を一度押すだけです。Client ID、Client Secret、Broadcaster ID を利用者が入力する必要はありません。Google はデスクトップアプリ向け PKCE、Twitch は公開クライアント向け Device Code Flow を使用します。
+利用者が行う操作は、設定画面の「YouTubeで接続」「Twitchで接続」を押して各サービスで許可するだけです。利用者ごとに Google Cloud や Twitch Developer Console でアプリを作る必要はなく、Client ID、Client Secret、Broadcaster ID の入力欄もありません。Google はデスクトップアプリ向け PKCE、Twitch は公開クライアント向け Device Code Flow を使用します。
 
-アプリ配布者は初回セットアップ時にOAuthアプリを登録し、このPCへクライアント情報を一度だけ構成します。Google CloudからダウンロードしたデスクトップクライアントJSONと、Twitch Developer Consoleの公開Client IDを環境変数へ指定して実行します。
+接続ボタンに「配布設定エラー」と表示される場合は配布パッケージ側の不備です。利用者を開発者コンソールへ誘導せず、接続情報を含む更新版で直します。
+
+### 配布者向けプロビジョニング
+
+ここからはアプリ配布者だけが行う作業です。Google と Twitch の OAuth アプリは配布者が一度だけ作成し、全利用者の接続ボタンで共用します。Google のトークン交換では、このデスクトップクライアントに紐づく Client Secret も必要です。
+
+リリース／インストーラーは、`provider-oauth.example.json` と同じ形式の一時ファイルを `OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE` で渡すか、環境変数を渡します。サーバー起動時に自動で構成され、Google Client Secret は OS 資格情報ストアへ、公開 Client ID はアプリ設定へ保存されます。実値入りの `provider-oauth.json` は `.gitignore` 対象であり、公開リポジトリへコミットしません。
 
 ```powershell
 $env:OBS_STREAM_MANAGER_GOOGLE_CLIENT_JSON='C:\path\to\client_secret.json'
 $env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID='your-public-client-id'
 npm run oauth:configure
 ```
+
+上記コマンドは配布者のローカル構成用です。通常利用者には実行させません。同じクライアント情報で再起動しても、保存済みのアカウント連携やトークンは維持されます。配布者が Client ID を変更した場合だけ、古い連携を安全に無効化して再認証を要求します。
 
 YouTube Studio では再利用可能な配信ストリームを一つ作成し、そのストリームキーを Aitum Multistream の YouTube 出力へ設定してください。本アプリは配信枠を自動作成しますが、秘密のストリームキーを API から取得して OBS 設定へ書き込むことはしません。
 

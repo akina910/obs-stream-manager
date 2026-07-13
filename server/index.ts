@@ -13,6 +13,7 @@ import { OAuthManager } from './oauth.js'
 import { StreamOrchestrator } from './orchestrator.js'
 import { PlatformServices } from './platforms.js'
 import { getDataDirectory } from './paths.js'
+import { provisionDistributorOAuth } from './provider-provisioning.js'
 import { SecretStore, type SecretName } from './secrets.js'
 import { DataStore } from './storage.js'
 
@@ -20,6 +21,7 @@ const dataDir = getDataDirectory()
 const store = new DataStore(dataDir)
 await store.initialize()
 const secrets = new SecretStore()
+await provisionDistributorOAuth(store, secrets)
 const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets)
 const platforms = new PlatformServices(secrets, store)

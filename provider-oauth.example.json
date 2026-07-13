@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "youtube": {
+    "clientId": "release-time-google-client-id",
+    "clientSecret": "release-time-google-client-secret"
+  },
+  "twitch": {
+    "clientId": "release-time-twitch-client-id"
+  }
+}

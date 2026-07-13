@@ -41,6 +41,8 @@ describe('OAuthManager one-button authorization', () => {
     const configured = structuredClone(defaultConfig)
     configured.youtube.clientId = 'youtube-public-client'
     test.setConfig(configured)
+    await expect(test.oauth.status()).resolves.toMatchObject({ youtube: { stage: 'partial', appConfigured: false } })
+    test.secretValues.set('youtube-client-secret', 'youtube-distributor-secret')
     await expect(test.oauth.status()).resolves.toMatchObject({ youtube: { stage: 'ready', appConfigured: true } })
 
     await test.oauth.start('youtube', 'http://127.0.0.1:4417')
@@ -62,6 +64,7 @@ describe('OAuthManager one-button authorization', () => {
     })
 
     test.secretValues.set('youtube-refresh-token', 'youtube-refresh')
+    test.secretValues.set('youtube-client-secret', 'youtube-distributor-secret')
     test.secretValues.set('twitch-access-token', 'twitch-access')
     test.secretValues.set('twitch-refresh-token', 'twitch-refresh')
     configured.twitch.refreshTokenStored = true
@@ -74,11 +77,12 @@ describe('OAuthManager one-button authorization', () => {
     })
   })
 
-  it('starts and exchanges Google desktop OAuth with PKCE and no required client secret', async () => {
+  it('starts and exchanges Google desktop OAuth with PKCE and the distributor client secret', async () => {
     const test = harness()
     const configured = structuredClone(defaultConfig)
     configured.youtube.clientId = 'youtube-public-client'
     test.setConfig(configured)
+    test.secretValues.set('youtube-client-secret', 'youtube-distributor-secret')
     const started = await test.oauth.start('youtube', 'http://127.0.0.1:4417')
     expect(started.mode).toBe('redirect')
     if (started.mode !== 'redirect') throw new Error('Expected redirect mode')
@@ -98,9 +102,18 @@ describe('OAuthManager one-button authorization', () => {
     const tokenBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(tokenBody.get('client_id')).toBe('youtube-public-client')
     expect(tokenBody.get('code_verifier')).toBeTruthy()
-    expect(tokenBody.has('client_secret')).toBe(false)
+    expect(tokenBody.get('client_secret')).toBe('youtube-distributor-secret')
     expect(test.secretValues.get('youtube-refresh-token')).toBe('youtube-refresh')
-    expect(test.config().youtube).toMatchObject({ refreshTokenStored: true, clientSecretStored: false })
+    expect(test.config().youtube).toMatchObject({ refreshTokenStored: true, clientSecretStored: true })
+  })
+
+  it('does not start a broken YouTube flow when distributor credentials are incomplete', async () => {
+    const test = harness()
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-public-client'
+    test.setConfig(configured)
+
+    await expect(test.oauth.start('youtube', 'http://127.0.0.1:4417')).rejects.toThrow(/配布パッケージ/)
   })
 
   it('rejects an OAuth opener origin outside the fixed local allowlist', async () => {
