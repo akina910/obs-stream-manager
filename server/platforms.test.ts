@@ -68,8 +68,11 @@ describe('PlatformServices Twitch token management', () => {
 })
 
 describe('PlatformServices YouTube token management', () => {
-  it('refreshes an installed-app token without requiring a client secret', async () => {
-    const secrets = new Map([['youtube-refresh-token', 'youtube-refresh']])
+  it('refreshes an installed-app token with the distributor client secret', async () => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
     const secretStore = {
       get: vi.fn((name: string) => secrets.get(name) ?? null),
       set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
@@ -88,6 +91,6 @@ describe('PlatformServices YouTube token management', () => {
 
     const refreshBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(refreshBody.get('client_id')).toBe('youtube-client-id')
-    expect(refreshBody.has('client_secret')).toBe(false)
+    expect(refreshBody.get('client_secret')).toBe('youtube-client-secret')
   })
 })

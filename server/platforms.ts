@@ -47,11 +47,11 @@ export class PlatformServices {
   private async youtubeAccessToken(config: AppConfig): Promise<string> {
     const clientSecret = this.secrets.get('youtube-client-secret')
     const refreshToken = this.secrets.get('youtube-refresh-token')
-    if (!config.youtube.clientId || !refreshToken) throw new Error('YouTube OAuth が未設定です')
+    if (!config.youtube.clientId || !clientSecret || !refreshToken) throw new Error('YouTube OAuth が未設定です')
     const credentialKey = crypto.createHash('sha256').update(`${config.youtube.clientId}\0${refreshToken}`).digest('hex')
     if (this.youtubeToken?.credentialKey === credentialKey && this.youtubeToken.expiresAt > Date.now() + 60_000) return this.youtubeToken.value
     const body = new URLSearchParams({ client_id: config.youtube.clientId, refresh_token: refreshToken, grant_type: 'refresh_token' })
-    if (clientSecret) body.set('client_secret', clientSecret)
+    body.set('client_secret', clientSecret)
     const token = await apiJson<{ access_token: string; expires_in?: number }>('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
     this.youtubeToken = { value: token.access_token, expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000, credentialKey }
     return token.access_token

@@ -10,6 +10,7 @@ output/
 .env
 .env.*
 !.env.example
+provider-oauth.json
 
 # Personal runtime data (created under the OS app-data directory by default)
 config/

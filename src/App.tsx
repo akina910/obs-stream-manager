@@ -27,7 +27,7 @@ function StatusDot({ active }: { active: boolean }) {
 }
 
 const oauthStageLabels: Record<OAuthConnectionStatus['stage'], string> = {
-  setup_required: '初回準備が必要',
+  setup_required: '配布設定エラー',
   ready: '認証開始できます',
   authorizing: '認証待ち',
   partial: '一部のみ完了',
@@ -39,17 +39,17 @@ function OAuthServiceCard({ status, progress, saving, onConnect }: { status: OAu
   const serviceName = isYoutube ? 'YouTube' : 'Twitch'
   const steps = isYoutube
     ? [
-        { label: 'OAuthアプリ', detail: status.appConfigured ? '設定済み' : '未設定', complete: status.appConfigured },
+        { label: 'アプリ内OAuth', detail: status.appConfigured ? '利用可能' : '配布に未搭載', complete: status.appConfigured },
         { label: 'Googleアカウント認証', detail: status.refreshTokenStored ? '完了' : status.authorizationInProgress ? '承認待ち' : '未完了', complete: status.refreshTokenStored },
         { label: '更新トークン', detail: status.refreshTokenStored ? 'Windowsへ保存済み' : '未保存', complete: status.refreshTokenStored },
       ]
     : [
-        { label: 'OAuthアプリ', detail: status.appConfigured ? '設定済み' : '未設定', complete: status.appConfigured },
+        { label: 'アプリ内OAuth', detail: status.appConfigured ? '利用可能' : '配布に未搭載', complete: status.appConfigured },
         { label: 'Twitchアカウント認証', detail: status.accessTokenStored && status.refreshTokenStored ? '完了' : status.authorizationInProgress ? '承認待ち' : '未完了', complete: status.accessTokenStored && status.refreshTokenStored },
         { label: '配信者情報', detail: status.accountLinked ? '取得済み' : '未取得', complete: status.accountLinked },
       ]
-  const buttonLabel = status.stage === 'setup_required'
-    ? '初回準備を開く'
+  const buttonLabel = !status.appConfigured
+    ? '接続機能を準備中'
     : status.stage === 'connected'
       ? `${serviceName}で再接続`
       : `${serviceName}で接続`
@@ -67,7 +67,7 @@ function OAuthServiceCard({ status, progress, saving, onConnect }: { status: OAu
         })}
       </ol>
       <p className="oauth-detail" role="status">{progress ?? status.detail}</p>
-      <button className="secondary" disabled={saving} onClick={onConnect}>{buttonLabel}</button>
+      <button className="secondary" disabled={saving || !status.appConfigured} onClick={onConnect}>{buttonLabel}</button>
     </article>
   )
 }
@@ -324,16 +324,8 @@ export default function App() {
   const connectOAuth = async (provider: OAuthProvider) => {
     const configured = Boolean(oauthStatus?.[provider].appConfigured)
     if (!configured) {
-      const setupUrl = provider === 'youtube'
-        ? 'https://console.cloud.google.com/apis/credentials'
-        : 'https://dev.twitch.tv/console/apps'
-      const setupPopup = window.open(setupUrl, `${provider}-oauth-setup`, 'width=1120,height=820')
-      if (!setupPopup) throw new Error('初回接続の準備画面を開けませんでした。ポップアップを許可してください')
-      setupPopup.focus()
-      const service = provider === 'youtube' ? 'Google' : 'Twitch'
-      setOAuthProgress((current) => ({ ...current, [provider]: `${service}の開発者画面を開きました。まだ接続は完了していません` }))
-      setToast({ kind: 'warning', text: `${service} の初回準備画面を開きました。アプリ登録後に「状態を再確認」を押してください` })
-      return
+      const service = provider === 'youtube' ? 'YouTube' : 'Twitch'
+      throw new Error(`${service}接続機能が配布パッケージに含まれていません。利用者による開発者登録は不要です`)
     }
     if (oauthPopup.current && !oauthPopup.current.closed) {
       oauthPopup.current.focus()
