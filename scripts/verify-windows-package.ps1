@@ -69,8 +69,10 @@ try {
   Start-Process -FilePath $exe -WorkingDirectory $runtime
   $listener = Wait-ForListener $true
   $health = Invoke-RestMethod "http://127.0.0.1:$port/api/health" -TimeoutSec 10
+  $web = Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 10
   $results.freshStart = $health.ok -and $health.dataDirectory -eq $dataDirectory
   $results.loopbackOnly = @($listener | Where-Object LocalAddress -ne '127.0.0.1').Count -eq 0
+  $results.securityHeaders = $web.Headers['Content-Security-Policy'] -match "script-src 'self'" -and $web.Headers['X-Content-Type-Options'] -eq 'nosniff'
   $firstProcessCount = (Get-TestProcesses).Count
 
   $second = Start-Process -FilePath $exe -WorkingDirectory $runtime -PassThru

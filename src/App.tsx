@@ -115,7 +115,7 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
 }
 
 const oauthStageLabels: Record<OAuthConnectionStatus['stage'], string> = {
-  setup_required: '配布設定エラー', ready: '認証開始できます', authorizing: '認証待ち', partial: '一部のみ完了', connected: '接続済み',
+  setup_required: '配布設定エラー', ready: '認証開始できます', authorizing: '認証待ち', partial: '一部のみ完了', connected: '認証保存済み',
 }
 
 function OAuthServiceCard({ status, progress, saving, onConnect }: { status: OAuthConnectionStatus; progress?: string; saving: boolean; onConnect: () => void }) {
@@ -148,7 +148,7 @@ function OAuthServiceCard({ status, progress, saving, onConnect }: { status: OAu
       </ol>
       {(status.stage === 'setup_required' || status.stage === 'partial') && <div className="oauth-error" role="alert">{progress ?? status.detail}</div>}
       <div className="oauth-footer">
-        {status.stage === 'connected' && <span>{status.detail} ・ 自動更新有効</span>}
+        {status.stage === 'connected' && <span>{status.detail} ・ 再起動後も保持（実通信は上部の配信状態で確認）</span>}
         {status.stage !== 'connected' && status.stage !== 'setup_required' && <span>{progress ?? status.detail}</span>}
         <button className={status.stage === 'connected' ? 'ghost-button' : 'primary-button'} disabled={saving || !status.appConfigured} onClick={onConnect}>{buttonLabel}</button>
       </div>

@@ -117,7 +117,7 @@ export class OAuthManager {
             : 'setup_required'
 
     const youtubeDetail = youtubeStage === 'connected'
-      ? 'Google認証と更新トークンの保存が完了しています'
+      ? 'Google認証情報をWindows資格情報へ保存済みです'
       : youtubeStage === 'authorizing'
         ? 'Googleの認証完了を待っています'
         : youtubeStage === 'partial'
@@ -126,7 +126,7 @@ export class OAuthManager {
             ? 'OAuthアプリ準備済みです。Google認証を開始できます'
             : 'この配布パッケージにYouTube接続機能が含まれていません。更新版を再インストールしてください'
     const twitchDetail = twitchStage === 'connected'
-      ? 'Twitch認証と配信者情報の取得が完了しています'
+      ? 'Twitch認証情報と配信者IDをWindows資格情報へ保存済みです'
       : twitchStage === 'authorizing'
         ? 'Twitchのデバイス認証完了を待っています'
         : twitchStage === 'partial'

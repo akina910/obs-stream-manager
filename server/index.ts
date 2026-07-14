@@ -22,16 +22,6 @@ const dataDir = getDataDirectory()
 const store = new DataStore(dataDir)
 await store.initialize()
 const secrets = new SecretStore()
-secrets.set('youtube-client-secret', '')
-secrets.set('twitch-client-secret', '')
-const storedConfig = await store.getConfig()
-if (storedConfig.youtube.clientSecretStored || storedConfig.twitch.clientSecretStored) {
-  await store.saveConfig({
-    ...storedConfig,
-    youtube: { ...storedConfig.youtube, clientSecretStored: false },
-    twitch: { ...storedConfig.twitch, clientSecretStored: false },
-  })
-}
 await provisionDistributorOAuth(store, secrets)
 const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets)
@@ -50,6 +40,18 @@ const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpene
 
 export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
+
+app.addHook('onSend', async (request, reply, payload) => {
+  reply.header('X-Content-Type-Options', 'nosniff')
+  reply.header('Referrer-Policy', 'no-referrer')
+  if (!request.url.startsWith('/api/')) {
+    reply.header(
+      'Content-Security-Policy',
+      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'",
+    )
+  }
+  return payload
+})
 
 app.setErrorHandler((error, _request, reply) => {
   const normalized = error instanceof Error ? error : new Error(String(error))

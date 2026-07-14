@@ -74,8 +74,10 @@ describe('distributor OAuth provisioning', () => {
     test.values.set('youtube-refresh-token', 'youtube-refresh')
     test.values.set('youtube-stream-key', 'youtube-stream-key')
     test.values.set('youtube-stream-server', 'rtmps://test.youtube/live2')
+    test.values.set('youtube-client-secret', 'legacy-youtube-secret')
     test.values.set('twitch-access-token', 'twitch-access')
     test.values.set('twitch-refresh-token', 'twitch-refresh')
+    test.values.set('twitch-client-secret', 'legacy-twitch-secret')
     await test.store.saveConfig({
       ...configured,
       youtube: { ...configured.youtube, refreshTokenStored: true },
@@ -90,12 +92,13 @@ describe('distributor OAuth provisioning', () => {
       youtube: { clientId: 'youtube-client', clientSecretStored: false, refreshTokenStored: true },
       twitch: { clientId: 'twitch-client', accessTokenStored: true, refreshTokenStored: true, broadcasterId: 'broadcaster' },
     })
-    expect(test.values.has('youtube-client-secret')).toBe(false)
+    expect(test.values.get('youtube-client-secret')).toBe('legacy-youtube-secret')
     expect(test.values.get('youtube-refresh-token')).toBe('youtube-refresh')
     expect(test.values.get('youtube-stream-key')).toBe('youtube-stream-key')
     expect(test.values.get('youtube-stream-server')).toBe('rtmps://test.youtube/live2')
     expect(test.values.get('twitch-access-token')).toBe('twitch-access')
     expect(test.values.get('twitch-refresh-token')).toBe('twitch-refresh')
+    expect(test.values.get('twitch-client-secret')).toBe('legacy-twitch-secret')
   })
 
   it('invalidates old account tokens only when the distributor client changes', async () => {
@@ -108,8 +111,10 @@ describe('distributor OAuth provisioning', () => {
     test.values.set('youtube-refresh-token', 'youtube-refresh')
     test.values.set('youtube-stream-key', 'youtube-stream-key')
     test.values.set('youtube-stream-server', 'rtmps://test.youtube/live2')
+    test.values.set('youtube-client-secret', 'legacy-youtube-secret')
     test.values.set('twitch-access-token', 'twitch-access')
     test.values.set('twitch-refresh-token', 'twitch-refresh')
+    test.values.set('twitch-client-secret', 'legacy-twitch-secret')
     await test.store.saveConfig({
       ...configured,
       youtube: { ...configured.youtube, refreshTokenStored: true, broadcastId: 'broadcast' },
@@ -126,7 +131,9 @@ describe('distributor OAuth provisioning', () => {
     expect(test.values.has('youtube-refresh-token')).toBe(false)
     expect(test.values.has('youtube-stream-key')).toBe(false)
     expect(test.values.has('youtube-stream-server')).toBe(false)
+    expect(test.values.has('youtube-client-secret')).toBe(false)
     expect(test.values.has('twitch-access-token')).toBe(false)
     expect(test.values.has('twitch-refresh-token')).toBe(false)
+    expect(test.values.has('twitch-client-secret')).toBe(false)
   })
 })

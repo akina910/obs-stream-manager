@@ -66,16 +66,18 @@ export async function provisionProviderOAuth(
   const twitchClientChanged = Boolean(credentials.twitch && credentials.twitch.clientId !== current.twitch.clientId)
 
   if (youtubeClientChanged) {
+    // Delete obsolete confidential-client material only as part of an actual
+    // distributor client migration. Repeating this on every startup can destroy
+    // credentials before a replacement public client has been validated.
+    secrets.set('youtube-client-secret', '')
     secrets.set('youtube-refresh-token', '')
     clearYouTubeStreamSecrets(secrets)
   }
   if (twitchClientChanged) {
+    secrets.set('twitch-client-secret', '')
     secrets.set('twitch-access-token', '')
     secrets.set('twitch-refresh-token', '')
   }
-  // Installed applications are public OAuth clients. Remove credentials left by
-  // older builds instead of shipping or persisting a client secret.
-  secrets.set('youtube-client-secret', '')
 
   return store.saveConfig({
     ...current,
