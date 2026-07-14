@@ -1,0 +1,38 @@
+name: Windows distribution
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: windows-2025
+    env:
+      OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID: ${{ vars.YOUTUBE_CLIENT_ID }}
+      OBS_STREAM_MANAGER_TWITCH_CLIENT_ID: ${{ vars.TWITCH_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Require release OAuth public client IDs
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID)) { throw 'Repository variable YOUTUBE_CLIENT_ID is required' }
+          if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID)) { throw 'Repository variable TWITCH_CLIENT_ID is required' }
+      - run: npm ci
+      - run: npm run check
+      - run: npm run dist:win
+      - run: npm run verify:package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-stream-manager-windows-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release/*-Setup-*.exe
+            release/*-Portable-*.exe
+            release/*.zip

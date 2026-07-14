@@ -1,0 +1,39 @@
+name: バグ報告
+description: 再現できる不具合を報告します
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        アクセストークン、更新トークン、認証コード、Client Secret、配信キー、OBSパスワード、Steam APIキーを貼らないでください。
+  - type: input
+    id: app-version
+    attributes:
+      label: OBS Stream Managerのバージョン
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: WindowsとOBSのバージョン
+      placeholder: Windows 11 24H2 / OBS Studio 31.1
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する結果と実際の結果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 秘密情報を除いたログ
+      description: 貼り付ける前に必ず秘密情報が無いことを確認してください。

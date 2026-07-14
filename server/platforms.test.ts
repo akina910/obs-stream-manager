@@ -69,10 +69,9 @@ describe('PlatformServices Twitch token management', () => {
 })
 
 describe('PlatformServices YouTube token management', () => {
-  it('refreshes an installed-app token with the distributor client secret', async () => {
+  it('refreshes an installed-app token as a public client without a client secret', async () => {
     const secrets = new Map([
       ['youtube-refresh-token', 'youtube-refresh'],
-      ['youtube-client-secret', 'youtube-client-secret'],
     ])
     const secretStore = {
       get: vi.fn((name: string) => secrets.get(name) ?? null),
@@ -92,7 +91,7 @@ describe('PlatformServices YouTube token management', () => {
 
     const refreshBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(refreshBody.get('client_id')).toBe('youtube-client-id')
-    expect(refreshBody.get('client_secret')).toBe('youtube-client-secret')
+    expect(refreshBody.has('client_secret')).toBe(false)
   })
 
   it('stores the bound YouTube ingestion key in the OS secret store during preparation', async () => {
@@ -187,6 +186,57 @@ describe('PlatformServices YouTube token management', () => {
       latencyPreference: 'low',
     })
     expect(store.saveConfig).toHaveBeenCalled()
+  })
+
+  it('creates and binds a reusable YouTube stream when the channel has none', async () => {
+    const values = new Map([['youtube-refresh-token', 'youtube-refresh']])
+    const secretStore = {
+      get: vi.fn((name: string) => values.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { values.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.broadcastId = 'broadcast-id'
+    const profile = structuredClone(starterProfiles[0])
+    const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveBroadcasts') && !init?.method) return json({ items: [{
+        id: 'broadcast-id',
+        snippet: { scheduledStartTime: '2026-07-14T00:00:00.000Z' },
+        status: { lifeCycleStatus: 'ready', privacyStatus: 'private' },
+        contentDetails: {},
+      }] })
+      if (url.pathname.endsWith('/liveStreams') && init?.method === 'POST') return json({
+        id: 'created-stream-id',
+        cdn: { ingestionInfo: { streamName: 'created-stream-key', rtmpsIngestionAddress: 'rtmps://created.youtube/live2' } },
+      })
+      if (url.pathname.endsWith('/liveStreams') && url.searchParams.get('mine') === 'true') return json({ items: [] })
+      return json({})
+    })
+    const store = {
+      getConfig: vi.fn().mockResolvedValue(configured),
+      saveConfig: vi.fn(async (value) => value),
+      getThumbnailPath: vi.fn().mockReturnValue(null),
+    } as unknown as DataStore
+    const platforms = new PlatformServices(secretStore, store)
+    const prepareYouTube = (platforms as unknown as {
+      prepareYouTube: (config: typeof configured, selected: GameProfile) => Promise<ThumbnailPreparation>
+    }).prepareYouTube.bind(platforms)
+
+    await expect(prepareYouTube(configured, profile)).resolves.toMatchObject({ status: 'not_registered' })
+
+    const created = fetchMock.mock.calls.find(([input, init]) => String(input).includes('/liveStreams?') && init?.method === 'POST')
+    expect(new URL(String(created?.[0])).searchParams.get('part')).toBe('id,snippet,cdn,contentDetails')
+    expect(JSON.parse(String(created?.[1]?.body))).toEqual({
+      snippet: { title: 'OBS Stream Manager reusable stream' },
+      cdn: { ingestionType: 'rtmp', resolution: 'variable', frameRate: 'variable' },
+      contentDetails: { isReusable: true },
+    })
+    expect(fetchMock.mock.calls.some(([input, init]) => String(input).includes('/liveBroadcasts/bind') && init?.method === 'POST')).toBe(true)
+    expect(values.get('youtube-stream-key')).toBe('created-stream-key')
+    expect(values.get('youtube-stream-server')).toBe('rtmps://created.youtube/live2')
   })
 })
 

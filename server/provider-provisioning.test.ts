@@ -37,35 +37,36 @@ describe('distributor OAuth provisioning', () => {
     const filename = path.join(test.directory, 'provider-oauth.json')
     await writeFile(filename, JSON.stringify({
       version: 1,
-      youtube: { clientId: 'youtube-client', clientSecret: 'youtube-secret' },
+      youtube: { clientId: 'youtube-client' },
       twitch: { clientId: 'twitch-client' },
     }))
 
     await expect(loadProviderOAuthBundle(filename)).resolves.toEqual({
-      youtube: { clientId: 'youtube-client', clientSecret: 'youtube-secret' },
+      youtube: { clientId: 'youtube-client' },
       twitch: { clientId: 'twitch-client' },
     })
   })
 
   it('rejects unsupported or incomplete release-time bundles', () => {
     expect(() => parseProviderOAuthBundle({ version: 2, twitch: { clientId: 'twitch-client' } })).toThrow(/version/)
-    expect(() => parseProviderOAuthBundle({ version: 1, youtube: { clientId: 'youtube-client' } })).toThrow(/youtube.clientSecret/)
+    expect(() => parseProviderOAuthBundle({ version: 1, youtube: {} })).toThrow(/youtube.clientId/)
+    expect(() => parseProviderOAuthBundle({ version: 1, youtube: { clientId: 'youtube-client', clientSecret: 'must-not-ship' } })).toThrow(/must not contain/)
     expect(() => parseProviderOAuthBundle({ version: 1 })).toThrow(/does not contain a provider/)
   })
 
-  it('rejects half-configured YouTube environment provisioning', async () => {
+  it('accepts a public YouTube client ID without a client secret', async () => {
     vi.stubEnv('OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE', '')
     vi.stubEnv('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID', 'youtube-client')
     vi.stubEnv('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET', '')
     vi.stubEnv('OBS_STREAM_MANAGER_TWITCH_CLIENT_ID', '')
 
-    await expect(loadDistributorOAuthCredentials()).rejects.toThrow(/both YouTube Client ID and Client Secret/)
+    await expect(loadDistributorOAuthCredentials()).resolves.toEqual({ youtube: { clientId: 'youtube-client' } })
   })
 
   it('persists provider configuration and preserves account links across a restart', async () => {
     const test = await harness()
     const credentials = {
-      youtube: { clientId: 'youtube-client', clientSecret: 'youtube-secret' },
+      youtube: { clientId: 'youtube-client' },
       twitch: { clientId: 'twitch-client' },
     }
     await provisionProviderOAuth(test.store, test.secrets, credentials)
@@ -86,10 +87,10 @@ describe('distributor OAuth provisioning', () => {
     await restarted.initialize()
 
     await expect(restarted.getConfig()).resolves.toMatchObject({
-      youtube: { clientId: 'youtube-client', clientSecretStored: true, refreshTokenStored: true },
+      youtube: { clientId: 'youtube-client', clientSecretStored: false, refreshTokenStored: true },
       twitch: { clientId: 'twitch-client', accessTokenStored: true, refreshTokenStored: true, broadcasterId: 'broadcaster' },
     })
-    expect(test.values.get('youtube-client-secret')).toBe('youtube-secret')
+    expect(test.values.has('youtube-client-secret')).toBe(false)
     expect(test.values.get('youtube-refresh-token')).toBe('youtube-refresh')
     expect(test.values.get('youtube-stream-key')).toBe('youtube-stream-key')
     expect(test.values.get('youtube-stream-server')).toBe('rtmps://test.youtube/live2')
@@ -100,7 +101,7 @@ describe('distributor OAuth provisioning', () => {
   it('invalidates old account tokens only when the distributor client changes', async () => {
     const test = await harness()
     await provisionProviderOAuth(test.store, test.secrets, {
-      youtube: { clientId: 'youtube-old', clientSecret: 'youtube-secret-old' },
+      youtube: { clientId: 'youtube-old' },
       twitch: { clientId: 'twitch-old' },
     })
     const configured = await test.store.getConfig()
@@ -116,7 +117,7 @@ describe('distributor OAuth provisioning', () => {
     })
 
     const changed = await provisionProviderOAuth(test.store, test.secrets, {
-      youtube: { clientId: 'youtube-new', clientSecret: 'youtube-secret-new' },
+      youtube: { clientId: 'youtube-new' },
       twitch: { clientId: 'twitch-new' },
     })
 

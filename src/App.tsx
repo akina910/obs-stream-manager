@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
-  AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleStop, Gamepad2,
+  AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleStop, Copy, Gamepad2,
   Image as ImageIcon, LoaderCircle, LockKeyhole, MessageSquareText, Play, Plus, RefreshCw,
   Search, Settings, Star, Trash2, Upload, X,
 } from 'lucide-react'
@@ -47,6 +47,16 @@ function tileStyle(profile: GameProfile): CSSProperties {
 
 function BrandGlyph() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2" /><circle cx="12" cy="12" r="3" /></svg>
+}
+
+function DesktopLaunchNotice() {
+  const desktop = window.obsStreamManagerDesktop
+  const [copied, setCopied] = useState(false)
+  if (!desktop) return null
+  return <aside className="desktop-launch-notice">
+    <div><strong>OBSブラウザドック URL</strong><code>{desktop.dockUrl}</code><span>OBSの「ドック」→「カスタムブラウザドック」に登録してください。</span></div>
+    <button onClick={() => void desktop.copyDockUrl().then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 2_000) })}><Copy size={14} />{copied ? 'コピー済み' : 'コピー'}</button>
+  </aside>
 }
 
 function ServiceIcon({ service }: { service: 'obs' | 'youtube' | 'twitch' }) {
@@ -519,6 +529,36 @@ export default function App() {
   const connectOAuth = async (provider: OAuthProvider) => {
     const configured = Boolean(oauthStatus?.[provider].appConfigured)
     if (!configured) throw new Error(`${provider === 'youtube' ? 'YouTube' : 'Twitch'}接続機能が配布パッケージに含まれていません。利用者による開発者登録は不要です`)
+    const desktop = window.obsStreamManagerDesktop
+    if (desktop) {
+      setOAuthProgress((current) => ({ ...current, [provider]: `${provider === 'youtube' ? 'Google' : 'Twitch'}認証を開始しています` }))
+      try {
+        const started = await api.oauthStart(provider, window.location.origin)
+        await loadOAuthStatus()
+        await desktop.openExternal(started.url)
+        if (started.mode === 'redirect') {
+          setOAuthProgress((current) => ({ ...current, [provider]: 'ブラウザでGoogleのアカウント選択と権限承認を完了してください' }))
+          return
+        }
+        setOAuthProgress((current) => ({ ...current, [provider]: `ブラウザでTwitchを承認してください。確認コード: ${started.userCode}` }))
+        setToast({ kind: 'warning', text: `Twitch 認証コード: ${started.userCode}（画面で求められた場合）` })
+        while (Date.now() < started.expiresAt) {
+          await new Promise((resolve) => window.setTimeout(resolve, started.intervalMs))
+          const result = await api.oauthPollTwitch(started.requestId)
+          if (result.status === 'complete') {
+            await refresh()
+            setOAuthProgress((current) => ({ ...current, [provider]: 'Twitch認証と配信者情報の取得が完了しました' }))
+            return
+          }
+        }
+        throw new Error('Twitch 認証の有効期限が切れました')
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        setOAuthProgress((current) => ({ ...current, [provider]: `接続に失敗しました: ${reason}` }))
+        await loadOAuthStatus().catch(() => undefined)
+        throw error
+      }
+    }
     if (oauthPopup.current && !oauthPopup.current.closed) { oauthPopup.current.focus(); throw new Error('認証ウィンドウで接続を完了してください') }
     const popup = window.open('about:blank', `${provider}-oauth`, 'width=560,height=720')
     if (!popup) throw new Error('認証ウィンドウを開けませんでした。ポップアップを許可してください')
@@ -546,6 +586,7 @@ export default function App() {
 
   return <div className="app-frame"><div className="app-shell">
     <header className="app-header"><div className="brand"><div className="brand-mark"><BrandGlyph /></div><strong>STREAM MANAGER</strong></div><div className={`header-status ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} /><span>OBS{status.obsConnected ? '接続中' : '未接続'}</span></div></header>
+    <DesktopLaunchNotice />
     <nav className="tabs">{groups.map(({ id, label }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}</nav>
     <RuntimeStatusBar status={status} />
     {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} status={status} oauthStatus={oauthStatus} oauthProgress={oauthProgress} steamScan={steamScan} onOAuthConnect={connectOAuth} onReconnect={async () => { await refresh(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); await loadOAuthStatus(); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamScan={async () => { const result = await api.steamScan(); if (result.skipped) return; if (result.created || result.updated) setProfiles(result.profiles); setSteamScan(result); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam自動検出: ${result.installed}本・新規${result.created}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} onSteamSync={async () => { const result = await api.steamSync(); if (result.created || result.updated) setProfiles(result.profiles); setSteamScan(result); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>OAuth接続状態を取得できません。OBS操作は利用できます。</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />状態を再確認</button></main>) : <main className="library-view">

@@ -1,135 +1,73 @@
 # OBS Stream Manager
 
-YouTube を主配信先、Twitch を副配信先として使うための、ローカルファーストな OBS ブラウザドックです。ゲームを選択して「配信開始」を押すだけで、OBS のシーン・キャプチャ・音量・録画・リプレイと配信先メタデータをまとめて適用します。
+ゲーム選択、OBS操作、YouTube／Twitchの配信設定を一つのOBSブラウザドックにまとめるWindowsアプリです。利用者はNode.js、npm、コマンド操作、Client ID入力、開発者登録を必要としません。
 
-> 初期リリースです。本番配信前に、限定公開の YouTube 枠と Twitch テストアカウントで必ず動作確認してください。
+> 現在は開発中です。動作保証や個別サポートはありません。本番前にYouTubeの非公開配信とTwitchのテスト配信で確認してください。
 
-## 主な機能
+## インストール
 
-- PC／Nintendo Switch／例外ゲームを一つのドックで管理
-- ローカルゲーム、GeForce NOW、ウィンドウ、Elgato のキャプチャ切替
-- OBS WebSocket によるシーン、映像ソース、音量、録画、リプレイ操作
-- YouTube 配信枠の作成・更新、タイトル、説明、公開範囲、ゲーム別サムネイルの初回登録後自動適用
-- Twitch タイトル、カテゴリ、タグの自動適用
-- YouTube と Twitch のコメント統合表示
-- Steam 所有ゲーム API とローカルインストール検出、App ID／ゲーム名による重複統合
-- ゲーム別サムネイル、音量、録画先、リプレイ時間
-- 設定とゲームプロファイルのバックアップ・復元
-- OS 資格情報ストアによる OAuth トークン、API キー、OBS パスワードの保護
-- Stream Deck から呼べるローカル HTTP API
-- Source Record と Aitum Vertical の個別録画制御（失敗時も本配信は継続）
+### インストーラー版
+
+1. GitHub Releasesから `OBS Stream Manager-Setup-*.exe` を取得します。
+2. EXEをダブルクリックし、画面に従ってインストールします。
+3. スタートメニューまたはデスクトップの「OBS Stream Manager」を起動します。
+
+### Portable版
+
+`OBS Stream Manager-*-win.zip` を任意のフォルダーへ展開し、`OBS Stream Manager.exe` を起動します。インストールせず試す場合や、USB／別フォルダーで本体を管理する場合に向きます。設定と認証情報はPortable本体ではなく、インストーラー版と同じWindowsのユーザーデータ領域へ保存されます。
+
+## OBSへドックを追加
+
+1. OBS Studioを起動します。
+2. 「ドック」→「カスタムブラウザドック」を開きます。
+3. 名前に `Stream Manager`、URLに `http://127.0.0.1:4317` を入力します。
+4. 追加したドックを任意の位置へ配置します。
+
+アプリの起動画面にも登録用URLとコピーボタンを表示します。OBS側の詳しい準備は [OBS_SETUP.md](docs/OBS_SETUP.md) を参照してください。
+
+## 最初の接続と配信
+
+1. 設定画面でOBS WebSocketのパスワードを保存します。
+2. 「YouTubeに接続」「Twitchに接続」を押します。
+3. 既定ブラウザでアカウントを選び、権限を許可します。
+4. アプリへ戻り、両サービスが「接続済み」になったことを確認します。
+5. ゲームを選び、「配信開始」を押します。
+
+認証はYouTubeがデスクトップ向けPKCE、TwitchがDevice Code Flowです。Client ID／Secret／API Key／Broadcaster IDを利用者が入力する画面はありません。「配布設定エラー」が表示される場合は配布物の不備なので、利用者が開発者コンソールで設定せずIssueで報告してください。
 
 ## 必要環境
 
-- Windows 11（配信本番の推奨環境）
-- Node.js 22 以上
-- OBS Studio 30 以上（WebSocket サーバーを有効化）
-- Aitum Multistream
-- 必要に応じて Aitum Vertical、Source Record、Advanced Scene Switcher
+- Windows 11 x64
+- OBS Studio 30以上（内蔵WebSocketサーバーを有効化）
+- Aitum Multistream（YouTube／Twitchへの複数出力に使用）
+- 任意: Aitum Vertical、Source Record、Advanced Scene Switcher
 
-開発と設定編集は macOS／Linux でも可能ですが、Game Pass、GeForce NOW、Elgato を含む本番確認は Windows で行ってください。
+Source RecordやAitum Verticalが無い場合、その個別録画機能だけが警告付きで無効になります。Node.jsは不要です。
 
-## セットアップ
+## 主な機能
 
-```powershell
-git clone https://github.com/akina910/obs-stream-manager.git
-cd obs-stream-manager
-npm ci
-npm run build
-npm start
-```
+- PC／Nintendo Switch／例外ゲームのプロファイル管理
+- Steamインストール済みゲームの自動検出と一覧追加
+- OBSシーン、キャプチャ、音量、録画、リプレイの連動
+- YouTube配信枠、タイトル、説明、公開範囲、ゲーム別サムネイルの自動適用
+- Twitchタイトル、カテゴリ、タグの自動適用
+- YouTube／Twitchの実配信状態を個別表示
+- コメント統合表示、設定バックアップ／復元
+- OAuthトークン、配信キー、OBSパスワード等のWindows資格情報マネージャー保存
 
-ブラウザで `http://127.0.0.1:4317` を開きます。OBS では「ドック」→「カスタムブラウザドック」に同じ URL を登録してください。
+## データ、更新、アンインストール
 
-OBS 側のシーン、ソース、音声トラック、プラグイン連動は [OBS_SETUP.md](docs/OBS_SETUP.md) に沿って設定します。
+個人設定、ゲームプロファイル、サムネイル、ログは `%APPDATA%\obs-stream-manager` に保存されます。アプリを更新してもこのフォルダーは維持されます。OAuthトークン、配信キー、OBSパスワードなどの秘密情報は通常設定やバックアップへ入れず、Windows資格情報マネージャーへ保存します。
 
-### 開発モード
+アンインストールはWindowsの「設定」→「アプリ」→「インストールされているアプリ」から行います。再インストール時に設定を引き継げるよう、アンインストールだけでは個人データを削除しません。完全に削除する場合は、アンインストール後に `%APPDATA%\obs-stream-manager` とWindows資格情報マネージャー内の `obs-stream-manager` 項目を利用者自身で削除してください。
 
-```bash
-npm install
-npm run dev
-```
+## Issue / Pull Request
 
-- UI: `http://127.0.0.1:4318`
-- API: `http://127.0.0.1:4317`
+IssueとPull Requestを歓迎します。バグ報告にはWindows／OBS／本アプリのバージョン、再現手順、秘密を除いたログを添えてください。アクセストークン、更新トークン、認証コード、Client Secret、配信キー、OBSパスワード、Steam APIキーをIssueやスクリーンショットへ貼らないでください。
 
-## YouTube / Twitch 認証
+## 開発者向け
 
-利用者が行う操作は、設定画面の「YouTubeで接続」「Twitchで接続」を押して各サービスで許可するだけです。利用者ごとに Google Cloud や Twitch Developer Console でアプリを作る必要はなく、Client ID、Client Secret、Broadcaster ID の入力欄もありません。Google はデスクトップアプリ向け PKCE、Twitch は公開クライアント向け Device Code Flow を使用します。
-
-接続ボタンに「配布設定エラー」と表示される場合は配布パッケージ側の不備です。利用者を開発者コンソールへ誘導せず、接続情報を含む更新版で直します。
-
-### 配布者向けプロビジョニング
-
-ここからはアプリ配布者だけが行う作業です。Google と Twitch の OAuth アプリは配布者が一度だけ作成し、全利用者の接続ボタンで共用します。Google のトークン交換では、このデスクトップクライアントに紐づく Client Secret も必要です。
-
-リリース／インストーラーは、`provider-oauth.example.json` と同じ形式の一時ファイルを `OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE` で渡すか、環境変数を渡します。サーバー起動時に自動で構成され、Google Client Secret は OS 資格情報ストアへ、公開 Client ID はアプリ設定へ保存されます。実値入りの `provider-oauth.json` は `.gitignore` 対象であり、公開リポジトリへコミットしません。
-
-```powershell
-$env:OBS_STREAM_MANAGER_GOOGLE_CLIENT_JSON='C:\path\to\client_secret.json'
-$env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID='your-public-client-id'
-npm run oauth:configure
-```
-
-上記コマンドは配布者のローカル構成用です。通常利用者には実行させません。同じクライアント情報で再起動しても、保存済みのアカウント連携やトークンは維持されます。配布者が Client ID を変更した場合だけ、古い連携を安全に無効化して再認証を要求します。
-
-YouTube Studio では再利用可能な配信ストリームを一つ作成し、そのストリームキーを Aitum Multistream の YouTube 出力へ設定してください。本アプリは配信枠を自動作成しますが、秘密のストリームキーを API から取得して OBS 設定へ書き込むことはしません。
-
-Googleのデスクトップアプリはローカルループバックを使用します。TwitchはDevice Code Flowのためコールバック入力を使用しません。
-
-```text
-http://127.0.0.1:4317/api/oauth/youtube/callback
-```
-
-Client Secret、更新トークン、アクセストークンは設定 JSON やログには保存されません。Windows Credential Manager、macOS Keychain、Linux Secret Service のいずれかに保存されます。
-
-## サムネイル運用
-
-ゲーム設定で PNG／JPG／WEBP（最大4 MB）を一度登録すると、以後はゲーム選択時に同じ画像を YouTube へ自動適用します。差し替え、削除、自動適用の無効化もゲーム設定から行えます。
-
-アップロードは一度再試行し、それでも失敗した場合は YouTube 側の前回画像を維持して配信準備を続行します。
-
-## Steam / Game Pass
-
-画面を開くと、Windows レジストリから Steam 本体を検出し、`libraryfolders.vdf` に登録された全ライブラリの `appmanifest_*.acf` を自動スキャンします。インストール済みゲームは既存設定やサムネイルを維持したまま PC 一覧へ自動追加され、インストール先の手入力は不要です。設定画面からいつでも再スキャンできます。
-
-Steam Web API の SteamID64 / API キーは、未インストールの所有ゲームまで一覧へ取り込む場合だけ任意で設定します。未設定でもローカルゲームの自動検出は動作します。
-
-Game Pass／Xboxゲームは安定した全件取得APIに依存せず、ゲーム設定の「Game Pass / Xbox」から手動登録します。
-
-## 個人データと公開リポジトリ
-
-個人用データはプロジェクト内ではなく、既定で次の OS アプリデータ領域に作成されます。
-
-- Windows: `%APPDATA%\obs-stream-manager`
-- macOS: `~/Library/Application Support/obs-stream-manager`
-- Linux: `$XDG_CONFIG_HOME/obs-stream-manager`
-
-保存対象は `config/`、`profiles/`、`thumbnails/`、`descriptions/`、`logs/`、`backups/`、`database/` です。これらの同名ディレクトリと `.env` は `.gitignore` でも除外しています。
-
-保存先を明示する場合は `OBS_STREAM_MANAGER_DATA_DIR` を指定します。
-
-## Stream Deck API
-
-Stream Deck の「Webサイト」や HTTP リクエスト対応プラグインから利用できます。
-
-```text
-POST /api/select              { "gameId": "ark_survival_ascended" }
-POST /api/stream/start        { "allowServiceFailures": false }
-POST /api/stream/stop         {}
-POST /api/replay/save         {}
-POST /api/scene               { "sceneName": "30_AWAY" }
-```
-
-API は既定で `127.0.0.1` にだけバインドされ、外部ネットワークには公開されません。
-
-## 品質チェック
-
-```bash
-npm run check
-```
-
-型検査、ESLint、Vitest、本番ビルドを順番に実行します。
+開発環境の準備、テスト、Windows配布物の再現方法、配布者だけが行うOAuthクライアント設定は [DEVELOPMENT.md](docs/DEVELOPMENT.md) と [DISTRIBUTION.md](docs/DISTRIBUTION.md) に分離しています。
 
 ## ライセンス
 

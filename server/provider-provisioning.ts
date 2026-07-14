@@ -5,7 +5,7 @@ import type { SecretStore } from './secrets.js'
 import type { DataStore } from './storage.js'
 
 export type ProviderOAuthCredentials = {
-  youtube?: { clientId: string; clientSecret: string }
+  youtube?: { clientId: string }
   twitch?: { clientId: string }
 }
 
@@ -26,11 +26,11 @@ export function parseProviderOAuthBundle(value: unknown): ProviderOAuthCredentia
   const bundle = value as Partial<ProviderOAuthBundle>
   if (bundle.version !== 1) throw new Error('Unsupported provider OAuth bundle version')
   if (!bundle.youtube && !bundle.twitch) throw new Error('Provider OAuth bundle does not contain a provider')
+  if (bundle.youtube && 'clientSecret' in bundle.youtube) throw new Error('Provider OAuth bundle must not contain youtube.clientSecret')
   return {
     youtube: bundle.youtube
       ? {
           clientId: requiredString(bundle.youtube.clientId, 'youtube.clientId'),
-          clientSecret: requiredString(bundle.youtube.clientSecret, 'youtube.clientSecret'),
         }
       : undefined,
     twitch: bundle.twitch
@@ -48,14 +48,10 @@ export async function loadDistributorOAuthCredentials(): Promise<ProviderOAuthCr
   if (filename) return loadProviderOAuthBundle(filename)
 
   const youtubeClientId = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID?.trim()
-  const youtubeClientSecret = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET?.trim()
   const twitchClientId = process.env.OBS_STREAM_MANAGER_TWITCH_CLIENT_ID?.trim()
-  if (!youtubeClientId && !youtubeClientSecret && !twitchClientId) return null
-  if (Boolean(youtubeClientId) !== Boolean(youtubeClientSecret)) {
-    throw new Error('Distributor provisioning requires both YouTube Client ID and Client Secret')
-  }
+  if (!youtubeClientId && !twitchClientId) return null
   return {
-    youtube: youtubeClientId && youtubeClientSecret ? { clientId: youtubeClientId, clientSecret: youtubeClientSecret } : undefined,
+    youtube: youtubeClientId ? { clientId: youtubeClientId } : undefined,
     twitch: twitchClientId ? { clientId: twitchClientId } : undefined,
   }
 }
@@ -77,7 +73,9 @@ export async function provisionProviderOAuth(
     secrets.set('twitch-access-token', '')
     secrets.set('twitch-refresh-token', '')
   }
-  if (credentials.youtube) secrets.set('youtube-client-secret', credentials.youtube.clientSecret)
+  // Installed applications are public OAuth clients. Remove credentials left by
+  // older builds instead of shipping or persisting a client secret.
+  secrets.set('youtube-client-secret', '')
 
   return store.saveConfig({
     ...current,
@@ -85,7 +83,7 @@ export async function provisionProviderOAuth(
       ? {
           ...current.youtube,
           clientId: credentials.youtube.clientId,
-          clientSecretStored: true,
+          clientSecretStored: false,
           refreshTokenStored: youtubeClientChanged ? false : current.youtube.refreshTokenStored,
           broadcastId: youtubeClientChanged ? '' : current.youtube.broadcastId,
         }

@@ -148,13 +148,11 @@ export class PlatformServices {
   }
 
   private async youtubeAccessToken(config: AppConfig): Promise<string> {
-    const clientSecret = this.secrets.get('youtube-client-secret')
     const refreshToken = this.secrets.get('youtube-refresh-token')
-    if (!config.youtube.clientId || !clientSecret || !refreshToken) throw new Error('YouTube OAuth が未設定です')
+    if (!config.youtube.clientId || !refreshToken) throw new Error('YouTube OAuth が未設定です')
     const credentialKey = crypto.createHash('sha256').update(`${config.youtube.clientId}\0${refreshToken}`).digest('hex')
     if (this.youtubeToken?.credentialKey === credentialKey && this.youtubeToken.expiresAt > Date.now() + 60_000) return this.youtubeToken.value
     const body = new URLSearchParams({ client_id: config.youtube.clientId, refresh_token: refreshToken, grant_type: 'refresh_token' })
-    body.set('client_secret', clientSecret)
     const token = await apiJson<{ access_token: string; expires_in?: number }>('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
     this.youtubeToken = { value: token.access_token, expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000, credentialKey }
     return token.access_token
@@ -236,7 +234,19 @@ export class PlatformServices {
       streamsUrl.search = new URLSearchParams({ part: 'id,cdn', mine: 'true', maxResults: '1' }).toString()
       const streams = await apiJson<{ items: YouTubeStream[] }>(streamsUrl.toString(), { headers })
       stream = streams.items[0]
-      if (!stream) throw new Error('YouTube に再利用可能な配信ストリームがありません。YouTube Studio でストリームを作成し、同じキーを Aitum Multistream に設定してください')
+      if (!stream) {
+        const createStreamUrl = new URL('https://www.googleapis.com/youtube/v3/liveStreams')
+        createStreamUrl.search = new URLSearchParams({ part: 'id,snippet,cdn,contentDetails' }).toString()
+        stream = await apiJson<YouTubeStream>(createStreamUrl.toString(), {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            snippet: { title: 'OBS Stream Manager reusable stream' },
+            cdn: { ingestionType: 'rtmp', resolution: 'variable', frameRate: 'variable' },
+            contentDetails: { isReusable: true },
+          }),
+        })
+      }
       streamId = stream.id
       const bindUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts/bind')
       bindUrl.search = new URLSearchParams({ id: broadcast.id, streamId: stream.id, part: 'id,contentDetails' }).toString()

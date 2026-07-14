@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/akina910/obs-stream-manager/security/advisories/new
+    about: 認証情報の漏えいなど公開できない問題はこちらへ報告してください。

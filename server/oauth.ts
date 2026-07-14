@@ -83,20 +83,18 @@ export class OAuthManager {
   async status(): Promise<OAuthConnectionStatuses> {
     this.purgeExpiredSessions()
     const config = await this.store.getConfig()
-    const youtubeClientSecretStored = Boolean(this.secrets.get('youtube-client-secret'))
     const youtubeRefreshTokenStored = Boolean(this.secrets.get('youtube-refresh-token'))
     const twitchAccessTokenStored = Boolean(this.secrets.get('twitch-access-token'))
     const twitchRefreshTokenStored = Boolean(this.secrets.get('twitch-refresh-token'))
 
-    const youtubeAppConfigured = Boolean(config.youtube.clientId && youtubeClientSecretStored)
-    const youtubeAppPartiallyConfigured = Boolean(config.youtube.clientId) !== youtubeClientSecretStored
+    const youtubeAppConfigured = Boolean(config.youtube.clientId)
     const youtubeAuthorizing = this.googleStates.size > 0
     const youtubeMetadataMismatch = config.youtube.refreshTokenStored !== youtubeRefreshTokenStored
     const youtubeStage: OAuthConnectionStage = youtubeAuthorizing
       ? 'authorizing'
       : youtubeRefreshTokenStored && youtubeAppConfigured
         ? 'connected'
-        : youtubeRefreshTokenStored || youtubeMetadataMismatch || youtubeAppPartiallyConfigured
+        : youtubeRefreshTokenStored || youtubeMetadataMismatch
           ? 'partial'
           : youtubeAppConfigured
             ? 'ready'
@@ -123,9 +121,7 @@ export class OAuthManager {
       : youtubeStage === 'authorizing'
         ? 'Googleの認証完了を待っています'
         : youtubeStage === 'partial'
-          ? youtubeAppPartiallyConfigured
-            ? '配布パッケージのYouTube接続情報が不完全です。更新版を再インストールしてください'
-            : '保存状態が不完全です。再接続してください'
+          ? '保存状態が不完全です。再接続してください'
           : youtubeStage === 'ready'
             ? 'OAuthアプリ準備済みです。Google認証を開始できます'
             : 'この配布パッケージにYouTube接続機能が含まれていません。更新版を再インストールしてください'
@@ -169,7 +165,7 @@ export class OAuthManager {
     this.prepareStart(openerOrigin)
     const config = await this.store.getConfig()
     if (provider === 'youtube') {
-      if (!config.youtube.clientId || !this.secrets.get('youtube-client-secret')) {
+      if (!config.youtube.clientId) {
         throw new Error('配布パッケージの YouTube 接続情報が不完全です。利用者による開発者登録は不要です')
       }
       const state = crypto.randomBytes(24).toString('base64url')
@@ -224,8 +220,7 @@ export class OAuthManager {
     this.googleStates.delete(state)
     if (!expected || expected.expiresAt < Date.now()) throw new Error('OAuth state is invalid or expired')
     const config = await this.store.getConfig()
-    const clientSecret = this.secrets.get('youtube-client-secret')
-    if (!config.youtube.clientId || !clientSecret) {
+    if (!config.youtube.clientId) {
       throw new Error('配布パッケージの YouTube 接続情報が不完全です。利用者による開発者登録は不要です')
     }
     const tokenBody = new URLSearchParams({
@@ -235,7 +230,6 @@ export class OAuthManager {
       grant_type: 'authorization_code',
       code_verifier: expected.codeVerifier,
     })
-    tokenBody.set('client_secret', clientSecret)
     const response = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -247,7 +241,7 @@ export class OAuthManager {
     this.secrets.set('youtube-refresh-token', token.refresh_token)
     await this.store.saveConfig({
       ...config,
-      youtube: { ...config.youtube, refreshTokenStored: true, clientSecretStored: Boolean(clientSecret), broadcastId: '' },
+      youtube: { ...config.youtube, refreshTokenStored: true, clientSecretStored: false, broadcastId: '' },
     })
     return expected.openerOrigin
   }
