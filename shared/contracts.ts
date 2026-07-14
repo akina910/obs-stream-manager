@@ -141,9 +141,23 @@ export const RuntimeStatusSchema = z.object({
   currentScene: z.string().nullable(),
   warning: z.string().nullable(),
   busy: z.boolean(),
+  platforms: z.object({
+    youtube: z.object({
+      state: z.enum(['disabled', 'unprepared', 'ready', 'starting', 'live', 'stopping', 'offline', 'error']),
+      detail: z.string(),
+      checkedAt: z.string().datetime().nullable(),
+    }),
+    twitch: z.object({
+      state: z.enum(['disabled', 'unprepared', 'ready', 'starting', 'live', 'stopping', 'offline', 'error']),
+      detail: z.string(),
+      checkedAt: z.string().datetime().nullable(),
+    }),
+  }),
 })
 
 export type RuntimeStatus = z.infer<typeof RuntimeStatusSchema>
+export type PlatformRuntimeStatus = RuntimeStatus['platforms']['youtube']
+export type PlatformRuntimeStatuses = RuntimeStatus['platforms']
 
 export type ApplyResult = {
   profile: GameProfile

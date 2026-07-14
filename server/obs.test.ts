@@ -21,6 +21,22 @@ function youtubeSecrets(): SecretStore {
   ])
 }
 
+describe('ObsController stream events', () => {
+  it('forwards OBS stream state changes and supports unsubscribe', () => {
+    const controller = new ObsController(memorySecrets())
+    const websocket = (controller as unknown as { obs: { emit: (event: string, payload: unknown) => void } }).obs
+    const listener = vi.fn()
+    const unsubscribe = controller.onStreamStateChanged(listener)
+
+    websocket.emit('StreamStateChanged', { outputActive: true, outputState: 'OBS_WEBSOCKET_OUTPUT_STARTED' })
+    expect(listener).toHaveBeenCalledWith(true)
+
+    unsubscribe()
+    websocket.emit('StreamStateChanged', { outputActive: false, outputState: 'OBS_WEBSOCKET_OUTPUT_STOPPED' })
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('ObsController recording fallbacks', () => {
   it('reports OBS as connected when the replay buffer is unavailable', async () => {
     const fake = {

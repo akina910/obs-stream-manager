@@ -26,6 +26,7 @@ const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets)
 const platforms = new PlatformServices(secrets, store)
 const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger)
+obs.onStreamStateChanged((active) => orchestrator.handleObsStreamStateChanged(active))
 const listenPort = Number(process.env.PORT ?? 4317)
 const callbackOrigin = `http://127.0.0.1:${listenPort}`
 const allowedOAuthOpenerOrigins = new Set([

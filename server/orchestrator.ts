@@ -13,6 +13,10 @@ export class StreamOrchestrator {
   private selected: GameProfile | null = null
   private method: CaptureMethod | null = null
   private busy = false
+  private externalSyncing = false
+  private pendingObsStreamState: boolean | null = null
+  private observedObsStreaming: boolean | null = null
+  private obsStreamStateRevision = 0
   private warning: string | null = null
   private serviceFailures: string[] = []
 
@@ -25,9 +29,12 @@ export class StreamOrchestrator {
   ) {}
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.busy) throw new Error('別の配信操作を処理中です')
+    if (this.busy || this.externalSyncing) throw new Error('別の配信操作を処理中です')
     this.busy = true
-    try { return await operation() } finally { this.busy = false }
+    try { return await operation() } finally {
+      this.busy = false
+      this.scheduleObsStreamStateSync()
+    }
   }
 
   private captureSource(profile: GameProfile, method: CaptureMethod): string {
@@ -63,6 +70,7 @@ export class StreamOrchestrator {
       this.method = detection.method
       const warnings = [...detection.warnings, ...obsWarnings, ...thumbnailWarning, ...this.serviceFailures]
       this.warning = warnings[0] ?? null
+      this.platforms.invalidateLiveStatus()
       await this.logger.write('profile.applied', { gameId, captureMethod: detection.method, warnings, services, thumbnail })
       return { profile: updated, captureMethod: detection.method, warnings, services }
     })
@@ -76,29 +84,46 @@ export class StreamOrchestrator {
       const selected = this.selected
       const method = this.method
       let ownsCurrentStream = false
+      let obsStartCompleted = false
+      let lastManagedStateRevision = this.obsStreamStateRevision
       try {
         const warnings = await this.obs.start(config, selected, this.captureSource(selected, method))
+        obsStartCompleted = true
+        lastManagedStateRevision = this.obsStreamStateRevision
         ownsCurrentStream = this.obs.ownsCurrentStream()
         await this.platforms.startYouTubeBroadcast(config, selected)
         await this.platforms.startComments(config)
+        if (!await this.obs.isStreaming(config)) throw new Error('外部サービスの開始処理中にOBS配信出力が停止しました')
+        this.platforms.invalidateLiveStatus()
+        this.markManagedObsState(true)
         this.warning = warnings[0] ?? this.serviceFailures[0] ?? null
         await this.logger.write('stream.started', { gameId: selected.id, captureMethod: method, serviceFailures: this.serviceFailures, warnings })
         return warnings
       } catch (error) {
         const rollbackWarnings: string[] = []
+        let streamStateAfterFailure: boolean | null = null
         if (ownsCurrentStream) {
           let streamStopped = false
           try {
             const obsWarnings = await this.obs.stop(config, selected)
             rollbackWarnings.push(...obsWarnings.map((warning) => `OBS: ${warning}`))
             streamStopped = !await this.obs.isStreaming(config)
+            streamStateAfterFailure = !streamStopped
             if (!streamStopped) rollbackWarnings.push('OBS: 配信出力が継続しているためYouTube配信枠を終了していません')
           } catch (rollbackError) {
             rollbackWarnings.push(`OBS: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+            streamStateAfterFailure = await this.obs.isStreaming(config).catch(() => null)
           }
           if (streamStopped) {
             await this.platforms.completeYouTubeBroadcast(config, selected).catch((rollbackError) => rollbackWarnings.push(`YouTube: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`))
           }
+        } else if (obsStartCompleted) {
+          streamStateAfterFailure = await this.obs.isStreaming(config).catch(() => null)
+        }
+        if (streamStateAfterFailure === null) {
+          if (this.obsStreamStateRevision === lastManagedStateRevision) this.pendingObsStreamState = null
+        } else {
+          this.markManagedObsState(streamStateAfterFailure)
         }
         await this.platforms.stopComments().catch((rollbackError) => rollbackWarnings.push(`comments: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`))
         this.warning = error instanceof Error ? error.message : String(error)
@@ -112,13 +137,17 @@ export class StreamOrchestrator {
     return this.exclusive(async () => {
       const config = await this.store.getConfig()
       const warnings = await this.obs.stop(config, this.selected)
+      let obsStillStreaming: boolean | null = null
       try {
-        if (await this.obs.isStreaming(config)) warnings.push('OBS配信出力が継続しているため、YouTube配信枠を終了していません')
+        obsStillStreaming = await this.obs.isStreaming(config)
+        if (obsStillStreaming) warnings.push('OBS配信出力が継続しているため、YouTube配信枠を終了していません')
         else await this.platforms.completeYouTubeBroadcast(config, this.selected)
       } catch (error) {
         warnings.push(`OBS停止確認またはYouTube配信枠の終了に失敗しました: ${error instanceof Error ? error.message : String(error)}`)
       }
+      if (obsStillStreaming !== null) this.markManagedObsState(obsStillStreaming)
       await this.platforms.stopComments()
+      this.platforms.invalidateLiveStatus()
       this.warning = warnings[0] ?? null
       await this.logger.write('stream.stopped', { gameId: this.selected?.id ?? null, warnings })
       return warnings
@@ -139,8 +168,92 @@ export class StreamOrchestrator {
     })
   }
 
+  handleObsStreamStateChanged(active: boolean): void {
+    this.obsStreamStateRevision += 1
+    if (this.observedObsStreaming === active) return
+    this.observedObsStreaming = active
+    this.pendingObsStreamState = active
+    this.scheduleObsStreamStateSync()
+  }
+
+  private markManagedObsState(active: boolean): void {
+    this.obsStreamStateRevision += 1
+    this.observedObsStreaming = active
+    this.pendingObsStreamState = null
+  }
+
+  private scheduleObsStreamStateSync(): void {
+    if (this.busy || this.externalSyncing || this.pendingObsStreamState === null) return
+    void this.processObsStreamStateChanges()
+  }
+
+  private async processObsStreamStateChanges(): Promise<void> {
+    this.externalSyncing = true
+    try {
+      while (this.pendingObsStreamState !== null) {
+        const active = this.pendingObsStreamState
+        this.pendingObsStreamState = null
+        try {
+          await this.syncExternalServicesFromObs(active)
+        } catch (error) {
+          this.warning = `OBS連動処理に失敗しました: ${error instanceof Error ? error.message : String(error)}`
+          await this.logger.write('stream.obs_sync_failed', { active, error: this.warning }).catch(() => undefined)
+        }
+      }
+    } finally {
+      this.externalSyncing = false
+      this.scheduleObsStreamStateSync()
+    }
+  }
+
+  private async syncExternalServicesFromObs(active: boolean): Promise<void> {
+    const config = await this.store.getConfig()
+    const warnings: string[] = []
+    if (active) {
+      if (this.selected) {
+        await this.platforms.startYouTubeBroadcast(config, this.selected).catch((error) => {
+          warnings.push(`YouTube: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      } else {
+        warnings.push('ゲーム未選択のため、OBS映像の送信だけを検出しました。外部サービスの実状態を確認してください')
+      }
+      await this.platforms.startComments(config).catch((error) => {
+        warnings.push(`コメント: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      this.warning = warnings[0] ?? null
+      await this.logger.write('stream.obs_started', { gameId: this.selected?.id ?? null, warnings })
+    } else {
+      await this.platforms.completeYouTubeBroadcast(config, this.selected).catch((error) => {
+        warnings.push(`YouTube: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      await this.platforms.stopComments().catch((error) => {
+        warnings.push(`コメント: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      this.warning = warnings[0] ?? null
+      await this.logger.write('stream.obs_stopped', { gameId: this.selected?.id ?? null, warnings })
+    }
+    this.platforms.invalidateLiveStatus()
+  }
+
   async getStatus(): Promise<RuntimeStatus> {
-    return this.obs.status(await this.store.getConfig(), this.selected?.id ?? null, this.method, this.busy, this.warning)
+    const config = await this.store.getConfig()
+    const stateRevision = this.obsStreamStateRevision
+    const [obsStatus, platforms] = await Promise.all([
+      this.obs.status(config, this.selected?.id ?? null, this.method, this.busy || this.externalSyncing, this.warning),
+      this.platforms.getLiveStatus(config, this.selected),
+    ])
+    if (stateRevision === this.obsStreamStateRevision) {
+      if (this.observedObsStreaming === null) {
+        if (obsStatus.streaming) this.handleObsStreamStateChanged(true)
+        else {
+          this.observedObsStreaming = false
+          this.obsStreamStateRevision += 1
+        }
+      } else if (this.observedObsStreaming !== obsStatus.streaming) {
+        this.handleObsStreamStateChanged(obsStatus.streaming)
+      }
+    }
+    return { ...obsStatus, platforms }
   }
 
   async assertNotStreaming(): Promise<void> {

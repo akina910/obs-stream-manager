@@ -7,7 +7,7 @@ import {
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider } from './api'
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
-import { getBroadcastStatus, getRuntimeOutputs } from './runtime-status'
+import { getBroadcastStatus, getExternalDeliveryWarning, getRuntimeOutputs } from './runtime-status'
 
 type Tab = PlatformGroup | 'settings'
 type Toast = { kind: 'success' | 'error' | 'warning'; text: string }
@@ -31,6 +31,7 @@ function StatusDot({ active }: { active: boolean }) {
 function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
   const broadcast = getBroadcastStatus(status)
   const outputs = getRuntimeOutputs(status)
+  const deliveryWarning = getExternalDeliveryWarning(status)
 
   return (
     <section className="runtime-status" aria-label="現在の配信状態">
@@ -40,7 +41,7 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
       </div>
       <div className="runtime-output-list">
         {outputs.map((output) => (
-          <span className={`runtime-output ${output.active ? 'active' : ''}`} key={output.key} aria-label={`${output.label}: ${output.state}`}>
+          <span className={`runtime-output ${output.tone}`} key={output.key} aria-label={`${output.label}: ${output.state}`} title={output.detail}>
             <StatusDot active={output.active} />
             <span><strong>{output.label}</strong><small>{output.state}</small></span>
           </span>
@@ -49,6 +50,7 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
           <span><strong>シーン</strong><small>{status.currentScene ?? '不明'}</small></span>
         </span>
       </div>
+      {deliveryWarning && <div className="runtime-status-warning" role="alert"><AlertTriangle size={13} /><span>{deliveryWarning}</span></div>}
     </section>
   )
 }
