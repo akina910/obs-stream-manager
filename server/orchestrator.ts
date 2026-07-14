@@ -257,7 +257,9 @@ export class StreamOrchestrator {
   }
 
   async assertNotStreaming(): Promise<void> {
-    if ((await this.getStatus()).streaming) throw Object.assign(new Error('配信中はゲーム・接続設定・バックアップを変更できません。先に配信を終了してください'), { statusCode: 409 })
+    const status = await this.getStatus()
+    const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
+    if (status.streaming || externalActive) throw Object.assign(new Error('配信中はゲーム・接続設定・バックアップを変更できません。先に配信を終了してください'), { statusCode: 409 })
   }
 
   invalidateProfile(gameId: string): void {
