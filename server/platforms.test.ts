@@ -4,6 +4,7 @@ import path from 'node:path'
 import sharp from 'sharp'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GameProfile } from '../shared/contracts.js'
+import { defaultConfig, starterProfiles } from './defaults.js'
 import { PlatformServices, type ThumbnailPreparation } from './platforms.js'
 import { SecretStore } from './secrets.js'
 import { DataStore } from './storage.js'
@@ -92,5 +93,227 @@ describe('PlatformServices YouTube token management', () => {
     const refreshBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(refreshBody.get('client_id')).toBe('youtube-client-id')
     expect(refreshBody.get('client_secret')).toBe('youtube-client-secret')
+  })
+
+  it('stores the bound YouTube ingestion key in the OS secret store during preparation', async () => {
+    const values = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => values.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { values.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.broadcastId = 'broadcast-id'
+    const profile = structuredClone(starterProfiles[0])
+    profile.youtube.privacy = 'private'
+    const json = (value: unknown) => new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    let broadcastLifeCycle = 'ready'
+    let broadcastAutoStart = false
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.includes('/liveBroadcasts?') && init?.method === 'POST') return json({
+        id: 'new-broadcast-id',
+        snippet: { scheduledStartTime: '2026-07-14T00:01:00.000Z' },
+        status: { lifeCycleStatus: 'ready', privacyStatus: 'private' },
+        contentDetails: {},
+      })
+      if (url.includes('/liveBroadcasts?')) return json({ items: [{
+        id: 'broadcast-id',
+        snippet: { scheduledStartTime: '2026-07-14T00:00:00.000Z' },
+        status: { lifeCycleStatus: broadcastLifeCycle, privacyStatus: 'private' },
+        contentDetails: { boundStreamId: 'stream-id', enableAutoStart: broadcastAutoStart, enableAutoStop: false, monitorStream: { enableMonitorStream: true, broadcastStreamDelayMs: 2500 } },
+      }] })
+      if (url.includes('/liveStreams?')) return json({ items: [{
+        id: 'stream-id',
+        cdn: { ingestionInfo: { streamName: 'test-youtube-stream-key', rtmpsIngestionAddress: 'rtmps://test.youtube/live2' } },
+      }] })
+      return json({})
+    })
+    const store = {
+      getConfig: vi.fn().mockResolvedValue(configured),
+      saveConfig: vi.fn(async (value) => value),
+      getThumbnailPath: vi.fn().mockReturnValue(null),
+    } as unknown as DataStore
+    const platforms = new PlatformServices(secretStore, store)
+    const prepareYouTube = (platforms as unknown as {
+      prepareYouTube: (config: typeof configured, selected: GameProfile) => Promise<ThumbnailPreparation>
+    }).prepareYouTube.bind(platforms)
+
+    await expect(prepareYouTube(configured, profile)).resolves.toMatchObject({ status: 'not_registered' })
+
+    expect(values.get('youtube-stream-key')).toBe('test-youtube-stream-key')
+    expect(values.get('youtube-stream-server')).toBe('rtmps://test.youtube/live2')
+    const streamRequest = fetchMock.mock.calls.find(([input]) => String(input).includes('/liveStreams?'))
+    expect(String(streamRequest?.[0])).toContain('part=id%2Ccdn')
+    expect(String(streamRequest?.[0])).toContain('id=stream-id')
+    const broadcastUpdate = fetchMock.mock.calls.find(([input, init]) => String(input).includes('/liveBroadcasts?') && init?.method === 'PUT')
+    expect(new URL(String(broadcastUpdate?.[0])).searchParams.get('part')).toBe('snippet,status')
+    expect(JSON.parse(String(broadcastUpdate?.[1]?.body))).not.toHaveProperty('contentDetails')
+
+    broadcastLifeCycle = 'testing'
+    fetchMock.mockClear()
+    await expect(prepareYouTube(configured, profile)).resolves.toMatchObject({ status: 'not_registered' })
+    const testingUpdate = fetchMock.mock.calls.find(([input, init]) => String(input).includes('/liveBroadcasts?') && init?.method === 'PUT')
+    expect(new URL(String(testingUpdate?.[0])).searchParams.get('part')).toBe('snippet,status')
+    expect(JSON.parse(String(testingUpdate?.[1]?.body))).not.toHaveProperty('contentDetails')
+
+    broadcastLifeCycle = 'ready'
+    broadcastAutoStart = true
+    fetchMock.mockClear()
+    await expect(prepareYouTube(configured, profile)).resolves.toMatchObject({ status: 'not_registered' })
+    const inserted = fetchMock.mock.calls.find(([input, init]) => String(input).includes('/liveBroadcasts?') && init?.method === 'POST')
+    const insertedBody = JSON.parse(String(inserted?.[1]?.body)) as { contentDetails: { enableAutoStart: boolean; enableAutoStop: boolean; monitorStream: { enableMonitorStream: boolean; broadcastStreamDelayMs: number } } }
+    expect(insertedBody.contentDetails).toEqual({
+      enableAutoStart: false,
+      enableAutoStop: false,
+      monitorStream: { enableMonitorStream: true, broadcastStreamDelayMs: 0 },
+      latencyPreference: 'low',
+    })
+    expect(store.saveConfig).toHaveBeenCalled()
+  })
+})
+
+describe('PlatformServices YouTube broadcast lifecycle', () => {
+  it('waits for active ingest and transitions the prepared broadcast to live', async () => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = true
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.broadcastId = 'broadcast-id'
+    const profile = structuredClone(starterProfiles[0])
+    profile.youtube.enabled = true
+    let streamReads = 0
+    let broadcastReads = 0
+    let broadcastLookupAttempts = 0
+    const json = (value: unknown) => new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveStreams')) {
+        streamReads += 1
+        return json({ items: [{ id: 'stream-id', status: { streamStatus: streamReads > 1 ? 'active' : 'inactive' } }] })
+      }
+      if (url.pathname.endsWith('/liveBroadcasts/transition')) {
+        const requested = url.searchParams.get('broadcastStatus')
+        return json({ id: 'broadcast-id', status: { lifeCycleStatus: requested === 'testing' ? 'testStarting' : 'liveStarting' } })
+      }
+      if (url.pathname.endsWith('/liveBroadcasts')) {
+        broadcastLookupAttempts += 1
+        if (broadcastLookupAttempts === 1) return json({ items: [] })
+        broadcastReads += 1
+        const lifeCycleStatus = ['ready', 'ready', 'testStarting', 'testing', 'liveStarting', 'live'][broadcastReads - 1] ?? 'live'
+        return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus }, contentDetails: { boundStreamId: 'stream-id' } }] })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const platforms = new PlatformServices(secretStore, {} as DataStore, {
+      pollIntervalMs: 1,
+      streamActiveTimeoutMs: 100,
+      transitionTimeoutMs: 100,
+    })
+
+    await expect(platforms.startYouTubeBroadcast(configured, profile)).resolves.toBeUndefined()
+
+    expect(streamReads).toBe(2)
+    expect(broadcastLookupAttempts).toBeGreaterThan(broadcastReads)
+    const transitions = fetchMock.mock.calls.filter(([input]) => String(input).includes('/liveBroadcasts/transition'))
+    expect(transitions.map(([input]) => new URL(String(input)).searchParams.get('broadcastStatus'))).toEqual(['testing', 'live'])
+    expect(transitions.every(([, init]) => init?.method === 'POST')).toBe(true)
+    expect(new URL(String(transitions[0]?.[0])).searchParams.get('id')).toBe('broadcast-id')
+  })
+
+  it('transitions a live broadcast to complete after the encoder stops', async () => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = true
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.broadcastId = 'broadcast-id'
+    const profile = structuredClone(starterProfiles[0])
+    profile.youtube.enabled = true
+    let broadcastReads = 0
+    const json = (value: unknown) => new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveBroadcasts/transition')) return json({ id: 'broadcast-id', status: { lifeCycleStatus: 'complete' } })
+      if (url.pathname.endsWith('/liveBroadcasts')) {
+        broadcastReads += 1
+        return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus: broadcastReads === 1 ? 'live' : 'complete' }, contentDetails: { boundStreamId: 'stream-id' } }] })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const platforms = new PlatformServices(secretStore, {} as DataStore, { pollIntervalMs: 1, transitionTimeoutMs: 100 })
+
+    await expect(platforms.completeYouTubeBroadcast(configured, profile)).resolves.toBeUndefined()
+
+    const transition = fetchMock.mock.calls.find(([input]) => String(input).includes('/liveBroadcasts/transition'))
+    const transitionUrl = new URL(String(transition?.[0]))
+    expect(transition?.[1]?.method).toBe('POST')
+    expect(transitionUrl.searchParams.get('broadcastStatus')).toBe('complete')
+  })
+
+  it('rejects a completed broadcast and leaves a ready rollback broadcast reusable', async () => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = true
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.broadcastId = 'broadcast-id'
+    const profile = structuredClone(starterProfiles[0])
+    profile.youtube.enabled = true
+    let lifeCycleStatus = 'complete'
+    const json = (value: unknown) => new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveBroadcasts')) {
+        return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus }, contentDetails: { boundStreamId: 'stream-id' } }] })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const platforms = new PlatformServices(secretStore, {} as DataStore, { pollIntervalMs: 1, transitionTimeoutMs: 100 })
+
+    await expect(platforms.startYouTubeBroadcast(configured, profile)).rejects.toThrow('既に終了しています')
+    lifeCycleStatus = 'ready'
+    await expect(platforms.completeYouTubeBroadcast(configured, profile)).resolves.toBeUndefined()
+    lifeCycleStatus = 'testing'
+    await expect(platforms.completeYouTubeBroadcast(configured, profile)).resolves.toBeUndefined()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/liveBroadcasts/transition'))).toBe(false)
   })
 })

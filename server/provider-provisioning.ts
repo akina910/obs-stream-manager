@@ -11,6 +11,11 @@ export type ProviderOAuthCredentials = {
 
 type ProviderOAuthBundle = ProviderOAuthCredentials & { version: 1 }
 
+export function clearYouTubeStreamSecrets(secrets: SecretStore): void {
+  secrets.set('youtube-stream-key', '')
+  secrets.set('youtube-stream-server', '')
+}
+
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`Provider OAuth bundle is missing ${field}`)
   return value.trim()
@@ -64,7 +69,10 @@ export async function provisionProviderOAuth(
   const youtubeClientChanged = Boolean(credentials.youtube && credentials.youtube.clientId !== current.youtube.clientId)
   const twitchClientChanged = Boolean(credentials.twitch && credentials.twitch.clientId !== current.twitch.clientId)
 
-  if (youtubeClientChanged) secrets.set('youtube-refresh-token', '')
+  if (youtubeClientChanged) {
+    secrets.set('youtube-refresh-token', '')
+    clearYouTubeStreamSecrets(secrets)
+  }
   if (twitchClientChanged) {
     secrets.set('twitch-access-token', '')
     secrets.set('twitch-refresh-token', '')

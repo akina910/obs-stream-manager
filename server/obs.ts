@@ -1,15 +1,18 @@
-import OBSWebSocket from 'obs-websocket-js'
+import OBSWebSocket, { type OBSRequestTypes } from 'obs-websocket-js'
 import type { AppConfig, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
 import { SecretStore } from './secrets.js'
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+type StreamServiceSettings = OBSRequestTypes['SetStreamServiceSettings']
+type AppliedStreamService = { streamServiceType: string; server: string; key: string }
 
 export class ObsController {
   private readonly obs = new OBSWebSocket()
   private connected = false
+  private streamServiceManaged = false
   private started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
 
-  constructor(private readonly secrets: SecretStore) {
+  constructor(private readonly secrets: SecretStore, private readonly streamStartTimeoutMs = 8_000) {
     this.obs.on('ConnectionClosed', () => { this.connected = false })
   }
 
@@ -103,6 +106,113 @@ export class ObsController {
     return applied
   }
 
+  private async configureYouTubeStream(config: AppConfig, profile: GameProfile): Promise<boolean> {
+    if (!config.features.youtube || !profile.youtube.enabled) return false
+    const streamKey = this.secrets.get('youtube-stream-key')
+    if (!streamKey) throw new Error('YouTube 配信キーが未取得です。ゲームを選び直して配信準備を完了してください')
+    const streamServer = this.secrets.get('youtube-stream-server')
+    if (!streamServer) throw new Error('YouTube 配信サーバーが未取得です。ゲームを選び直して配信準備を完了してください')
+    const current = await this.obs.call('GetStreamServiceSettings')
+    const currentSettings = current.streamServiceSettings as Record<string, unknown>
+    const alreadyConfigured = current.streamServiceType === 'rtmp_custom'
+      && currentSettings.server === streamServer
+      && currentSettings.key === streamKey
+    const savedPrevious = this.secrets.get('obs-previous-stream-service')
+    const savedApplied = this.secrets.get('obs-applied-stream-service')
+    let savedPairMatchesCurrent = false
+    if (savedPrevious && savedApplied) {
+      try {
+        const previous = JSON.parse(savedPrevious) as Partial<StreamServiceSettings>
+        const applied = JSON.parse(savedApplied) as Partial<AppliedStreamService>
+        savedPairMatchesCurrent = typeof previous.streamServiceType === 'string'
+          && Boolean(previous.streamServiceSettings && typeof previous.streamServiceSettings === 'object')
+          && current.streamServiceType === applied.streamServiceType
+          && currentSettings.server === applied.server
+          && currentSettings.key === applied.key
+      } catch { /* invalid snapshots are replaced with the current OBS service below */ }
+    }
+    if (alreadyConfigured) {
+      this.streamServiceManaged = false
+      this.secrets.set('obs-applied-stream-service', '')
+      this.secrets.set('obs-previous-stream-service', '')
+      return false
+    }
+    if (!savedPairMatchesCurrent) {
+      this.secrets.set('obs-previous-stream-service', JSON.stringify(current))
+      this.secrets.set('obs-applied-stream-service', '')
+    }
+    await this.obs.call('SetStreamServiceSettings', {
+      streamServiceType: 'rtmp_custom',
+      streamServiceSettings: {
+        server: streamServer,
+        key: streamKey,
+        use_auth: false,
+      },
+    })
+    this.secrets.set('obs-applied-stream-service', JSON.stringify({ streamServiceType: 'rtmp_custom', server: streamServer, key: streamKey } satisfies AppliedStreamService))
+    this.streamServiceManaged = true
+    return true
+  }
+
+  private async restorePreviousStreamService(): Promise<void> {
+    const serialized = this.secrets.get('obs-previous-stream-service')
+    if (!serialized) {
+      this.streamServiceManaged = false
+      return
+    }
+    if (!this.streamServiceManaged) {
+      this.secrets.set('obs-applied-stream-service', '')
+      this.secrets.set('obs-previous-stream-service', '')
+      return
+    }
+    const appliedSerialized = this.secrets.get('obs-applied-stream-service')
+    if (!appliedSerialized) {
+      this.streamServiceManaged = false
+      this.secrets.set('obs-previous-stream-service', '')
+      return
+    }
+    const parsed = JSON.parse(serialized) as Partial<StreamServiceSettings>
+    const applied = JSON.parse(appliedSerialized) as Partial<AppliedStreamService>
+    if (typeof parsed.streamServiceType !== 'string' || !parsed.streamServiceSettings || typeof parsed.streamServiceSettings !== 'object') {
+      throw new Error('保存したOBS配信サービス設定が壊れています')
+    }
+    const current = await this.obs.call('GetStreamServiceSettings')
+    const currentSettings = current.streamServiceSettings as Record<string, unknown>
+    const stillManagerApplied = current.streamServiceType === applied.streamServiceType
+      && currentSettings.server === applied.server
+      && currentSettings.key === applied.key
+    if (!stillManagerApplied) {
+      this.streamServiceManaged = false
+      this.secrets.set('obs-applied-stream-service', '')
+      this.secrets.set('obs-previous-stream-service', '')
+      return
+    }
+    await this.obs.call('SetStreamServiceSettings', parsed as StreamServiceSettings)
+    this.streamServiceManaged = false
+    this.secrets.set('obs-applied-stream-service', '')
+    this.secrets.set('obs-previous-stream-service', '')
+  }
+
+  private async waitForStreamActive(): Promise<boolean> {
+    const deadline = Date.now() + this.streamStartTimeoutMs
+    do {
+      const status = await this.obs.call('GetStreamStatus')
+      if (status.outputActive) return true
+      await wait(250)
+    } while (Date.now() < deadline)
+    return false
+  }
+
+  private async waitForStreamInactive(): Promise<boolean> {
+    const deadline = Date.now() + this.streamStartTimeoutMs
+    do {
+      const status = await this.obs.call('GetStreamStatus')
+      if (!status.outputActive) return true
+      await wait(250)
+    } while (Date.now() < deadline)
+    return false
+  }
+
   async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
     await this.connect(config)
     const warnings: string[] = []
@@ -170,7 +280,13 @@ export class ObsController {
     await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.startingScene })
     const warnings: string[] = []
     const startedNow = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false }
+    let restoreStreamService: (() => Promise<void>) | null = null
     try {
+      const stream = await this.obs.call('GetStreamStatus')
+      if (!stream.outputActive) {
+        const streamServiceChanged = await this.configureYouTubeStream(config, profile)
+        if (streamServiceChanged) restoreStreamService = () => this.restorePreviousStreamService()
+      }
       const record = await this.obs.call('GetRecordStatus')
       if (config.features.recording && profile.recording.enabled && !record.outputActive) {
         try { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }
@@ -193,13 +309,36 @@ export class ObsController {
           this.started.vertical = true; startedNow.vertical = true
         } catch (error) { warnings.push(`Aitum Vertical録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
       }
-      const stream = await this.obs.call('GetStreamStatus')
-      if (!stream.outputActive) { await this.obs.call('StartStream'); this.started.stream = true; startedNow.stream = true }
+      if (!stream.outputActive) {
+        await this.obs.call('StartStream')
+        this.started.stream = true
+        startedNow.stream = true
+        if (!await this.waitForStreamActive()) {
+          const guidance = config.features.youtube && profile.youtube.enabled
+            ? 'YouTube配信キーとOBS出力設定を確認してください'
+            : 'OBSの配信サービスと出力設定を確認してください'
+          throw new Error(`OBS配信出力が開始状態になりませんでした。${guidance}`)
+        }
+      }
       await wait(config.obs.startDelaySeconds * 1000)
+      if (!(await this.obs.call('GetStreamStatus')).outputActive) throw new Error('OBS配信出力が開始直後に停止しました。OBSログを確認してください')
       await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.sceneName })
       return warnings
     } catch (error) {
-      if (startedNow.stream) await this.obs.call('StopStream').catch(() => undefined)
+      let rollbackStreamStopped = true
+      if (startedNow.stream) {
+        try {
+          await this.obs.call('StopStream')
+          rollbackStreamStopped = await this.waitForStreamInactive()
+        } catch {
+          rollbackStreamStopped = await this.waitForStreamInactive().catch(() => false)
+        }
+      }
+      if (restoreStreamService && rollbackStreamStopped) {
+        await restoreStreamService().catch((restoreError) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`))
+      } else if (restoreStreamService) {
+        warnings.push('OBS配信出力の停止を確認できなかったため、配信サービス設定を復元していません')
+      }
       if (startedNow.vertical) await this.callVertical('stop_recording').catch(() => undefined)
       if (startedNow.sourceRecord) await this.callVendor('source-record', 'record_stop', { source: selectedSource }).catch(() => undefined)
       if (startedNow.replay) await this.obs.call('StopReplayBuffer').catch(() => undefined)
@@ -228,9 +367,31 @@ export class ObsController {
     await this.callVertical('stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (replay.outputActive) await this.obs.call('StopReplayBuffer').catch((error) => warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     if (record.outputActive) await this.obs.call('StopRecord').catch((error) => warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    if (stream.outputActive) await this.obs.call('StopStream').catch((error) => warnings.push(`配信を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    let streamStopped = !stream.outputActive
+    if (stream.outputActive) {
+      try {
+        await this.obs.call('StopStream')
+        streamStopped = await this.waitForStreamInactive()
+        if (!streamStopped) warnings.push('OBS配信出力の停止を確認できませんでした')
+      } catch (error) {
+        warnings.push(`配信を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+        streamStopped = await this.waitForStreamInactive().catch(() => false)
+      }
+    }
+    if (streamStopped) {
+      await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    }
     this.started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
     return warnings
+  }
+
+  async isStreaming(config: AppConfig): Promise<boolean> {
+    await this.connect(config)
+    return (await this.obs.call('GetStreamStatus')).outputActive
+  }
+
+  ownsCurrentStream(): boolean {
+    return this.started.stream
   }
 
   async saveReplay(config: AppConfig): Promise<void> {

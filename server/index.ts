@@ -13,7 +13,7 @@ import { OAuthManager } from './oauth.js'
 import { StreamOrchestrator } from './orchestrator.js'
 import { PlatformServices } from './platforms.js'
 import { getDataDirectory } from './paths.js'
-import { provisionDistributorOAuth } from './provider-provisioning.js'
+import { clearYouTubeStreamSecrets, provisionDistributorOAuth } from './provider-provisioning.js'
 import { SecretStore, type SecretName } from './secrets.js'
 import { DataStore } from './storage.js'
 
@@ -126,17 +126,39 @@ app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { awa
 const secretNames: SecretName[] = ['obs-password', 'steam-api-key', 'youtube-client-secret', 'youtube-refresh-token', 'twitch-client-secret', 'twitch-access-token', 'twitch-refresh-token']
 app.put<{ Body: { config: unknown; secrets?: Partial<Record<SecretName, string>> } }>('/api/config', async (request) => {
   await orchestrator.assertNotStreaming()
+  const current = await store.getConfig()
   let next = AppConfigSchema.parse(request.body.config)
+  const previousYouTubeClientSecret = secrets.get('youtube-client-secret') ?? ''
+  const youtubeClientSecretProvided = Object.hasOwn(request.body.secrets ?? {}, 'youtube-client-secret')
+  let youtubeCredentialsChanged = next.youtube.clientId !== current.youtube.clientId
   for (const [name, value] of Object.entries(request.body.secrets ?? {})) {
     if (secretNames.includes(name as SecretName) && typeof value === 'string') {
+      if (name === 'youtube-client-secret' && value !== previousYouTubeClientSecret) youtubeCredentialsChanged = true
       secrets.set(name as SecretName, value)
       if (name === 'obs-password') next = { ...next, obs: { ...next.obs, passwordStored: Boolean(value) } }
       if (name === 'steam-api-key') next = { ...next, steam: { ...next.steam, apiKeyStored: Boolean(value) } }
       if (name === 'youtube-client-secret') next = { ...next, youtube: { ...next.youtube, clientSecretStored: Boolean(value) } }
-      if (name === 'youtube-refresh-token') next = { ...next, youtube: { ...next.youtube, refreshTokenStored: Boolean(value) } }
+      if (name === 'youtube-refresh-token') {
+        if (!value) clearYouTubeStreamSecrets(secrets)
+        next = { ...next, youtube: { ...next.youtube, refreshTokenStored: Boolean(value), broadcastId: value ? next.youtube.broadcastId : '' } }
+      }
       if (name === 'twitch-client-secret') next = { ...next, twitch: { ...next.twitch, clientSecretStored: Boolean(value) } }
       if (name === 'twitch-access-token') next = { ...next, twitch: { ...next.twitch, accessTokenStored: Boolean(value) } }
       if (name === 'twitch-refresh-token') next = { ...next, twitch: { ...next.twitch, refreshTokenStored: Boolean(value) } }
+    }
+  }
+  if (youtubeCredentialsChanged) {
+    if (next.youtube.clientId !== current.youtube.clientId && !youtubeClientSecretProvided) secrets.set('youtube-client-secret', '')
+    secrets.set('youtube-refresh-token', '')
+    clearYouTubeStreamSecrets(secrets)
+    next = {
+      ...next,
+      youtube: {
+        ...next.youtube,
+        clientSecretStored: Boolean(secrets.get('youtube-client-secret')),
+        refreshTokenStored: false,
+        broadcastId: '',
+      },
     }
   }
   const config = await store.saveConfig(next)

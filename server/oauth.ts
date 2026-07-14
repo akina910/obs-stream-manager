@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import type { DataStore } from './storage.js'
 import type { SecretStore } from './secrets.js'
+import { clearYouTubeStreamSecrets } from './provider-provisioning.js'
 
 export type OAuthProvider = 'youtube' | 'twitch'
 
@@ -242,10 +243,11 @@ export class OAuthManager {
     })
     const token = await response.json().catch(() => ({})) as { refresh_token?: string }
     if (!response.ok || !token.refresh_token) throw new Error(message(token, 'YouTube refresh token was not returned'))
+    clearYouTubeStreamSecrets(this.secrets)
     this.secrets.set('youtube-refresh-token', token.refresh_token)
     await this.store.saveConfig({
       ...config,
-      youtube: { ...config.youtube, refreshTokenStored: true, clientSecretStored: Boolean(clientSecret) },
+      youtube: { ...config.youtube, refreshTokenStored: true, clientSecretStored: Boolean(clientSecret), broadcastId: '' },
     })
     return expected.openerOrigin
   }

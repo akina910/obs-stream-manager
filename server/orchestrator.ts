@@ -73,17 +73,51 @@ export class StreamOrchestrator {
       if (!this.selected || !this.method) throw new Error('先にゲームを選択してください')
       if (this.serviceFailures.length && !allowServiceFailures) throw new Error(`配信サービスの設定に失敗しています: ${this.serviceFailures.join(' / ')}`)
       const config = await this.store.getConfig()
-      const warnings = await this.obs.start(config, this.selected, this.captureSource(this.selected, this.method))
-      await this.platforms.startComments(config)
-      this.warning = warnings[0] ?? this.serviceFailures[0] ?? null
-      await this.logger.write('stream.started', { gameId: this.selected.id, captureMethod: this.method, serviceFailures: this.serviceFailures, warnings })
-      return warnings
+      const selected = this.selected
+      const method = this.method
+      let ownsCurrentStream = false
+      try {
+        const warnings = await this.obs.start(config, selected, this.captureSource(selected, method))
+        ownsCurrentStream = this.obs.ownsCurrentStream()
+        await this.platforms.startYouTubeBroadcast(config, selected)
+        await this.platforms.startComments(config)
+        this.warning = warnings[0] ?? this.serviceFailures[0] ?? null
+        await this.logger.write('stream.started', { gameId: selected.id, captureMethod: method, serviceFailures: this.serviceFailures, warnings })
+        return warnings
+      } catch (error) {
+        const rollbackWarnings: string[] = []
+        if (ownsCurrentStream) {
+          let streamStopped = false
+          try {
+            const obsWarnings = await this.obs.stop(config, selected)
+            rollbackWarnings.push(...obsWarnings.map((warning) => `OBS: ${warning}`))
+            streamStopped = !await this.obs.isStreaming(config)
+            if (!streamStopped) rollbackWarnings.push('OBS: 配信出力が継続しているためYouTube配信枠を終了していません')
+          } catch (rollbackError) {
+            rollbackWarnings.push(`OBS: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
+          }
+          if (streamStopped) {
+            await this.platforms.completeYouTubeBroadcast(config, selected).catch((rollbackError) => rollbackWarnings.push(`YouTube: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`))
+          }
+        }
+        await this.platforms.stopComments().catch((rollbackError) => rollbackWarnings.push(`comments: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`))
+        this.warning = error instanceof Error ? error.message : String(error)
+        await this.logger.write('stream.start_failed', { gameId: selected.id, captureMethod: method, error: this.warning, rollbackWarnings }).catch(() => undefined)
+        throw error
+      }
     })
   }
 
   async stop(): Promise<string[]> {
     return this.exclusive(async () => {
-      const warnings = await this.obs.stop(await this.store.getConfig(), this.selected)
+      const config = await this.store.getConfig()
+      const warnings = await this.obs.stop(config, this.selected)
+      try {
+        if (await this.obs.isStreaming(config)) warnings.push('OBS配信出力が継続しているため、YouTube配信枠を終了していません')
+        else await this.platforms.completeYouTubeBroadcast(config, this.selected)
+      } catch (error) {
+        warnings.push(`OBS停止確認またはYouTube配信枠の終了に失敗しました: ${error instanceof Error ? error.message : String(error)}`)
+      }
       await this.platforms.stopComments()
       this.warning = warnings[0] ?? null
       await this.logger.write('stream.stopped', { gameId: this.selected?.id ?? null, warnings })
