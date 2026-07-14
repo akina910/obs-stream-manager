@@ -7,6 +7,7 @@ import {
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider } from './api'
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
+import { getBroadcastStatus, getRuntimeOutputs } from './runtime-status'
 
 type Tab = PlatformGroup | 'settings'
 type Toast = { kind: 'success' | 'error' | 'warning'; text: string }
@@ -25,6 +26,31 @@ const captureLabels: Record<CaptureMethod, string> = {
 
 function StatusDot({ active }: { active: boolean }) {
   return <span className={`status-dot ${active ? 'active' : ''}`} />
+}
+
+function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
+  const broadcast = getBroadcastStatus(status)
+  const outputs = getRuntimeOutputs(status)
+
+  return (
+    <section className="runtime-status" aria-label="現在の配信状態">
+      <div className={`broadcast-status ${broadcast.tone}`}>
+        <span className="broadcast-icon" aria-hidden="true"><Radio size={17} /></span>
+        <span className="broadcast-copy" role="status" aria-live="polite" aria-atomic="true"><strong>{broadcast.label}</strong><small>{broadcast.detail}</small></span>
+      </div>
+      <div className="runtime-output-list">
+        {outputs.map((output) => (
+          <span className={`runtime-output ${output.active ? 'active' : ''}`} key={output.key} aria-label={`${output.label}: ${output.state}`}>
+            <StatusDot active={output.active} />
+            <span><strong>{output.label}</strong><small>{output.state}</small></span>
+          </span>
+        ))}
+        <span className={`runtime-output scene ${status.obsConnected && status.currentScene ? 'active' : ''}`} aria-label={`現在のシーン: ${status.currentScene ?? '不明'}`}>
+          <span><strong>シーン</strong><small>{status.currentScene ?? '不明'}</small></span>
+        </span>
+      </div>
+    </section>
+  )
 }
 
 const oauthStageLabels: Record<OAuthConnectionStatus['stage'], string> = {
@@ -433,6 +459,7 @@ export default function App() {
     <div className="app-shell">
       <header className="app-header"><div className="brand"><div className="brand-mark"><Clapperboard size={19} /></div><div><strong>STREAM MANAGER</strong><span>OBS CONTROL DOCK</span></div></div><div className="header-status"><StatusDot active={status.obsConnected} /><span>OBS {status.obsConnected ? '接続中' : '未接続'}</span></div></header>
       <nav className="tabs">{groups.map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} /><span>{label}</span></button>)}</nav>
+      <RuntimeStatusBar status={status} />
       {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} oauthStatus={oauthStatus} oauthProgress={oauthProgress} onOAuthConnect={connectOAuth} onOAuthRefresh={refreshOAuth} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); await loadOAuthStatus(); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamSync={async () => { const result = await api.steamSync(); setProfiles(result.profiles); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : <div className="settings-view"><div className="section-heading"><div><span className="eyebrow">CONNECTIONS</span><h2>接続状態を取得できません</h2></div></div><div className="inline-warning" role="alert"><AlertTriangle size={14} /><span>OBS操作は利用できます。OAuth接続状態だけ再取得してください。</span></div><button className="secondary" onClick={() => void refreshOAuth().catch((error: Error) => setToast({ kind: 'error', text: error.message }))}><RefreshCw size={15} />状態を再確認</button></div>) : (
         <main>
           <div className="search-row"><div className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ゲームを検索" />{search && <button aria-label="検索をクリア" onClick={() => setSearch('')}><X size={14} /></button>}</div><button className="icon-button add" aria-label="ゲームを追加" onClick={addProfile} title="ゲームを追加"><Plus size={18} /></button></div>

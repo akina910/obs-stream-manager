@@ -41,6 +41,29 @@ button { color: inherit; }
 .tabs button.active svg { color: var(--accent); }
 .tabs button.active::after { background: var(--accent); box-shadow: 0 0 10px rgba(140,255,63,.5); }
 
+.runtime-status { position: sticky; z-index: 9; top: 54px; min-height: 58px; padding: 8px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; border-bottom: 1px solid #282d37; background: rgba(13,15,20,.97); box-shadow: 0 8px 24px rgba(0,0,0,.18); backdrop-filter: blur(14px); }
+.broadcast-status { min-width: 116px; display: flex; align-items: center; gap: 8px; }
+.broadcast-icon { width: 31px; height: 31px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #343a46; border-radius: 9px; color: #777f8c; background: #171a21; }
+.broadcast-status.live .broadcast-icon { border-color: rgba(255,94,108,.5); color: #fff; background: var(--danger); box-shadow: 0 0 18px rgba(255,94,108,.3); animation: live-pulse 1.8s ease-in-out infinite; }
+.broadcast-status.stopped .broadcast-icon { color: #969eaa; }
+.broadcast-status.unknown .broadcast-icon { border-color: rgba(255,189,74,.42); color: var(--warning); background: rgba(255,189,74,.08); }
+.broadcast-copy { display: flex; flex-direction: column; gap: 2px; }
+.broadcast-copy strong { color: #f3f5f8; font-size: 12px; white-space: nowrap; }
+.broadcast-status.live .broadcast-copy strong { color: #ff7d88; }
+.broadcast-status.unknown .broadcast-copy strong { color: var(--warning); }
+.broadcast-copy small { color: #656d7a; font: 600 8px 'IBM Plex Mono', monospace; letter-spacing: .08em; }
+.runtime-output-list { min-width: 0; padding-bottom: 1px; display: flex; align-items: stretch; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
+.runtime-output { min-width: 72px; min-height: 38px; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid #252a34; border-radius: 8px; color: #777f8b; background: #11141a; }
+.runtime-output.active { border-color: rgba(140,255,63,.22); background: rgba(140,255,63,.04); }
+.runtime-output > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.runtime-output strong { color: #a4abb6; font-size: 9px; white-space: nowrap; }
+.runtime-output.active strong { color: #d8dce2; }
+.runtime-output small { max-width: 95px; overflow: hidden; color: #59616e; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-output.active small { color: var(--accent); }
+.runtime-output .status-dot { width: 5px; height: 5px; flex: 0 0 auto; }
+.runtime-output.scene { min-width: 108px; }
+@keyframes live-pulse { 0%, 100% { box-shadow: 0 0 10px rgba(255,94,108,.22); } 50% { box-shadow: 0 0 22px rgba(255,94,108,.48); } }
+
 main, .settings-view { padding: 16px 14px 30px; }
 .search-row { display: flex; gap: 8px; }
 .search-box { flex: 1; height: 42px; padding: 0 12px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--muted); }
@@ -202,12 +225,15 @@ input:focus, select:focus, textarea:focus { border-color: #525966; }
 @media (min-width: 620px) {
   .app-shell { border-inline: 1px solid rgba(255,255,255,.03); }
   main, .settings-view { padding-inline: 22px; }
+  .runtime-status { padding-inline: 22px; }
   .game-list { display: grid; grid-template-columns: 1fr 1fr; }
   .control-panel { padding-inline: 22px; }
 }
 
 @media (max-width: 370px) {
   .tabs button { gap: 4px; }
+  .runtime-status { gap: 8px; padding-inline: 10px; }
+  .broadcast-status { min-width: 108px; }
   .field-row { grid-template-columns: 1fr; gap: 0; }
   .selection-summary strong { max-width: 210px; }
   .thumbnail-preview { grid-template-columns: 1fr; }
