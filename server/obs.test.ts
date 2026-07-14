@@ -46,6 +46,7 @@ describe('ObsController recording fallbacks', () => {
       call: vi.fn(async (request: string) => {
         if (request === 'GetReplayBufferStatus') throw Object.assign(new Error('Replay buffer is not available.'), { code: 604 })
         if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '00_STARTING' }
+        if (request === 'GetStreamStatus') return { outputActive: true, outputDuration: 12_345 }
         return { outputActive: false }
       }),
     }
@@ -55,6 +56,7 @@ describe('ObsController recording fallbacks', () => {
     const status = await controller.status(structuredClone(defaultConfig), null, null, false, null)
 
     expect(status.obsConnected).toBe(true)
+    expect(status.streamElapsedMs).toBe(12_345)
     expect(status.replayBuffer).toBe(false)
     expect(status.currentScene).toBe('00_STARTING')
   })

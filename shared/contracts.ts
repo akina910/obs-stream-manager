@@ -132,6 +132,7 @@ export type AppConfig = z.infer<typeof AppConfigSchema>
 export const RuntimeStatusSchema = z.object({
   obsConnected: z.boolean(),
   streaming: z.boolean(),
+  streamElapsedMs: z.number().nonnegative().optional(),
   recording: z.boolean(),
   replayBuffer: z.boolean(),
   sourceRecord: z.boolean(),

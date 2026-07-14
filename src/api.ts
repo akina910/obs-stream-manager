@@ -42,6 +42,7 @@ export const api = {
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),
+  selectFolder: (initialPath: string) => request<{ path: string | null }>('/api/folders/select', { method: 'POST', body: JSON.stringify({ initialPath }) }),
   steamSync: () => request<{ profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; warnings: string[] }>('/api/steam/sync', { method: 'POST', body: '{}' }),
   saveConfig: (config: AppConfig, secrets: Record<string, string>) => request<AppConfig>('/api/config', { method: 'PUT', body: JSON.stringify({ config, secrets }) }),
   backup: () => request<unknown>('/api/backup/export', { method: 'POST', body: '{}' }),

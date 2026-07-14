@@ -7,6 +7,7 @@ import Fastify from 'fastify'
 import { ZodError } from 'zod'
 import { AppConfigSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
 import { CaptureDetector } from './capture.js'
+import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
 import { ObsController } from './obs.js'
 import { OAuthManager } from './oauth.js'
@@ -123,6 +124,7 @@ app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', asyn
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })
+app.post<{ Body: { initialPath?: string } }>('/api/folders/select', async (request) => ({ path: await selectFolder(typeof request.body?.initialPath === 'string' ? request.body.initialPath : '') }))
 
 const secretNames: SecretName[] = ['obs-password', 'steam-api-key', 'youtube-client-secret', 'youtube-refresh-token', 'twitch-client-secret', 'twitch-access-token', 'twitch-refresh-token']
 app.put<{ Body: { config: unknown; secrets?: Partial<Record<SecretName, string>> } }>('/api/config', async (request) => {

@@ -423,7 +423,7 @@ export class ObsController {
         this.getReplayBufferStatus(),
         this.obs.call('GetCurrentProgramScene'),
       ])
-      return { obsConnected: true, streaming: stream.outputActive, recording: record.outputActive, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy }
+      return { obsConnected: true, streaming: stream.outputActive, streamElapsedMs: stream.outputDuration, recording: record.outputActive, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy }
     } catch {
       this.connected = false
       return { obsConnected: false, streaming: false, recording: false, replayBuffer: false, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: null, warning, busy }

@@ -27,6 +27,41 @@ describe('StreamOrchestrator operation exclusion', () => {
     releaseReplay()
     await expect(pendingReplay).resolves.toBeUndefined()
   })
+
+  it('rejects profile and config changes until external live states have ended', async () => {
+    const config = structuredClone(defaultConfig)
+    const obs = {
+      status: vi.fn().mockResolvedValue({
+        obsConnected: true,
+        streaming: false,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId: null,
+        captureMethod: null,
+        currentScene: '90_ENDING',
+        warning: null,
+        busy: false,
+      }),
+    } as unknown as ObsController
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const getLiveStatus = vi.fn().mockResolvedValue({
+      youtube: { state: 'live', detail: 'YouTubeでライブ中', checkedAt: new Date().toISOString() },
+      twitch: { state: 'offline', detail: 'Twitchはオフライン', checkedAt: new Date().toISOString() },
+    })
+    const platforms = { getLiveStatus } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await expect(orchestrator.assertNotStreaming()).rejects.toMatchObject({ statusCode: 409 })
+
+    getLiveStatus.mockResolvedValue({
+      youtube: { state: 'offline', detail: 'YouTubeはオフライン', checkedAt: new Date().toISOString() },
+      twitch: { state: 'offline', detail: 'Twitchはオフライン', checkedAt: new Date().toISOString() },
+    })
+    await expect(orchestrator.assertNotStreaming()).resolves.toBeUndefined()
+  })
 })
 
 describe('StreamOrchestrator stream startup rollback', () => {
