@@ -14,7 +14,10 @@ function harness() {
   } as unknown as DataStore
   const secrets = {
     get: vi.fn((name: string) => secretValues.get(name) ?? null),
-    set: vi.fn((name: string, value: string) => { secretValues.set(name, value) }),
+    set: vi.fn((name: string, value: string) => {
+      if (value) secretValues.set(name, value)
+      else secretValues.delete(name)
+    }),
   } as unknown as SecretStore
   return {
     oauth: new OAuthManager(store, secrets, 'http://127.0.0.1:4417'),
@@ -92,6 +95,12 @@ describe('OAuthManager one-button authorization', () => {
     expect(authorizationUrl.searchParams.get('code_challenge')).toBeTruthy()
     const state = authorizationUrl.searchParams.get('state')
     if (!state) throw new Error('Missing OAuth state')
+    test.secretValues.set('youtube-stream-key', 'old-stream-key')
+    test.secretValues.set('youtube-stream-server', 'rtmps://old.youtube/live2')
+    test.setConfig({
+      ...test.config(),
+      youtube: { ...test.config().youtube, broadcastId: 'old-broadcast-id' },
+    })
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ refresh_token: 'youtube-refresh' }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -104,7 +113,9 @@ describe('OAuthManager one-button authorization', () => {
     expect(tokenBody.get('code_verifier')).toBeTruthy()
     expect(tokenBody.get('client_secret')).toBe('youtube-distributor-secret')
     expect(test.secretValues.get('youtube-refresh-token')).toBe('youtube-refresh')
-    expect(test.config().youtube).toMatchObject({ refreshTokenStored: true, clientSecretStored: true })
+    expect(test.secretValues.has('youtube-stream-key')).toBe(false)
+    expect(test.secretValues.has('youtube-stream-server')).toBe(false)
+    expect(test.config().youtube).toMatchObject({ refreshTokenStored: true, clientSecretStored: true, broadcastId: '' })
   })
 
   it('does not start a broken YouTube flow when distributor credentials are incomplete', async () => {

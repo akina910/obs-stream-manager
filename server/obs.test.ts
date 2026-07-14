@@ -1,7 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
 import { starterProfiles, defaultConfig } from './defaults.js'
 import { ObsController } from './obs.js'
-import { SecretStore } from './secrets.js'
+import type { SecretStore } from './secrets.js'
+
+function memorySecrets(initial: Array<[string, string]> = []): SecretStore {
+  const values = new Map<string, string>(initial)
+  return {
+    get: vi.fn((name: string) => values.get(name) ?? null),
+    set: vi.fn((name: string, value: string) => {
+      if (value) values.set(name, value)
+      else values.delete(name)
+    }),
+  } as unknown as SecretStore
+}
+
+function youtubeSecrets(): SecretStore {
+  return memorySecrets([
+    ['youtube-stream-key', 'test-youtube-stream-key'],
+    ['youtube-stream-server', 'rtmps://test.youtube/live2'],
+  ])
+}
 
 describe('ObsController recording fallbacks', () => {
   it('reports OBS as connected when the replay buffer is unavailable', async () => {
@@ -15,7 +33,7 @@ describe('ObsController recording fallbacks', () => {
         return { outputActive: false }
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
 
     const status = await controller.status(structuredClone(defaultConfig), null, null, false, null)
@@ -36,7 +54,7 @@ describe('ObsController recording fallbacks', () => {
         return { outputActive: false }
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
 
     const status = await controller.status(structuredClone(defaultConfig), null, null, false, null)
@@ -46,6 +64,7 @@ describe('ObsController recording fallbacks', () => {
 
   it('starts the stream even when optional recording outputs are unavailable', async () => {
     const calls: string[] = []
+    let streaming = false
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
@@ -54,12 +73,15 @@ describe('ObsController recording fallbacks', () => {
         calls.push(request)
         if (request === 'GetSourceActive') return { videoActive: true }
         if (request === 'GetReplayBufferStatus') throw Object.assign(new Error('Replay buffer is not available.'), { code: 604 })
-        if (request === 'GetRecordStatus' || request === 'GetStreamStatus') return { outputActive: false }
+        if (request === 'GetRecordStatus') return { outputActive: false }
+        if (request === 'GetStreamStatus') return { outputActive: streaming }
+        if (request === 'GetStreamServiceSettings') return { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
+        if (request === 'StartStream') { streaming = true; return {} }
         if (request === 'StartRecord' || request === 'StartReplayBuffer' || request === 'CallVendorRequest') throw new Error('not available')
         return {}
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(youtubeSecrets(), 50)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
@@ -72,20 +94,110 @@ describe('ObsController recording fallbacks', () => {
     expect(warnings.join(' ')).toContain('Aitum Vertical')
   })
 
-  it('globally stops active OBS and plugin outputs after the controller state has been reset', async () => {
+  it('replaces an unpaired stale snapshot and restores the current OBS service after YouTube stops', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
+    const secrets = memorySecrets([
+      ['youtube-stream-key', 'test-youtube-stream-key'],
+      ['youtube-stream-server', 'rtmps://test.youtube/live2'],
+      ['obs-previous-stream-service', JSON.stringify({ streamServiceType: 'rtmp_custom', streamServiceSettings: { server: 'rtmps://stale.example/live', key: 'stale-key' } })],
+    ])
+    let streaming = false
+    let service = {
+      streamServiceType: 'rtmp_common',
+      streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
+    }
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
       on: vi.fn(),
       call: vi.fn(async (request: string, data?: unknown) => {
         calls.push({ request, data })
-        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: true }
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetStreamStatus') return { outputActive: streaming }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetStreamServiceSettings') return service
+        if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
+        if (request === 'StartStream') { streaming = true; return {} }
+        if (request === 'StopStream') { streaming = false; throw new Error('already stopped') }
         if (request === 'CallVendorRequest') return { responseData: { success: true } }
         return {}
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(secrets, 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const profile = structuredClone(starterProfiles[0])
+    const config = structuredClone(defaultConfig)
+    config.obs.startDelaySeconds = 0
+    config.obs.endDelaySeconds = 0
+    config.features.recording = false
+    config.features.replayBuffer = false
+    config.features.sourceRecord = false
+    config.features.verticalRecording = false
+
+    await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
+    expect(service).toMatchObject({
+      streamServiceType: 'rtmp_custom',
+      streamServiceSettings: { server: 'rtmps://test.youtube/live2', key: 'test-youtube-stream-key' },
+    })
+    await expect(controller.stop(config, profile)).resolves.toEqual(expect.arrayContaining([expect.stringContaining('already stopped')]))
+
+    expect(service).toEqual({
+      streamServiceType: 'rtmp_common',
+      streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
+    })
+    expect(secrets.get('obs-previous-stream-service')).toBeNull()
+    expect(calls.filter(({ request }) => request === 'SetStreamServiceSettings')).toHaveLength(2)
+  })
+
+  it('does not apply a stale restore snapshot after the user changes the OBS service', async () => {
+    const previous = { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
+    const applied = { streamServiceType: 'rtmp_custom', server: 'rtmps://old.youtube/live2', key: 'old-key' }
+    const secrets = memorySecrets([
+      ['obs-previous-stream-service', JSON.stringify(previous)],
+      ['obs-applied-stream-service', JSON.stringify(applied)],
+    ])
+    const setService = vi.fn()
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetStreamServiceSettings') return { streamServiceType: 'rtmp_custom', streamServiceSettings: { server: 'rtmps://manual.example/live', key: 'manual-key' } }
+        if (request === 'SetStreamServiceSettings') { setService(data); return {} }
+        if (request === 'CallVendorRequest') return { responseData: { success: true } }
+        return {}
+      }),
+    }
+    const controller = new ObsController(secrets, 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    config.obs.endDelaySeconds = 0
+
+    await expect(controller.stop(config, null)).resolves.toEqual([])
+
+    expect(setService).not.toHaveBeenCalled()
+    expect(secrets.get('obs-previous-stream-service')).toBeNull()
+    expect(secrets.get('obs-applied-stream-service')).toBeNull()
+  })
+
+  it('globally stops active OBS and plugin outputs after the controller state has been reset', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let streaming = true
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetStreamStatus') return { outputActive: streaming }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: true }
+        if (request === 'StopStream') { streaming = false; return {} }
+        if (request === 'CallVendorRequest') return { responseData: { success: true } }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets(), 50)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const config = structuredClone(defaultConfig)
     config.obs.endDelaySeconds = 0
@@ -122,7 +234,7 @@ describe('ObsController recording fallbacks', () => {
         return {}
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const config = structuredClone(defaultConfig)
     config.obs.endDelaySeconds = 0
@@ -136,6 +248,7 @@ describe('ObsController recording fallbacks', () => {
 
   it('falls back to the Aitum start hotkey when its websocket vendor is unavailable', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
+    let streaming = false
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
@@ -143,12 +256,15 @@ describe('ObsController recording fallbacks', () => {
       call: vi.fn(async (request: string, data?: unknown) => {
         calls.push({ request, data })
         if (request === 'GetSourceActive') return { videoActive: true }
-        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus' || request === 'GetStreamStatus') return { outputActive: false }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetStreamStatus') return { outputActive: streaming }
+        if (request === 'GetStreamServiceSettings') return { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
+        if (request === 'StartStream') { streaming = true; return {} }
         if (request === 'CallVendorRequest') throw new Error('No vendor was found by that name.')
         return {}
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(youtubeSecrets(), 50)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
@@ -165,6 +281,54 @@ describe('ObsController recording fallbacks', () => {
     expect(calls.map(({ request }) => request)).toContain('StartStream')
   })
 
+  it('fails and rolls back when OBS never reports an active stream output', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let service = {
+      streamServiceType: 'rtmp_common',
+      streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
+    }
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetStreamServiceSettings') return service
+        if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
+        return {}
+      }),
+    }
+    const controller = new ObsController(youtubeSecrets(), 20)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const profile = structuredClone(starterProfiles[0])
+    const config = structuredClone(defaultConfig)
+    config.features.youtube = true
+    profile.youtube.enabled = true
+    config.obs.startDelaySeconds = 0
+    config.features.recording = false
+    config.features.replayBuffer = false
+    config.features.sourceRecord = false
+    config.features.verticalRecording = false
+
+    await expect(controller.start(config, profile, profile.capture.localSourceName)).rejects.toThrow('OBS配信出力が開始状態になりませんでした')
+
+    expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['SetStreamServiceSettings', 'StartStream', 'StopStream']))
+    const serviceSettings = calls.find(({ request }) => request === 'SetStreamServiceSettings')?.data as {
+      streamServiceSettings: Record<string, unknown>
+    }
+    expect(serviceSettings.streamServiceSettings.key).toBe('test-youtube-stream-key')
+    expect(serviceSettings).toMatchObject({
+      streamServiceType: 'rtmp_custom',
+      streamServiceSettings: { server: 'rtmps://test.youtube/live2', use_auth: false },
+    })
+    expect(calls.filter(({ request }) => request === 'SetStreamServiceSettings').at(-1)?.data).toEqual({
+      streamServiceType: 'rtmp_common',
+      streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
+    })
+  })
+
   it('disables an existing ducking filter when the selected profile requests zero dB', async () => {
     const toggles: Array<{ filterEnabled: boolean }> = []
     const fake = {
@@ -179,7 +343,7 @@ describe('ObsController recording fallbacks', () => {
         return {}
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
@@ -204,7 +368,7 @@ describe('ObsController recording fallbacks', () => {
         return {}
       }),
     }
-    const controller = new ObsController(new SecretStore())
+    const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
     profile.recording.directory = 'D:\\Recordings'
