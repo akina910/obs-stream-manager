@@ -183,11 +183,44 @@ function thumbnailUrl(profile: GameProfile): string {
   return `/api/profiles/${encodeURIComponent(profile.id)}/thumbnail?v=${encodeURIComponent(version)}`
 }
 
+function httpArtworkUrl(value?: string): string | undefined {
+  if (!value) return undefined
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function ProfileArtwork({ profile, size = 'default' }: { profile: GameProfile; size?: 'default' | 'small' | 'favorite' }) {
+  const className = size === 'favorite' ? 'favorite-tile' : `game-tile${size === 'small' ? ' small' : ''}`
+  const imageUrl = profile.state.thumbnailFilename ? thumbnailUrl(profile) : httpArtworkUrl(profile.coverUrl)
+  return (
+    <span className={`${className} profile-artwork`} style={tileStyle(profile)} aria-hidden="true">
+      <span className="profile-artwork-fallback">{profileInitial(profile)}</span>
+      {imageUrl && <img key={imageUrl} src={imageUrl} alt="" onError={(event) => { event.currentTarget.hidden = true }} />}
+    </span>
+  )
+}
+
+function ThumbnailPreview({ profile }: { profile: GameProfile }) {
+  const [failed, setFailed] = useState(false)
+  const registered = Boolean(profile.state.thumbnailFilename)
+  return (
+    <div className="thumbnail-preview-frame">
+      {registered && !failed
+        ? <img src={thumbnailUrl(profile)} alt={`${profile.displayName}の登録済みサムネイル`} onError={() => setFailed(true)} />
+        : <div role={failed ? 'alert' : undefined}><ImageIcon size={21} /><span>{failed ? '画像を読み込めません' : '未登録'}</span></div>}
+    </div>
+  )
+}
+
 function GameCard({ profile, selected, busy, onSelect, onEdit, onFavorite }: { profile: GameProfile; selected: boolean; busy: boolean; onSelect: () => void; onEdit: () => void; onFavorite: () => void }) {
   const activate = () => { if (!busy) onSelect() }
   return (
     <article className={`game-card ${selected ? 'selected' : ''}`} role="button" tabIndex={busy ? -1 : 0} aria-disabled={busy} onClick={activate} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate() } }}>
-      <div className="game-tile" style={tileStyle(profile)}>{profileInitial(profile)}</div>
+      <ProfileArtwork profile={profile} />
       <div className="game-copy">
         <div className="game-name-row"><strong>{profile.displayName}</strong>{selected && <span className="selected-badge">選択中</span>}</div>
         <div className="game-meta"><span>{captureLabels[profile.capture.preferred]}</span><span className={`thumb-meta tone-${thumbnailTone(profile)}`}><ImageIcon size={11} />{thumbnailStatusLabel(profile)}</span></div>
@@ -246,7 +279,7 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
   return (
     <div className="modal-backdrop" onMouseDown={(event) => !savingRef.current && event.target === event.currentTarget && onClose()}>
       <section ref={modalRef} className="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title" aria-busy={saving} tabIndex={-1}>
-        <header className="modal-header"><div className="game-tile small" style={tileStyle(profile)}>{profileInitial(profile)}</div><div><h2 id="profile-editor-title">{profile.displayName}</h2><span>ゲーム設定</span></div><button className="square-button" aria-label="ゲーム設定を閉じる" disabled={saving} onClick={onClose}><X size={15} /></button></header>
+        <header className="modal-header"><ProfileArtwork profile={profile} size="small" /><div><h2 id="profile-editor-title">{profile.displayName}</h2><span>ゲーム設定</span></div><button className="square-button" aria-label="ゲーム設定を閉じる" disabled={saving} onClick={onClose}><X size={15} /></button></header>
         {readOnly && <div className="readonly-banner"><LockKeyhole size={14} /><span>配信中のため読み取り専用です。変更は配信終了後に行えます。</span></div>}
         <div className="modal-scroll">
           {saveError && <div className="inline-warning error" role="alert"><AlertTriangle size={14} /><span>{saveError}</span></div>}
@@ -282,7 +315,7 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
           <section className="thumbnail-section">
             <div className="thumbnail-heading"><strong>YouTube用サムネイル</strong><span className={`thumbnail-status tone-${thumbnailTone(draft)}`}><StatusDot tone={thumbnailTone(draft)} />{thumbnailStatusLabel(draft)}</span></div>
             <div className="thumbnail-content">
-              <div className="thumbnail-preview-frame">{draft.state.thumbnailFilename ? <img src={thumbnailUrl(draft)} alt={`${draft.displayName}の登録済みサムネイル`} /> : <div><ImageIcon size={21} /><span>未登録</span></div>}</div>
+              <ThumbnailPreview profile={draft} />
               <div className="thumbnail-options">
                 {draft.state.thumbnailLastError && <div className="oauth-error">{draft.state.thumbnailLastError}</div>}
                 <div className="button-row"><button className="secondary-button" disabled={locked} onClick={() => fileRef.current?.click()}>{draft.state.thumbnailFilename ? '差し替え' : '画像を登録'}</button>{draft.state.thumbnailFilename && <button className="ghost-button" disabled={locked} onClick={() => void removeThumbnail()}>削除</button>}</div>
@@ -358,7 +391,7 @@ function ControlPanel({ status, selected, busy, onStart, onStop, onReplay, onEdi
   const reason = !status.obsConnected ? 'OBSへ接続すると配信を開始できます' : !selected ? '配信前にゲームを選択してください' : status.busy || busy ? '処理が完了するまでお待ちください' : null
   return <aside className="control-panel" aria-label="配信操作">
     {restartDetected && <div className="control-warning"><AlertTriangle size={14} /><span>アプリ再起動後の配信を検出しました。現在の配信を安全に終了できます。</span></div>}
-    <div className="selection-summary">{selected ? <><div className="game-tile small" style={tileStyle(selected)}>{profileInitial(selected)}</div><div><strong>{selected.displayName}</strong><span>{status.captureMethod ? captureLabels[status.captureMethod] : '未判定'} ・ {thumbnailStatusLabel(selected)}</span></div>{status.selectedGameId === selected.id && <b><Check size={12} />適用済み</b>}</> : <><div className="empty-tile"><Plus size={15} /></div><div><strong className="muted">ゲームを選択</strong><span>配信前にプロファイル適用が必要です</span></div></>}</div>
+    <div className="selection-summary">{selected ? <><ProfileArtwork profile={selected} size="small" /><div><strong>{selected.displayName}</strong><span>{status.captureMethod ? captureLabels[status.captureMethod] : '未判定'} ・ {thumbnailStatusLabel(selected)}</span></div>{status.selectedGameId === selected.id && <b><Check size={12} />適用済み</b>}</> : <><div className="empty-tile"><Plus size={15} /></div><div><strong className="muted">ゲームを選択</strong><span>配信前にプロファイル適用が必要です</span></div></>}</div>
     {!restartDetected && selected && !selected.state.thumbnailFilename && !showStop && <button className="thumbnail-register-link" onClick={onEdit}><ImageIcon size={14} />初回サムネイルを登録</button>}
     {status.warning && <div className="control-warning"><AlertTriangle size={14} /><span>{status.warning}</span></div>}
     <div className="control-actions">{showStop ? <button className="stop-button" disabled={busy || status.busy} onClick={onStop}>{busy ? <LoaderCircle className="spin" size={15} /> : <CircleStop size={15} />}配信終了</button> : <button className="start-button" disabled={disabled} onClick={onStart}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} fill="currentColor" />}配信開始</button>}<button className="clip-button" disabled={!status.replayBuffer || busy} onClick={onReplay}><ArrowDownToLine size={14} />クリップ保存</button></div>
@@ -476,7 +509,7 @@ export default function App() {
     {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} status={status} oauthStatus={oauthStatus} oauthProgress={oauthProgress} onOAuthConnect={connectOAuth} onReconnect={async () => { await refresh(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); await loadOAuthStatus(); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamSync={async () => { const result = await api.steamSync(); setProfiles(result.profiles); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>OAuth接続状態を取得できません。OBS操作は利用できます。</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />状態を再確認</button></main>) : <main className="library-view">
       <div className="search-row"><label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ゲームを検索" />{search && <button aria-label="検索をクリア" onClick={() => setSearch('')}><X size={14} /></button>}</label><button className="add-button" disabled={activeOperation || !template} onClick={() => setAdding(true)}><Plus size={14} />追加</button></div>
       {tab === 'switch' && <p className="tab-note">Switchはゲーム名を自動判定しません。配信するゲームを手動で選択してください。</p>}{tab === 'exception' && <p className="tab-note">通常のライブラリ連携が難しいゲームを扱います。</p>}
-      {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>お気に入り</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => <button key={profile.id} className={selected?.id === profile.id ? 'selected' : ''} disabled={actionBusy} onClick={() => selectGame(profile)}><span className="favorite-tile" style={tileStyle(profile)}>{profileInitial(profile)}</span><strong>{profile.displayName}</strong></button>)}</div></section>}
+      {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>お気に入り</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => <button key={profile.id} className={selected?.id === profile.id ? 'selected' : ''} disabled={actionBusy} onClick={() => selectGame(profile)}><ProfileArtwork profile={profile} size="favorite" /><strong>{profile.displayName}</strong></button>)}</div></section>}
       <section className="library-section"><div className="section-title"><h2>{platformTitles[tab]}</h2><span>{filtered.length}件</span></div><div className="game-list">{filtered.map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => selectGame(profile)} onEdit={() => setEditing(profile)} onFavorite={() => toggleFavorite(profile)} />)}{filtered.length === 0 && <div className="empty"><Gamepad2 size={24} /><strong>ゲームがありません</strong><button onClick={() => setAdding(true)}>ゲームを追加</button></div>}</div></section>
       <section className="comments-section"><div className="section-title"><h2>統合コメント</h2><span className={status.streaming ? 'active-text' : ''}>{status.streaming ? '配信中・自動更新' : '配信開始後に表示されます'}</span></div>{status.streaming && comments.length ? <div className="comment-list">{comments.slice(-30).map((comment) => <div className={`comment-row ${comment.mention ? 'mention' : ''}`} key={comment.id}><ServiceIcon service={comment.service} /><div><div><strong>{comment.author}</strong>{comment.moderator && <b>MOD</b>}<time>{new Date(comment.publishedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</time></div><p>{comment.body}</p></div></div>)}</div> : <div className="comment-empty"><MessageSquareText size={20} /><span>YouTube / Twitch の実際のコメントをここに表示します</span></div>}</section>
     </main>}

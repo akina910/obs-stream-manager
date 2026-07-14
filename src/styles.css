@@ -137,6 +137,10 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .game-card[aria-disabled='true'] { opacity: .65; cursor: progress; }
 .game-tile { width: 52px; height: 52px; flex: none; display: grid; place-items: center; border-radius: 10px; color: var(--bg); background: linear-gradient(140deg, oklch(.82 .14 var(--tile-hue)), oklch(.62 .12 var(--tile-hue-end))); font-size: 20px; font-weight: 700; }
 .game-tile.small { width: 36px; height: 36px; border-radius: 9px; font-size: 15px; }
+.profile-artwork { position: relative; overflow: hidden; isolation: isolate; }
+.profile-artwork-fallback { grid-area: 1 / 1; }
+.profile-artwork img { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; display: block; object-fit: cover; object-position: center; }
+.profile-artwork img[hidden] { display: none; }
 .game-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 5px; }
 .game-name-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
 .game-name-row strong { overflow: hidden; color: var(--text); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
