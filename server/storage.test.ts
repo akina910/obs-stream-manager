@@ -159,6 +159,36 @@ describe('DataStore', () => {
     expect(result.profiles.find((profile) => profile.library.steamAppId === 1234)?.library).toMatchObject({ installed: true, installDirectory: 'D:\\SteamLibrary\\steamapps\\common\\New Steam Game' })
   })
 
+  it('keeps automatic Steam scans idempotent and clears removed installs', async () => {
+    const store = await createStore()
+    const installed = [{ appId: 1234, name: 'Auto-detected Game', installDir: 'D:\\SteamLibrary\\steamapps\\common\\Auto-detected Game' }]
+
+    const first = await store.syncSteamLibrary([], installed)
+    const second = await store.syncSteamLibrary([], installed)
+    const removed = await store.syncSteamLibrary([], [])
+
+    expect(first).toMatchObject({ created: 1, updated: 0 })
+    expect(second).toMatchObject({ created: 0, updated: 0 })
+    expect(second.profiles.filter((profile) => profile.library.steamAppId === 1234)).toHaveLength(1)
+    expect(removed.updated).toBe(1)
+    expect(removed.profiles.find((profile) => profile.library.steamAppId === 1234)?.library).toMatchObject({ installed: false })
+    expect(removed.profiles.find((profile) => profile.library.steamAppId === 1234)?.library.installDirectory).toBeUndefined()
+  })
+
+  it('serializes concurrent Steam scans without creating duplicate profiles', async () => {
+    const store = await createStore()
+    const installed = [{ appId: 4321, name: 'Concurrent Game', installDir: 'D:\\SteamLibrary\\steamapps\\common\\Concurrent Game' }]
+
+    const results = await Promise.all([
+      store.syncSteamLibrary([], installed),
+      store.syncSteamLibrary([], installed),
+    ])
+
+    const profiles = await store.listProfiles()
+    expect(results.reduce((total, result) => total + result.created, 0)).toBe(1)
+    expect(profiles.filter((profile) => profile.library.steamAppId === 4321)).toHaveLength(1)
+  })
+
   it('does not overwrite an existing Steam link when distinct App IDs share a display name', async () => {
     const store = await createStore()
     const ark = (await store.listProfiles()).find((profile) => profile.id === 'ark_survival_ascended')!

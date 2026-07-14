@@ -1,9 +1,9 @@
 import crypto from 'node:crypto'
-import { readFile, readdir } from 'node:fs/promises'
-import path from 'node:path'
+import { readFile } from 'node:fs/promises'
 import sharp from 'sharp'
 import type { AppConfig, ChatMessage, GameProfile, PlatformRuntimeStatus, PlatformRuntimeStatuses } from '../shared/contracts.js'
 import { SecretStore } from './secrets.js'
+import { scanSteamLibraries, type SteamLibraryScan } from './steam-library.js'
 import type { DataStore } from './storage.js'
 
 export type ThumbnailPreparation = {
@@ -461,15 +461,8 @@ export class PlatformServices {
     return (result.response.games ?? []).map((game) => ({ appId: game.appid, name: game.name, playtimeMinutes: game.playtime_forever }))
   }
 
-  async steamInstalledGames(config: AppConfig): Promise<Array<{ appId: number; name: string; installDir: string }>> {
-    if (!config.steam.installPath) return []
-    const steamApps = path.join(config.steam.installPath, 'steamapps')
-    const files = (await readdir(steamApps)).filter((file) => /^appmanifest_\d+\.acf$/.test(file))
-    return Promise.all(files.map(async (file) => {
-      const body = await readFile(path.join(steamApps, file), 'utf8')
-      const value = (key: string) => body.match(new RegExp(`"${key}"\\s+"([^"]*)"`, 'i'))?.[1] ?? ''
-      return { appId: Number(value('appid')), name: value('name'), installDir: path.join(steamApps, 'common', value('installdir')) }
-    }))
+  async steamInstalledGames(config: AppConfig): Promise<SteamLibraryScan> {
+    return scanSteamLibraries(config.steam.installPath)
   }
 
   private addComment(message: ChatMessage): void {

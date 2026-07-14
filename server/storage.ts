@@ -32,6 +32,8 @@ async function atomicWrite(filename: string, contents: string | Uint8Array): Pro
 }
 
 export class DataStore {
+  private steamSyncTail = Promise.resolve()
+
   constructor(readonly dataDir: string) {}
 
   async initialize(): Promise<void> {
@@ -148,7 +150,23 @@ export class DataStore {
     owned: Array<{ appId: number; name: string }>,
     installed: Array<{ appId: number; name: string; installDir: string }>,
   ): Promise<{ profiles: GameProfile[]; created: number; updated: number }> {
+    const previous = this.steamSyncTail
+    let release!: () => void
+    this.steamSyncTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try {
+      return await this.syncSteamLibraryUnlocked(owned, installed)
+    } finally {
+      release()
+    }
+  }
+
+  private async syncSteamLibraryUnlocked(
+    owned: Array<{ appId: number; name: string }>,
+    installed: Array<{ appId: number; name: string; installDir: string }>,
+  ): Promise<{ profiles: GameProfile[]; created: number; updated: number }> {
     const installedById = new Map(installed.map((game) => [game.appId, game]))
+    const installedIds = new Set(installedById.keys())
     const games = new Map<number, { appId: number; name: string }>()
     for (const game of owned) games.set(game.appId, game)
     for (const game of installed) games.set(game.appId, game)
@@ -163,16 +181,24 @@ export class DataStore {
       const match = matchByAppId ?? matchByUnlinkedName
       const base = match ?? createPcProfile(`steam_${game.appId}`, game.name)
       const local = installedById.get(game.appId)
-      const saved = await this.saveProfile({
+      const coverUrl = base.coverUrl ?? `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appId}/header.jpg`
+      const next = {
         ...base,
-        coverUrl: base.coverUrl ?? `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appId}/header.jpg`,
+        coverUrl,
         library: {
           ...base.library,
           steamAppId: game.appId,
           installed: Boolean(local),
           installDirectory: local?.installDir,
         },
-      })
+      }
+      const changed = !match
+        || base.coverUrl !== coverUrl
+        || base.library.steamAppId !== game.appId
+        || base.library.installed !== Boolean(local)
+        || base.library.installDirectory !== local?.installDir
+      if (!changed) continue
+      const saved = await this.saveProfile(next)
       if (match) {
         const index = existing.findIndex((profile) => profile.id === match.id)
         existing[index] = saved
@@ -181,6 +207,16 @@ export class DataStore {
         existing.push(saved)
         created += 1
       }
+    }
+    for (const profile of existing) {
+      if (profile.library.steamAppId === undefined || installedIds.has(profile.library.steamAppId) || !profile.library.installed) continue
+      const saved = await this.saveProfile({
+        ...profile,
+        library: { ...profile.library, installed: false, installDirectory: undefined },
+      })
+      const index = existing.findIndex((item) => item.id === profile.id)
+      existing[index] = saved
+      updated += 1
     }
     return { profiles: await this.listProfiles(), created, updated }
   }
