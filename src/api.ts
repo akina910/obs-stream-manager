@@ -1,6 +1,7 @@
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
+export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
 export type OAuthProvider = 'youtube' | 'twitch'
 export type OAuthConnectionStage = 'setup_required' | 'ready' | 'authorizing' | 'partial' | 'connected'
 export type OAuthConnectionStatus = {
@@ -43,7 +44,8 @@ export const api = {
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),
   selectFolder: (initialPath: string) => request<{ path: string | null }>('/api/folders/select', { method: 'POST', body: JSON.stringify({ initialPath }) }),
-  steamSync: () => request<{ profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; warnings: string[] }>('/api/steam/sync', { method: 'POST', body: '{}' }),
+  steamScan: () => request<SteamSyncResult>('/api/steam/scan', { method: 'POST', body: '{}' }),
+  steamSync: () => request<SteamSyncResult>('/api/steam/sync', { method: 'POST', body: '{}' }),
   saveConfig: (config: AppConfig, secrets: Record<string, string>) => request<AppConfig>('/api/config', { method: 'PUT', body: JSON.stringify({ config, secrets }) }),
   backup: () => request<unknown>('/api/backup/export', { method: 'POST', body: '{}' }),
   restore: (backup: unknown) => request<{ ok: true }>('/api/backup/import', { method: 'POST', body: JSON.stringify(backup) }),
