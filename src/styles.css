@@ -40,6 +40,12 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .app-frame { min-height: 100vh; display: flex; justify-content: center; background: var(--bg); }
 .app-shell { position: relative; width: 100%; max-width: 760px; min-height: 100vh; display: flex; flex-direction: column; }
 .app-header { padding: 14px 16px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.desktop-launch-notice { margin: 0 16px 10px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid rgba(87, 165, 255, .28); border-radius: 9px; background: rgba(87, 165, 255, .08); color: #dbeaff; }
+.desktop-launch-notice > div { min-width: 0; display: grid; gap: 3px; }
+.desktop-launch-notice strong { font-size: 12px; }
+.desktop-launch-notice code { overflow-wrap: anywhere; color: #fff; font-size: 13px; }
+.desktop-launch-notice span { color: #9eb1ca; font-size: 11px; }
+.desktop-launch-notice button { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 7px 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 7px; background: rgba(255, 255, 255, .08); color: #fff; font-weight: 700; }
 .brand { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .brand-mark { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 8px; background: linear-gradient(135deg, #6f8dff, #4657b8); }
 .brand-mark svg { width: 15px; height: 15px; fill: none; stroke: var(--bg); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
@@ -336,6 +342,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 
 @media (max-width: 370px) {
   .app-header, .tabs, .runtime-status, .library-view, .settings-view, .control-panel { padding-inline: 12px; }
+  .desktop-launch-notice { margin-inline: 12px; }
   .brand strong { font-size: 13px; }
   .header-status { padding-inline: 8px; font-size: 11px; }
   .runtime-overall-row { gap: 6px; }

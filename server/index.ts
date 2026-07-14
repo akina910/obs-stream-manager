@@ -41,6 +41,18 @@ const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpene
 export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
 
+app.addHook('onSend', async (request, reply, payload) => {
+  reply.header('X-Content-Type-Options', 'nosniff')
+  reply.header('Referrer-Policy', 'no-referrer')
+  if (!request.url.startsWith('/api/')) {
+    reply.header(
+      'Content-Security-Policy',
+      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'",
+    )
+  }
+  return payload
+})
+
 app.setErrorHandler((error, _request, reply) => {
   const normalized = error instanceof Error ? error : new Error(String(error))
   const statusCode = 'statusCode' in normalized && typeof normalized.statusCode === 'number' ? normalized.statusCode : 500
@@ -126,39 +138,34 @@ app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); retu
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })
 app.post<{ Body: { initialPath?: string } }>('/api/folders/select', async (request) => ({ path: await selectFolder(typeof request.body?.initialPath === 'string' ? request.body.initialPath : '') }))
 
-const secretNames: SecretName[] = ['obs-password', 'steam-api-key', 'youtube-client-secret', 'youtube-refresh-token', 'twitch-client-secret', 'twitch-access-token', 'twitch-refresh-token']
+const secretNames: SecretName[] = ['obs-password', 'steam-api-key', 'youtube-refresh-token', 'twitch-access-token', 'twitch-refresh-token']
 app.put<{ Body: { config: unknown; secrets?: Partial<Record<SecretName, string>> } }>('/api/config', async (request) => {
   await orchestrator.assertNotStreaming()
   const current = await store.getConfig()
   let next = AppConfigSchema.parse(request.body.config)
-  const previousYouTubeClientSecret = secrets.get('youtube-client-secret') ?? ''
-  const youtubeClientSecretProvided = Object.hasOwn(request.body.secrets ?? {}, 'youtube-client-secret')
-  let youtubeCredentialsChanged = next.youtube.clientId !== current.youtube.clientId
+  const youtubeCredentialsChanged = next.youtube.clientId !== current.youtube.clientId
   for (const [name, value] of Object.entries(request.body.secrets ?? {})) {
     if (secretNames.includes(name as SecretName) && typeof value === 'string') {
-      if (name === 'youtube-client-secret' && value !== previousYouTubeClientSecret) youtubeCredentialsChanged = true
       secrets.set(name as SecretName, value)
       if (name === 'obs-password') next = { ...next, obs: { ...next.obs, passwordStored: Boolean(value) } }
       if (name === 'steam-api-key') next = { ...next, steam: { ...next.steam, apiKeyStored: Boolean(value) } }
-      if (name === 'youtube-client-secret') next = { ...next, youtube: { ...next.youtube, clientSecretStored: Boolean(value) } }
       if (name === 'youtube-refresh-token') {
         if (!value) clearYouTubeStreamSecrets(secrets)
         next = { ...next, youtube: { ...next.youtube, refreshTokenStored: Boolean(value), broadcastId: value ? next.youtube.broadcastId : '' } }
       }
-      if (name === 'twitch-client-secret') next = { ...next, twitch: { ...next.twitch, clientSecretStored: Boolean(value) } }
       if (name === 'twitch-access-token') next = { ...next, twitch: { ...next.twitch, accessTokenStored: Boolean(value) } }
       if (name === 'twitch-refresh-token') next = { ...next, twitch: { ...next.twitch, refreshTokenStored: Boolean(value) } }
     }
   }
   if (youtubeCredentialsChanged) {
-    if (next.youtube.clientId !== current.youtube.clientId && !youtubeClientSecretProvided) secrets.set('youtube-client-secret', '')
+    secrets.set('youtube-client-secret', '')
     secrets.set('youtube-refresh-token', '')
     clearYouTubeStreamSecrets(secrets)
     next = {
       ...next,
       youtube: {
         ...next.youtube,
-        clientSecretStored: Boolean(secrets.get('youtube-client-secret')),
+        clientSecretStored: false,
         refreshTokenStored: false,
         broadcastId: '',
       },
@@ -229,9 +236,27 @@ try {
   }
 } catch { /* Vite serves the client during development */ }
 
-if (process.env.NODE_ENV !== 'test') {
-  const port = listenPort
-  const host = process.env.HOST ?? '127.0.0.1'
-  await app.listen({ port, host })
-  console.log(`OBS Stream Manager: http://${host}:${port}`)
+let started = false
+
+export async function startServer(): Promise<{ host: string; port: number; url: string }> {
+  const host = '127.0.0.1'
+  if (!started) {
+    await app.listen({ port: listenPort, host })
+    started = true
+  }
+  return { host, port: listenPort, url: `http://${host}:${listenPort}` }
+}
+
+export async function stopServer(): Promise<void> {
+  await platforms.stopComments().catch(() => undefined)
+  await obs.disconnect().catch(() => undefined)
+  if (started) {
+    await app.close()
+    started = false
+  }
+}
+
+if (process.env.NODE_ENV !== 'test' && process.env.OBS_STREAM_MANAGER_EMBEDDED !== '1') {
+  const server = await startServer()
+  console.log(`OBS Stream Manager: ${server.url}`)
 }

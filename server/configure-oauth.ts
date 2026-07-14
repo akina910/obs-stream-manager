@@ -6,25 +6,22 @@ import { SecretStore } from './secrets.js'
 import { DataStore } from './storage.js'
 
 type GoogleClientFile = {
-  installed?: { client_id?: string; client_secret?: string }
-  web?: { client_id?: string; client_secret?: string }
+  installed?: { client_id?: string }
+  web?: { client_id?: string }
 }
 
 async function googleCredentials(): Promise<ProviderOAuthCredentials['youtube']> {
   const filename = process.env.OBS_STREAM_MANAGER_GOOGLE_CLIENT_JSON?.trim()
   if (!filename) {
     const clientId = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID?.trim()
-    const clientSecret = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET?.trim()
-    if (!clientId && !clientSecret) return undefined
-    if (!clientId || !clientSecret) throw new Error('YouTube provisioning requires both Client ID and Client Secret')
-    return { clientId, clientSecret }
+    return clientId ? { clientId } : undefined
   }
   const parsed = JSON.parse(await readFile(path.resolve(filename), 'utf8')) as GoogleClientFile
   const client = parsed.installed ?? parsed.web
-  if (!client?.client_id?.trim() || !client.client_secret?.trim()) {
-    throw new Error('Google client JSON does not contain a Client ID and Client Secret')
+  if (!client?.client_id?.trim()) {
+    throw new Error('Google client JSON does not contain a Client ID')
   }
-  return { clientId: client.client_id.trim(), clientSecret: client.client_secret.trim() }
+  return { clientId: client.client_id.trim() }
 }
 
 const store = new DataStore(getDataDirectory())
@@ -44,6 +41,6 @@ if (!credentials.youtube && !credentials.twitch) {
 const saved = await provisionProviderOAuth(store, secrets, credentials)
 console.log(JSON.stringify({
   dataDirectory: store.dataDir,
-  youtubeConfigured: Boolean(saved.youtube.clientId && saved.youtube.clientSecretStored),
+  youtubeConfigured: Boolean(saved.youtube.clientId),
   twitchConfigured: Boolean(saved.twitch.clientId),
 }, null, 2))

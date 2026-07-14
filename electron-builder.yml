@@ -1,0 +1,35 @@
+appId: io.github.akina910.obs-stream-manager
+productName: OBS Stream Manager
+copyright: Copyright © 2026 OBS Stream Manager contributors
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+extraResources:
+  - from: build/provider-oauth.json
+    to: provider-oauth.json
+asar: true
+asarUnpack:
+  - "**/*.node"
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  requestedExecutionLevel: asInvoker
+  forceCodeSigning: false
+nsis:
+  artifactName: "${productName}-Setup-${version}-${arch}.${ext}"
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+portable:
+  artifactName: "${productName}-Portable-${version}-${arch}.${ext}"
+  requestExecutionLevel: user
