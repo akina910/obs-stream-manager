@@ -5,15 +5,25 @@ import { SecretStore } from './secrets.js'
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 type StreamServiceSettings = OBSRequestTypes['SetStreamServiceSettings']
 type AppliedStreamService = { streamServiceType: string; server: string; key: string }
+type ObsRuntimeStatus = Omit<RuntimeStatus, 'platforms'>
 
 export class ObsController {
   private readonly obs = new OBSWebSocket()
   private connected = false
   private streamServiceManaged = false
+  private readonly streamStateListeners = new Set<(active: boolean) => void>()
   private started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
 
   constructor(private readonly secrets: SecretStore, private readonly streamStartTimeoutMs = 8_000) {
     this.obs.on('ConnectionClosed', () => { this.connected = false })
+    this.obs.on('StreamStateChanged', ({ outputActive }) => {
+      for (const listener of this.streamStateListeners) listener(outputActive)
+    })
+  }
+
+  onStreamStateChanged(listener: (active: boolean) => void): () => void {
+    this.streamStateListeners.add(listener)
+    return () => this.streamStateListeners.delete(listener)
   }
 
   async connect(config: AppConfig): Promise<void> {
@@ -404,7 +414,7 @@ export class ObsController {
     await this.obs.call('SetCurrentProgramScene', { sceneName })
   }
 
-  async status(config: AppConfig, selectedGameId: string | null, captureMethod: CaptureMethod | null, busy: boolean, warning: string | null): Promise<RuntimeStatus> {
+  async status(config: AppConfig, selectedGameId: string | null, captureMethod: CaptureMethod | null, busy: boolean, warning: string | null): Promise<ObsRuntimeStatus> {
     try {
       await this.connect(config)
       const [stream, record, replay, scene] = await Promise.all([

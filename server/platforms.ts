@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import sharp from 'sharp'
-import type { AppConfig, ChatMessage, GameProfile } from '../shared/contracts.js'
+import type { AppConfig, ChatMessage, GameProfile, PlatformRuntimeStatus, PlatformRuntimeStatuses } from '../shared/contracts.js'
 import { SecretStore } from './secrets.js'
 import type { DataStore } from './storage.js'
 
@@ -65,9 +65,86 @@ export class PlatformServices {
   private commentsGeneration = 0
   private twitchReconnectTimer: NodeJS.Timeout | null = null
   private readonly youtubeLifecyclePolling: Required<YouTubeLifecyclePolling>
+  private platformStatusCache: { key: string; value: PlatformRuntimeStatuses; expiresAt: number } | null = null
+  private platformStatusRefresh: { key: string; promise: Promise<PlatformRuntimeStatuses> } | null = null
+  private platformStatusGeneration = 0
 
   constructor(private readonly secrets: SecretStore, private readonly store: DataStore, youtubeLifecyclePolling: YouTubeLifecyclePolling = {}) {
     this.youtubeLifecyclePolling = { ...defaultYouTubeLifecyclePolling, ...youtubeLifecyclePolling }
+  }
+
+  invalidateLiveStatus(): void {
+    this.platformStatusGeneration += 1
+    this.platformStatusCache = null
+    this.platformStatusRefresh = null
+  }
+
+  private statusKey(config: AppConfig, profile: GameProfile | null): string {
+    return JSON.stringify({
+      youtube: [config.features.youtube, config.youtube.clientId, config.youtube.refreshTokenStored, config.youtube.broadcastId, profile?.youtube.enabled ?? null],
+      twitch: [config.features.twitch, config.twitch.clientId, config.twitch.accessTokenStored, config.twitch.refreshTokenStored, config.twitch.broadcasterId, profile?.twitch.enabled ?? null],
+    })
+  }
+
+  private async youtubeLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatus> {
+    if (!config.features.youtube || profile?.youtube.enabled === false) return { state: 'disabled', detail: 'YouTube配信は無効です', checkedAt: null }
+    if (!config.youtube.clientId || !config.youtube.refreshTokenStored || !config.youtube.broadcastId) return { state: 'unprepared', detail: '配信枠が準備されていません', checkedAt: null }
+    const checkedAt = new Date().toISOString()
+    try {
+      const accessToken = await this.youtubeAccessToken(config)
+      const url = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
+      url.search = new URLSearchParams({ part: 'id,status,contentDetails', id: config.youtube.broadcastId }).toString()
+      const result = await apiJson<{ items: YouTubeBroadcast[] }>(url.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
+      const broadcast = result.items[0]
+      if (!broadcast) return { state: 'unprepared', detail: '準備済みの配信枠が見つかりません', checkedAt }
+      const lifeCycle = String(broadcast.status.lifeCycleStatus ?? '')
+      if (lifeCycle === 'live') return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt }
+      if (lifeCycle === 'liveStarting') return { state: 'starting', detail: 'YouTubeで公開開始処理中', checkedAt }
+      if (lifeCycle === 'testing' || lifeCycle === 'testStarting') return { state: 'starting', detail: 'YouTubeテスト配信中（視聴者には未公開）', checkedAt }
+      if (lifeCycle === 'ready') return { state: 'ready', detail: 'YouTube公開開始待ち', checkedAt }
+      if (lifeCycle === 'created') return { state: 'unprepared', detail: 'YouTube配信枠を準備中', checkedAt }
+      if (lifeCycle === 'complete') return { state: 'offline', detail: 'YouTube配信は終了済み', checkedAt }
+      return { state: 'error', detail: `YouTube状態を判定できません（${lifeCycle || 'unknown'}）`, checkedAt }
+    } catch (error) {
+      return { state: 'error', detail: `YouTube状態の確認に失敗: ${error instanceof Error ? error.message : String(error)}`, checkedAt }
+    }
+  }
+
+  private async twitchLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatus> {
+    if (!config.features.twitch || profile?.twitch.enabled === false) return { state: 'disabled', detail: 'Twitch配信は無効です', checkedAt: null }
+    if (!config.twitch.clientId || (!config.twitch.accessTokenStored && !config.twitch.refreshTokenStored) || !config.twitch.broadcasterId) return { state: 'unprepared', detail: 'Twitch配信先が準備されていません', checkedAt: null }
+    const checkedAt = new Date().toISOString()
+    try {
+      const token = await this.twitchAccessToken(config)
+      const url = `https://api.twitch.tv/helix/streams?user_id=${encodeURIComponent(config.twitch.broadcasterId)}`
+      const result = await apiJson<{ data: Array<{ id: string; type: string }> }>(url, {
+        headers: { authorization: `Bearer ${token}`, 'client-id': config.twitch.clientId },
+      })
+      const live = result.data.some((stream) => stream.type === 'live')
+      return live
+        ? { state: 'live', detail: 'Twitchで公開配信中', checkedAt }
+        : { state: 'offline', detail: 'Twitchはオフライン', checkedAt }
+    } catch (error) {
+      return { state: 'error', detail: `Twitch状態の確認に失敗: ${error instanceof Error ? error.message : String(error)}`, checkedAt }
+    }
+  }
+
+  async getLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatuses> {
+    const key = this.statusKey(config, profile)
+    if (this.platformStatusCache?.key === key && this.platformStatusCache.expiresAt > Date.now()) return this.platformStatusCache.value
+    if (this.platformStatusRefresh?.key === key) return this.platformStatusRefresh.promise
+    const generation = this.platformStatusGeneration
+    const promise = Promise.all([this.youtubeLiveStatus(config, profile), this.twitchLiveStatus(config, profile)]).then(([youtube, twitch]) => {
+      const value = { youtube, twitch }
+      if (generation !== this.platformStatusGeneration) return this.getLiveStatus(config, profile)
+      const active = [youtube.state, twitch.state].some((state) => ['ready', 'starting', 'live', 'stopping'].includes(state))
+      this.platformStatusCache = { key, value, expiresAt: Date.now() + (active ? 10_000 : 30_000) }
+      return value
+    })
+    this.platformStatusRefresh = { key, promise }
+    try { return await promise } finally {
+      if (this.platformStatusRefresh?.promise === promise) this.platformStatusRefresh = null
+    }
   }
 
   private async youtubeAccessToken(config: AppConfig): Promise<string> {
@@ -122,34 +199,31 @@ export class PlatformServices {
       listUrl.search = new URLSearchParams({ part: 'id,snippet,status,contentDetails', id: config.youtube.broadcastId }).toString()
       const broadcasts = await apiJson<{ items: YouTubeBroadcast[] }>(listUrl.toString(), { headers })
       const owned = broadcasts.items[0]
-      const monitor = owned?.contentDetails.monitorStream && typeof owned.contentDetails.monitorStream === 'object'
-        ? owned.contentDetails.monitorStream as Record<string, unknown>
-        : {}
-      const manuallyControlled = owned?.contentDetails.enableAutoStart === false
-        && owned.contentDetails.enableAutoStop === false
-        && monitor.enableMonitorStream === true
-      if (owned && owned.status.lifeCycleStatus !== 'complete' && manuallyControlled) broadcast = owned
+      const lifeCycle = String(owned?.status.lifeCycleStatus ?? '')
+      const reusable = ['created', 'ready', 'testing', 'testStarting', 'liveStarting', 'live'].includes(lifeCycle)
+      if (owned && reusable) broadcast = owned
     }
     if (!broadcast) {
       const insert = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
       insert.search = new URLSearchParams({ part: 'snippet,status,contentDetails' }).toString()
       broadcast = await apiJson<YouTubeBroadcast>(insert.toString(), {
         method: 'POST', headers,
-        body: JSON.stringify({ snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, scheduledStartTime: new Date(Date.now() + 60_000).toISOString() }, status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: false }, contentDetails: { enableAutoStart: false, enableAutoStop: false, monitorStream: { enableMonitorStream: true, broadcastStreamDelayMs: 0 }, latencyPreference: 'low' } }),
+        body: JSON.stringify({ snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, scheduledStartTime: new Date(Date.now() + 60_000).toISOString() }, status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: false }, contentDetails: { enableAutoStart: true, enableAutoStop: true, monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 }, latencyPreference: 'low' } }),
       })
       const latest = await this.store.getConfig()
       await this.store.saveConfig({ ...latest, youtube: { ...latest.youtube, broadcastId: broadcast.id } })
     } else {
       const update = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
       update.search = new URLSearchParams({ part: 'snippet,status' }).toString()
+      const updateBody: Record<string, unknown> = {
+        id: broadcast.id,
+        snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, scheduledStartTime: broadcast.snippet.scheduledStartTime },
+        status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: Boolean(broadcast.status.selfDeclaredMadeForKids) },
+      }
       await apiJson(update.toString(), {
         method: 'PUT',
         headers,
-        body: JSON.stringify({
-          id: broadcast.id,
-          snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, scheduledStartTime: broadcast.snippet.scheduledStartTime },
-          status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: Boolean(broadcast.status.selfDeclaredMadeForKids) },
-        }),
+        body: JSON.stringify(updateBody),
       })
     }
     const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
@@ -231,7 +305,7 @@ export class PlatformServices {
   }
 
   async prepare(config: AppConfig, profile: GameProfile): Promise<Preparation[]> {
-    return Promise.all(([
+    const results = await Promise.all(([
       ['youtube', () => this.prepareYouTube(config, profile)],
       ['twitch', () => this.prepareTwitch(config, profile)],
     ] as const).map(async ([service, operation]) => {
@@ -242,6 +316,8 @@ export class PlatformServices {
         return { service, ok: false, message: error instanceof Error ? error.message : String(error) }
       }
     }))
+    this.invalidateLiveStatus()
+    return results
   }
 
   private async getYouTubeBroadcast(accessToken: string, broadcastId: string): Promise<YouTubeBroadcast> {
@@ -305,6 +381,15 @@ export class PlatformServices {
 
     broadcast = await this.getYouTubeBroadcast(accessToken, broadcastId)
     lifeCycleStatus = String(broadcast.status.lifeCycleStatus ?? '')
+    if (broadcast.contentDetails.enableAutoStart === true) {
+      if (lifeCycleStatus === 'complete') throw new Error('YouTubeの配信枠は既に終了しています。ゲームを選び直して新しい配信枠を作成してください')
+      if (lifeCycleStatus === 'revoked') throw new Error('YouTubeの配信枠が取り消されています。ゲームを選び直して新しい配信枠を作成してください')
+      if (!['created', 'ready', 'testStarting', 'testing', 'liveStarting', 'live'].includes(lifeCycleStatus)) {
+        throw new Error(`YouTubeの自動配信開始を待機できない状態です（lifeCycleStatus: ${lifeCycleStatus || 'unknown'}）`)
+      }
+      this.invalidateLiveStatus()
+      return
+    }
     if (lifeCycleStatus === 'ready' || lifeCycleStatus === 'created') {
       await this.transitionYouTubeBroadcast(accessToken, broadcastId, 'testing')
       lifeCycleStatus = 'testStarting'
@@ -328,15 +413,22 @@ export class PlatformServices {
       this.youtubeLifecyclePolling.transitionTimeoutMs,
       (current) => `YouTube配信を開始状態にできませんでした（lifeCycleStatus: ${String(current.status.lifeCycleStatus ?? 'unknown')}）`,
     )
+    this.invalidateLiveStatus()
   }
 
   async completeYouTubeBroadcast(config: AppConfig, profile: GameProfile | null): Promise<void> {
-    if (!profile || !config.features.youtube || !profile.youtube.enabled || !config.youtube.broadcastId) return
+    // `profile === null` is intentional for a manual OBS stop after an app restart.
+    // Only a genuinely live lifecycle is completed below; stale ready/created IDs remain untouched.
+    if (!config.features.youtube || profile?.youtube.enabled === false || !config.youtube.broadcastId) return
     const accessToken = await this.youtubeAccessToken(config)
     const broadcastId = config.youtube.broadcastId
     let broadcast = await this.getYouTubeBroadcast(accessToken, broadcastId)
     let lifeCycleStatus = String(broadcast.status.lifeCycleStatus ?? '')
     if (lifeCycleStatus === 'complete' || lifeCycleStatus === 'ready' || lifeCycleStatus === 'created') return
+    if (broadcast.contentDetails.enableAutoStop === true) {
+      this.invalidateLiveStatus()
+      return
+    }
     if (lifeCycleStatus === 'liveStarting' || lifeCycleStatus === 'testStarting') {
       broadcast = await this.waitForYouTubeState(
         () => this.getYouTubeBroadcast(accessToken, broadcastId),
@@ -357,6 +449,7 @@ export class PlatformServices {
       this.youtubeLifecyclePolling.transitionTimeoutMs,
       (current) => `YouTube配信の終了を確認できませんでした（lifeCycleStatus: ${String(current.status.lifeCycleStatus ?? 'unknown')}）`,
     )
+    this.invalidateLiveStatus()
   }
 
   async steamOwnedGames(config: AppConfig): Promise<Array<{ appId: number; name: string; playtimeMinutes: number }>> {

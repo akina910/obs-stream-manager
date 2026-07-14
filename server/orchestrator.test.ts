@@ -54,6 +54,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       completeYouTubeBroadcast: vi.fn().mockResolvedValue(undefined),
       startComments: vi.fn().mockResolvedValue(undefined),
       stopComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
     } as unknown as PlatformServices
     const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
     const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
@@ -77,5 +78,248 @@ describe('StreamOrchestrator stream startup rollback', () => {
     await expect(orchestrator.start()).rejects.toThrow('YouTube transition failed')
     expect(obs.stop).not.toHaveBeenCalled()
     expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+  })
+
+  it('does not silently retry external startup after a failed managed start', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue([]),
+      start: vi.fn().mockResolvedValue([]),
+      stop: vi.fn().mockResolvedValue([]),
+      isStreaming: vi.fn().mockResolvedValue(true),
+      ownsCurrentStream: vi.fn().mockReturnValue(true),
+    } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      startYouTubeBroadcast: vi.fn().mockRejectedValue(new Error('YouTube transition failed')),
+      completeYouTubeBroadcast: vi.fn().mockResolvedValue(undefined),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      stopComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+    vi.mocked(obs.start).mockImplementationOnce(async () => {
+      orchestrator.handleObsStreamStateChanged(true)
+      return []
+    })
+
+    await orchestrator.select(profile.id, 'window')
+    await expect(orchestrator.start()).rejects.toThrow('YouTube transition failed')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(platforms.startYouTubeBroadcast).toHaveBeenCalledTimes(1)
+    expect(platforms.startComments).not.toHaveBeenCalled()
+  })
+})
+
+describe('StreamOrchestrator OBS-triggered external sync', () => {
+  it('starts and stops prepared external services when OBS is operated manually', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = { applyProfile: vi.fn().mockResolvedValue([]) } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      startYouTubeBroadcast: vi.fn().mockResolvedValue(undefined),
+      completeYouTubeBroadcast: vi.fn().mockResolvedValue(undefined),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      stopComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await orchestrator.select(profile.id, 'window')
+    orchestrator.handleObsStreamStateChanged(true)
+    await vi.waitFor(() => expect(platforms.startYouTubeBroadcast).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id })))
+    expect(platforms.startComments).toHaveBeenCalledWith(config)
+    expect(logger.write).toHaveBeenCalledWith('stream.obs_started', expect.objectContaining({ gameId: profile.id, warnings: [] }))
+
+    orchestrator.handleObsStreamStateChanged(false)
+    await vi.waitFor(() => expect(platforms.completeYouTubeBroadcast).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id })))
+    expect(platforms.stopComments).toHaveBeenCalled()
+    expect(logger.write).toHaveBeenCalledWith('stream.obs_stopped', expect.objectContaining({ gameId: profile.id, warnings: [] }))
+  })
+
+  it('does not claim an external broadcast was prepared when OBS starts without a selected game', async () => {
+    const config = structuredClone(defaultConfig)
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const platforms = {
+      startYouTubeBroadcast: vi.fn(),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, {} as ObsController, {} as CaptureDetector, platforms, logger)
+
+    orchestrator.handleObsStreamStateChanged(true)
+    await vi.waitFor(() => expect(logger.write).toHaveBeenCalledWith('stream.obs_started', expect.objectContaining({
+      gameId: null,
+      warnings: [expect.stringContaining('ゲーム未選択')],
+    })))
+    expect(platforms.startYouTubeBroadcast).not.toHaveBeenCalled()
+    expect(platforms.startComments).toHaveBeenCalledWith(config)
+  })
+
+  it('queues an OBS state change that arrives while another operation is busy', async () => {
+    const config = structuredClone(defaultConfig)
+    let releaseReplay!: () => void
+    const replayBlocked = new Promise<void>((resolve) => { releaseReplay = resolve })
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const obs = { saveReplay: vi.fn(() => replayBlocked) } as unknown as ObsController
+    const platforms = {
+      startYouTubeBroadcast: vi.fn(),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    const replay = orchestrator.saveReplay()
+    await vi.waitFor(() => expect(obs.saveReplay).toHaveBeenCalledOnce())
+    orchestrator.handleObsStreamStateChanged(true)
+    expect(platforms.startComments).not.toHaveBeenCalled()
+
+    releaseReplay()
+    await replay
+    await vi.waitFor(() => expect(platforms.startComments).toHaveBeenCalledWith(config))
+    expect(logger.write).toHaveBeenCalledWith('stream.obs_started', expect.objectContaining({ gameId: null }))
+  })
+
+  it('uses an idle OBS state as the startup baseline without firing a stop sync', async () => {
+    const config = structuredClone(defaultConfig)
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({
+        obsConnected: true,
+        streaming: false,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId: null,
+        captureMethod: null,
+        currentScene: '90_ENDING',
+        warning: null,
+        busy: false,
+      }),
+    } as unknown as ObsController
+    const platforms = {
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+      }),
+      completeYouTubeBroadcast: vi.fn(),
+      stopComments: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await expect(orchestrator.getStatus()).resolves.toMatchObject({ streaming: false })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+    expect(platforms.stopComments).not.toHaveBeenCalled()
+  })
+
+  it('reconciles external services when the server starts while OBS is already streaming', async () => {
+    const config = structuredClone(defaultConfig)
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({
+        obsConnected: true,
+        streaming: true,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId: null,
+        captureMethod: null,
+        currentScene: '20_TALK',
+        warning: null,
+        busy: false,
+      }),
+    } as unknown as ObsController
+    const platforms = {
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'ready', detail: 'ready', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+      }),
+      startYouTubeBroadcast: vi.fn(),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await expect(orchestrator.getStatus()).resolves.toMatchObject({ streaming: true })
+    await vi.waitFor(() => expect(platforms.startComments).toHaveBeenCalledWith(config))
+    expect(platforms.startYouTubeBroadcast).not.toHaveBeenCalled()
+  })
+
+  it('does not let a stale status snapshot reverse a newer OBS event', async () => {
+    const config = structuredClone(defaultConfig)
+    let releaseStatus!: () => void
+    const statusBlocked = new Promise<void>((resolve) => { releaseStatus = resolve })
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const obs = {
+      status: vi.fn(async () => {
+        await statusBlocked
+        return {
+          obsConnected: true,
+          streaming: false,
+          recording: false,
+          replayBuffer: false,
+          sourceRecord: false,
+          verticalRecording: false,
+          selectedGameId: null,
+          captureMethod: null,
+          currentScene: '90_ENDING',
+          warning: null,
+          busy: false,
+        }
+      }),
+    } as unknown as ObsController
+    const platforms = {
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'ready', detail: 'ready', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+      }),
+      startYouTubeBroadcast: vi.fn(),
+      completeYouTubeBroadcast: vi.fn(),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      stopComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    const staleStatus = orchestrator.getStatus()
+    await vi.waitFor(() => expect(obs.status).toHaveBeenCalledOnce())
+    orchestrator.handleObsStreamStateChanged(true)
+    await vi.waitFor(() => expect(platforms.startComments).toHaveBeenCalledWith(config))
+    releaseStatus()
+    await staleStatus
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+    expect(platforms.stopComments).not.toHaveBeenCalled()
   })
 })
