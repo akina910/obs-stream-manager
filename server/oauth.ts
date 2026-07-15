@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import type { DataStore } from './storage.js'
 import type { SecretStore } from './secrets.js'
-import { clearYouTubeStreamSecrets } from './provider-provisioning.js'
+import { clearTwitchStreamSecrets, clearYouTubeStreamSecrets } from './provider-provisioning.js'
 
 export type OAuthProvider = 'youtube' | 'twitch'
 
@@ -36,7 +36,8 @@ type TwitchDeviceSession = {
 }
 
 const youtubeScope = 'https://www.googleapis.com/auth/youtube.force-ssl'
-const twitchScopes = 'channel:manage:broadcast chat:read'
+const twitchScopes = 'channel:manage:broadcast channel:read:stream_key chat:read'
+const twitchStreamServer = 'rtmp://ingest.global-contribute.live-video.net/app'
 
 function codeChallenge(verifier: string): string {
   return crypto.createHash('sha256').update(verifier).digest('base64url')
@@ -88,6 +89,8 @@ export class OAuthManager {
     const youtubeReconnectRequired = this.secrets.get('youtube-oauth-health') === 'reconnect_required'
     const twitchAccessTokenStored = Boolean(this.secrets.get('twitch-access-token'))
     const twitchRefreshTokenStored = Boolean(this.secrets.get('twitch-refresh-token'))
+    const twitchStreamKeyStored = Boolean(this.secrets.get('twitch-stream-key'))
+    const twitchStreamServerStored = Boolean(this.secrets.get('twitch-stream-server'))
 
     const youtubeAppConfigured = Boolean(config.youtube.clientId) && youtubeClientSecretStored
     const youtubeAuthorizing = this.googleStates.size > 0
@@ -106,13 +109,14 @@ export class OAuthManager {
     const twitchAuthorizing = this.twitchDevices.size > 0
     const twitchBroadcasterStored = Boolean(config.twitch.broadcasterId)
     const twitchAccountLinked = twitchAccessTokenStored && twitchRefreshTokenStored && twitchBroadcasterStored
+      && twitchStreamKeyStored && twitchStreamServerStored
     const twitchMetadataMismatch = config.twitch.accessTokenStored !== twitchAccessTokenStored
       || config.twitch.refreshTokenStored !== twitchRefreshTokenStored
     const twitchStage: OAuthConnectionStage = twitchAuthorizing
       ? 'authorizing'
       : twitchAccountLinked && twitchAppConfigured
         ? 'connected'
-        : twitchAccessTokenStored || twitchRefreshTokenStored || twitchBroadcasterStored || twitchMetadataMismatch
+        : twitchAccessTokenStored || twitchRefreshTokenStored || twitchBroadcasterStored || twitchStreamKeyStored || twitchStreamServerStored || twitchMetadataMismatch
           ? 'partial'
           : twitchAppConfigured
             ? 'ready'
@@ -130,13 +134,15 @@ export class OAuthManager {
             ? 'OAuthアプリ準備済みです。Google認証を開始できます'
             : 'この配布パッケージにYouTube接続機能が含まれていません。更新版を再インストールしてください'
     const twitchDetail = twitchStage === 'connected'
-      ? 'Twitch認証情報と配信者IDをWindows資格情報へ保存済みです'
+      ? 'Twitch認証情報・配信者ID・配信キーをWindows資格情報へ保存済みです'
       : twitchStage === 'authorizing'
         ? 'Twitchのデバイス認証完了を待っています'
         : twitchStage === 'partial'
           ? twitchAccessTokenStored && twitchRefreshTokenStored && !twitchBroadcasterStored
             ? 'トークンは保存済みですが、配信者情報が未取得です'
-            : '保存状態が不完全です。再接続してください'
+            : twitchAccessTokenStored && twitchRefreshTokenStored && twitchBroadcasterStored && (!twitchStreamKeyStored || !twitchStreamServerStored)
+              ? 'Twitchへの映像送信権限が不足しています。Twitchを再接続してください'
+              : '保存状態が不完全です。再接続してください'
           : twitchStage === 'ready'
             ? 'OAuthアプリ準備済みです。Twitch認証を開始できます'
             : 'この配布パッケージにTwitch接続機能が含まれていません。更新版を再インストールしてください'
@@ -302,9 +308,22 @@ export class OAuthManager {
       this.twitchDevices.delete(requestId)
       throw new Error('Twitch broadcaster account could not be identified')
     }
+    const streamKeyResponse = await fetch(`https://api.twitch.tv/helix/streams/key?broadcaster_id=${encodeURIComponent(broadcasterId)}`, {
+      headers: { authorization: `Bearer ${token.access_token}`, 'client-id': session.clientId },
+    })
+    const streamKeyBody = await streamKeyResponse.json().catch(() => ({})) as { data?: Array<{ stream_key?: string }>; message?: string }
+    const streamKey = streamKeyBody.data?.[0]?.stream_key
+    if (!streamKeyResponse.ok || !streamKey) {
+      this.twitchDevices.delete(requestId)
+      clearTwitchStreamSecrets(this.secrets)
+      throw new Error(message(streamKeyBody, 'Twitch配信キーを取得できませんでした。Twitch側で配信可能なアカウントか確認してください'))
+    }
     const config = await this.store.getConfig()
+    clearTwitchStreamSecrets(this.secrets)
     this.secrets.set('twitch-access-token', token.access_token)
     this.secrets.set('twitch-refresh-token', token.refresh_token)
+    this.secrets.set('twitch-stream-key', streamKey)
+    this.secrets.set('twitch-stream-server', twitchStreamServer)
     await this.store.saveConfig({
       ...config,
       twitch: {

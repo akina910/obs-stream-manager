@@ -80,6 +80,8 @@ describe('distributor OAuth provisioning', () => {
     test.values.set('youtube-stream-server', 'rtmps://test.youtube/live2')
     test.values.set('twitch-access-token', 'twitch-access')
     test.values.set('twitch-refresh-token', 'twitch-refresh')
+    test.values.set('twitch-stream-key', 'twitch-stream-key')
+    test.values.set('twitch-stream-server', 'rtmp://twitch.example/app')
     test.values.set('twitch-client-secret', 'legacy-twitch-secret')
     await test.store.saveConfig({
       ...configured,
@@ -101,6 +103,8 @@ describe('distributor OAuth provisioning', () => {
     expect(test.values.get('youtube-stream-server')).toBe('rtmps://test.youtube/live2')
     expect(test.values.get('twitch-access-token')).toBe('twitch-access')
     expect(test.values.get('twitch-refresh-token')).toBe('twitch-refresh')
+    expect(test.values.get('twitch-stream-key')).toBe('twitch-stream-key')
+    expect(test.values.get('twitch-stream-server')).toBe('rtmp://twitch.example/app')
     expect(test.values.get('twitch-client-secret')).toBe('legacy-twitch-secret')
   })
 
@@ -117,6 +121,8 @@ describe('distributor OAuth provisioning', () => {
     test.values.set('youtube-client-secret', 'legacy-youtube-secret')
     test.values.set('twitch-access-token', 'twitch-access')
     test.values.set('twitch-refresh-token', 'twitch-refresh')
+    test.values.set('twitch-stream-key', 'twitch-stream-key')
+    test.values.set('twitch-stream-server', 'rtmp://twitch.example/app')
     test.values.set('twitch-client-secret', 'legacy-twitch-secret')
     await test.store.saveConfig({
       ...configured,
@@ -137,6 +143,8 @@ describe('distributor OAuth provisioning', () => {
     expect(test.values.get('youtube-client-secret')).toBe('youtube-new-credential')
     expect(test.values.has('twitch-access-token')).toBe(false)
     expect(test.values.has('twitch-refresh-token')).toBe(false)
+    expect(test.values.has('twitch-stream-key')).toBe(false)
+    expect(test.values.has('twitch-stream-server')).toBe(false)
     expect(test.values.has('twitch-client-secret')).toBe(false)
   })
 })

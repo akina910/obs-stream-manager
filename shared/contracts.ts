@@ -149,6 +149,7 @@ export const RuntimeStatusSchema = z.object({
   currentScene: z.string().nullable(),
   warning: z.string().nullable(),
   busy: z.boolean(),
+  twitchOutputPluginReady: z.boolean().optional(),
   platforms: z.object({
     youtube: z.object({
       state: z.enum(['disabled', 'unprepared', 'ready', 'starting', 'live', 'stopping', 'offline', 'error']),

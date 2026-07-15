@@ -62,16 +62,16 @@ YouTube uses PKCE for a desktop public client, and Twitch uses Device Code Flow.
 **Connected** means that account authorization has been saved in Windows. It does not mean that video is live. Use the separate YouTube and Twitch live-status indicators at the top of the app to confirm actual delivery.
 
 > [!IMPORTANT]
-> The YouTube connection manages broadcasts, metadata, thumbnails, and the video output settings applied to OBS. The Twitch connection manages title, category, tags, chat, and actual live status, but it does not configure the Twitch video output destination. YouTube/Twitch simulcasting therefore requires a preconfigured Twitch output in Aitum Multistream. Do not treat simulcasting as successful until Twitch reports `LIVE`.
+> The YouTube connection manages broadcasts, metadata, thumbnails, and the video output settings applied to OBS. The Twitch connection manages title, category, tags, chat, stream-key retrieval, and actual live status. The bundled OBS Stream Manager Output plugin creates an in-memory Twitch secondary output only while streaming, so no Aitum stream-key setup is required. Do not treat simulcasting as successful until Twitch reports `LIVE`.
 
 ## Requirements
 
 - Supported target: Windows 11 x64
-- Supported target: OBS Studio 30 or later with its built-in WebSocket server enabled
-- For simultaneous YouTube and Twitch video output: Aitum Multistream
+- Supported target: OBS Studio 31.1 or later with its built-in WebSocket server enabled
+- Simultaneous YouTube/Twitch output: the app installs its bundled plugin automatically; restart OBS after the first install or an update
 - Optional: Aitum Vertical, Source Record, Advanced Scene Switcher, and Steam
 
-You can use YouTube-only streaming, game profile management, and standard OBS controls without Aitum Multistream. If Source Record or Aitum Vertical is unavailable, only its corresponding extra recording feature is disabled with a warning.
+Aitum Multistream is not required. If Source Record or Aitum Vertical is unavailable, only its corresponding extra recording feature is disabled with a warning.
 
 ## Main features
 
@@ -80,7 +80,7 @@ You can use YouTube-only streaming, game profile management, and standard OBS co
 - Clear indication of the selected game and currently applied profile
 - OBS scene, capture, audio, recording, and replay-buffer control
 - Automatic YouTube broadcast, title, description, privacy, and per-game thumbnail setup
-- Automatic Twitch title, category, and tag setup
+- Automatic Twitch title, category, tag, stream-key, and secondary-video-output setup, plus a non-public bandwidth test
 - Title variables `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`, with automatic Part advancement after a successful stream
 - Separate authorization and actual live-status indicators for YouTube and Twitch
 - Combined chat display and settings backup/restore

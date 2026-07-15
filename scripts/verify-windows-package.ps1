@@ -71,6 +71,8 @@ try {
   }
   $exe = Join-Path $runtime 'OBS Stream Manager.exe'
   Assert-True ([bool](Test-Path -LiteralPath $exe)) 'Packaged executable is missing'
+  $obsPlugin = Join-Path $runtime 'resources\obs-plugin\obs-stream-manager-output.dll'
+  Assert-True ([bool](Test-Path -LiteralPath $obsPlugin)) 'Bundled OBS output plugin is missing'
 
   $env:OBS_STREAM_MANAGER_DATA_DIR = $dataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $secretService

@@ -89,6 +89,8 @@ describe('OAuthManager one-button authorization', () => {
     test.secretValues.set('youtube-client-secret', 'youtube-desktop-credential')
     test.secretValues.set('twitch-access-token', 'twitch-access')
     test.secretValues.set('twitch-refresh-token', 'twitch-refresh')
+    test.secretValues.set('twitch-stream-key', 'twitch-stream-key')
+    test.secretValues.set('twitch-stream-server', 'rtmp://twitch.example/app')
     configured.twitch.refreshTokenStored = true
     configured.twitch.broadcasterId = 'broadcaster-id'
     test.setConfig(configured)
@@ -173,6 +175,7 @@ describe('OAuthManager one-button authorization', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ message: 'authorization_pending' }), { status: 400, headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'twitch-access', refresh_token: 'twitch-refresh' }), { status: 200, headers: { 'content-type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'broadcaster-id' }] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ stream_key: 'twitch-stream-key' }] }), { status: 200, headers: { 'content-type': 'application/json' } }))
 
     const started = await test.oauth.start('twitch')
     expect(started.mode).toBe('device')
@@ -185,10 +188,13 @@ describe('OAuthManager one-button authorization', () => {
     const deviceBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     const tokenBody = fetchMock.mock.calls[2]?.[1]?.body as URLSearchParams
     expect(deviceBody.get('client_id')).toBe('twitch-public-client')
+    expect(deviceBody.get('scopes')).toContain('channel:read:stream_key')
     expect(tokenBody.get('client_id')).toBe('twitch-public-client')
     expect(tokenBody.has('client_secret')).toBe(false)
     expect(test.secretValues.get('twitch-access-token')).toBe('twitch-access')
     expect(test.secretValues.get('twitch-refresh-token')).toBe('twitch-refresh')
+    expect(test.secretValues.get('twitch-stream-key')).toBe('twitch-stream-key')
+    expect(test.secretValues.get('twitch-stream-server')).toBe('rtmp://ingest.global-contribute.live-video.net/app')
     expect(test.config().twitch).toMatchObject({
       broadcasterId: 'broadcaster-id',
       accessTokenStored: true,

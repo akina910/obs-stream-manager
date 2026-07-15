@@ -28,6 +28,9 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID)) { throw 'Repository variable TWITCH_CLIENT_ID is required' }
       - run: npm ci
       - run: npm run check
+      - name: Build OBS secondary-output plugin
+        shell: pwsh
+        run: .\scripts\build-obs-plugin.ps1
       - run: npm run dist:win
       - name: Verify extracted ZIP package
         shell: powershell

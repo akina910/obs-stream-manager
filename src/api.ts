@@ -18,6 +18,7 @@ export type OAuthConnectionStatuses = Record<OAuthProvider, OAuthConnectionStatu
 export type OAuthStartResult =
   | { mode: 'redirect'; url: string }
   | { mode: 'device'; url: string; userCode: string; requestId: string; intervalMs: number; expiresAt: number }
+export type TwitchIngestTestResult = { ok: true; durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number; congestion: number }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
@@ -41,6 +42,7 @@ export const api = {
   select: (gameId: string, captureMethod?: CaptureMethod) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod }) }),
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
+  testTwitchOutput: () => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: '{}' }),
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),
   selectFolder: (initialPath: string) => request<{ path: string | null }>('/api/folders/select', { method: 'POST', body: JSON.stringify({ initialPath }) }),

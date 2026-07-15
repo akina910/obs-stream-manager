@@ -4,6 +4,7 @@ coverage/
 output/
 release/
 build/provider-oauth.json
+build/obs-plugin/
 .playwright-cli/
 .DS_Store
 *.log

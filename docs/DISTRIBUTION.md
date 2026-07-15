@@ -56,7 +56,7 @@ npm run dist:win
 npm run verify:package
 ```
 
-この検証はNode.jsをPATHから外した状態、新規データ領域、loopback限定待受、二重起動防止、終了時プロセス停止、設定復元、秘密情報を含まないバックアップを確認します。
+この検証はNode.jsをPATHから外した状態、新規データ領域、loopback限定待受、二重起動防止、終了時プロセス停止、設定復元、秘密情報を含まないバックアップ、同梱OBSプラグインの存在を確認します。
 
 ## GitHub Actions
 
@@ -70,4 +70,4 @@ npm run verify:package
 
 Releaseへ添付する前に、署名、ウイルス対策ソフトでの確認、クリーンなWindows 11環境でのインストール、実アカウントOAuth、YouTube非公開配信、Twitchテスト配信を実施してください。認証表示だけではライブ配信検証の代用になりません。
 
-現行版はAitum MultistreamへのTwitch映像出力資格情報を自動設定できません。YouTubeとTwitchの同時配信をリリース条件にする場合、Aitumを事前設定した検証環境で両方が実際に `LIVE` になることを確認してください。
+ワークフローはOBS Stream Manager Outputプラグインもビルドして配布物へ同梱します。新規環境ではアプリを一度起動してプラグインを自動配置し、OBS再起動後にTwitchの非公開帯域テストとYouTube／Twitch同時配信を確認してください。配信キーは通常設定や成果物へ書き出されません。

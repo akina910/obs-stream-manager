@@ -9,6 +9,8 @@ files:
 extraResources:
   - from: build/provider-oauth.json
     to: provider-oauth.json
+  - from: build/obs-plugin
+    to: obs-plugin
 asar: true
 asarUnpack:
   - "**/*.node"

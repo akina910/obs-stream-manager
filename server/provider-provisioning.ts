@@ -20,6 +20,11 @@ export function clearYouTubeStreamSecrets(secrets: SecretStore): void {
   secrets.set('youtube-stream-server', '')
 }
 
+export function clearTwitchStreamSecrets(secrets: SecretStore): void {
+  secrets.set('twitch-stream-key', '')
+  secrets.set('twitch-stream-server', '')
+}
+
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`Provider OAuth bundle is missing ${field}`)
   return value.trim()
@@ -83,6 +88,7 @@ export async function provisionProviderOAuth(
     secrets.set('twitch-client-secret', '')
     secrets.set('twitch-access-token', '')
     secrets.set('twitch-refresh-token', '')
+    clearTwitchStreamSecrets(secrets)
   }
 
   if (credentials.youtube) secrets.set('youtube-client-secret', credentials.youtube.clientSecret)

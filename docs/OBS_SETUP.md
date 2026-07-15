@@ -71,13 +71,13 @@ Track 6: 予備 / Switch
 
 - OBS 録画形式は MKV にします。
 - リプレイバッファを有効にします。秒数はゲーム選択時にアプリが更新します。
-- Aitum Multistream は OBS 本体の開始・停止にリンクし、YouTube と Twitch を同時に開始する設定にします。
+- OBS Stream Manager Output は配布物に同梱され、アプリ起動時にユーザー用OBSプラグイン領域へ自動配置されます。初回または更新後はOBSを再起動してください。
 - Source Record はゲーム映像ソース一系統だけへフィルターを設定します。アプリは Source Record の公式 WebSocket vendor request で選択ソースの録画を開始・停止します。
 - Aitum Vertical は 1080×1920 の録画を作ります。アプリは Aitum Vertical の公式 WebSocket vendor request で縦録画を開始・停止します。
 
-プラグインが未導入、無効、または vendor request 非対応の場合は警告を表示しますが、通常配信と通常録画は継続します。Aitum Multistream は引き続き OBS 本体の配信開始・停止への公式連動機能を使います。
+Source RecordまたはAitum Verticalが未導入、無効、またはvendor request非対応の場合は警告を表示し、該当する追加録画だけをスキップします。
 
-現行版はAitum MultistreamへのTwitch映像出力資格情報をOAuthから安全に自動投入できません。アプリ内で「Twitch認証保存済み」と表示されても、Aitum側の出力が未設定ならTwitchへ映像は送信されません。実配信状態表示でTwitchが `LIVE` になったことを確認するまで、同時配信成功と判断しないでください。
+Twitch配信キーはOAuthで取得してWindows資格情報へ保存し、配信開始時だけOBS Stream Manager Outputへ渡します。通常設定、Aitum設定、ログ、バックアップには保存しません。設定画面の「Twitch映像送信をテスト」は`bandwidthtest=true`を使うため視聴者には公開されません。通常配信時は実配信状態表示でTwitchが`LIVE`になったことを確認してください。
 
 ## 7. Advanced Scene Switcher
 

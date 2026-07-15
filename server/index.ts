@@ -134,6 +134,18 @@ app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', as
 })
 app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
+app.post('/api/twitch/output-test', async () => {
+  await orchestrator.assertNotStreaming()
+  const result = await obs.testTwitchIngest(await store.getConfig())
+  await logger.write('twitch.output_test.completed', {
+    durationMs: result.durationMs,
+    bytesSent: result.bytesSent,
+    totalFrames: result.totalFrames,
+    skippedFrames: result.skippedFrames,
+    congestion: result.congestion,
+  })
+  return result
+})
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })
 app.post<{ Body: { initialPath?: string } }>('/api/folders/select', async (request) => ({ path: await selectFolder(typeof request.body?.initialPath === 'string' ? request.body.initialPath : '') }))
