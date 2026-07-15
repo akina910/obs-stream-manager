@@ -1,13 +1,13 @@
 import { appendFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
-
-const sensitiveKey = /token|secret|password|api.?key|authorization|cookie/i
+import { isSensitiveField, redactSensitiveText } from '../shared/redaction.js'
 
 export function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact)
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sensitiveKey.test(key) ? '[REDACTED]' : redact(item)]))
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, isSensitiveField(key) ? '[REDACTED]' : redact(item)]))
   }
+  if (typeof value === 'string') return redactSensitiveText(value)
   return value
 }
 

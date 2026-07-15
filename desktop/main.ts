@@ -3,6 +3,7 @@ import { appendFile, copyFile, mkdir, readFile, rename, rm } from 'node:fs/promi
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import { redactSensitiveText } from '../shared/redaction.js'
 import {
   backgroundLaunchArgument,
   DesktopPreferenceStore,
@@ -47,9 +48,7 @@ async function markLifecycle(stage: string): Promise<void> {
 
 function safeError(error: unknown): string {
   const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return raw
-    .replace(/(access_token|refresh_token|authorization|password|stream_key|code)=?[^\s&]*/gi, '$1=[redacted]')
-    .slice(0, 4_000)
+  return redactSensitiveText(raw).slice(0, 4_000)
 }
 
 async function writeStartupError(error: unknown): Promise<string> {
