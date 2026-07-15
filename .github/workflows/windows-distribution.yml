@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-and-verify:
-    runs-on: windows-2025
+    runs-on: windows-2022
     env:
       OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID: ${{ vars.YOUTUBE_CLIENT_ID }}
       OBS_STREAM_MANAGER_YOUTUBE_CLIENT_TYPE: desktop
