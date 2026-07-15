@@ -293,6 +293,17 @@ export class StreamOrchestrator {
     if (status.streaming || externalActive) throw Object.assign(new Error('配信中はゲーム・接続設定・バックアップを変更できません。先に配信を終了してください'), { statusCode: 409 })
   }
 
+  async testTwitchOutput() {
+    return this.exclusive(async () => {
+      const status = await this.getStatus()
+      const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
+      if (status.streaming || externalActive) {
+        throw Object.assign(new Error('配信中はTwitch出力テストを実行できません。配信を停止してから再実行してください'), { statusCode: 409 })
+      }
+      return this.obs.testTwitchIngest(await this.store.getConfig())
+    })
+  }
+
   invalidateProfile(gameId: string): void {
     if (this.selected?.id !== gameId) return
     this.selected = null

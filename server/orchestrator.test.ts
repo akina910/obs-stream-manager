@@ -9,6 +9,45 @@ import type { PlatformServices } from './platforms.js'
 import type { DataStore } from './storage.js'
 
 describe('StreamOrchestrator operation exclusion', () => {
+  it('keeps a Twitch bandwidth test mutually exclusive with normal stream startup', async () => {
+    let releaseTest!: () => void
+    const testBlocked = new Promise<never>((resolve) => { releaseTest = resolve as () => void })
+    const config = structuredClone(defaultConfig)
+    const testTwitchIngest = vi.fn(() => testBlocked)
+    const obs = {
+      status: vi.fn().mockResolvedValue({
+        obsConnected: true,
+        streaming: false,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId: null,
+        captureMethod: null,
+        currentScene: '10_GAME_PC',
+        warning: null,
+        busy: true,
+      }),
+      testTwitchIngest,
+    } as unknown as ObsController
+    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+    const platforms = {
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'offline', detail: 'YouTubeはオフライン', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'Twitchはオフライン', checkedAt: new Date().toISOString() },
+      }),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    const pendingTest = orchestrator.testTwitchOutput()
+    await vi.waitFor(() => expect(testTwitchIngest).toHaveBeenCalledOnce())
+    await expect(orchestrator.start()).rejects.toThrow('別の配信操作を処理中です')
+
+    releaseTest()
+    await expect(pendingTest).resolves.toBeUndefined()
+  })
+
   it('rejects scene changes while a replay save is still running', async () => {
     let releaseReplay!: () => void
     const replayBlocked = new Promise<void>((resolve) => { releaseReplay = resolve })

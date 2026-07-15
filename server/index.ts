@@ -135,8 +135,7 @@ app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', as
 app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
 app.post('/api/twitch/output-test', async () => {
-  await orchestrator.assertNotStreaming()
-  const result = await obs.testTwitchIngest(await store.getConfig())
+  const result = await orchestrator.testTwitchOutput()
   await logger.write('twitch.output_test.completed', {
     durationMs: result.durationMs,
     bytesSent: result.bytesSent,
