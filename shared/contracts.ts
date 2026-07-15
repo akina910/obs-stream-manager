@@ -88,6 +88,9 @@ export const AppConfigSchema = z.object({
   setup: z.object({
     completed: z.boolean().default(true),
   }).default({ completed: true }),
+  ui: z.object({
+    language: z.enum(['ja', 'en']).default('ja'),
+  }).default({ language: 'ja' }),
   obs: z.object({
     url: z.string().default('ws://127.0.0.1:4455'),
     passwordStored: z.boolean().default(false),

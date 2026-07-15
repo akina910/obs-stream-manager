@@ -95,6 +95,7 @@ try {
 
   $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
   $bootstrap.config.obs.startDelaySeconds = 7
+  $bootstrap.config.ui.language = 'en'
   $saveBody = @{ config = $bootstrap.config; secrets = @{ 'obs-password' = $secretMarker } } | ConvertTo-Json -Depth 30
   $saved = Invoke-RestMethod "http://127.0.0.1:$port/api/config" -Method Put -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($saveBody)) -TimeoutSec 10
   $backup = Invoke-RestMethod "http://127.0.0.1:$port/api/backup/export" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 10
@@ -109,6 +110,7 @@ try {
   [void](Wait-ForListener $true)
   $restarted = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
   $results.restartPersistence = $restarted.config.obs.startDelaySeconds -eq 7 -and $restarted.config.obs.passwordStored
+  $results.languagePersistence = $restarted.config.ui.language -eq 'en'
 
   $clearBody = @{ config = $restarted.config; secrets = @{ 'obs-password' = '' } } | ConvertTo-Json -Depth 30
   [void](Invoke-RestMethod "http://127.0.0.1:$port/api/config" -Method Put -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($clearBody)) -TimeoutSec 10)
