@@ -85,9 +85,22 @@ try {
   $appIcon = [Drawing.Icon]::ExtractAssociatedIcon($exe)
   Assert-True ($null -ne $appIcon) 'Packaged executable icon is missing'
   $iconBitmap = $appIcon.ToBitmap()
-  $iconCenter = $iconBitmap.GetPixel([Math]::Floor($iconBitmap.Width / 2), [Math]::Floor($iconBitmap.Height / 2))
-  $iconBrand = $iconBitmap.GetPixel([Math]::Floor($iconBitmap.Width / 4), [Math]::Floor($iconBitmap.Height / 4))
-  $results.customAppIcon = $iconCenter.R -lt 50 -and $iconCenter.G -lt 50 -and $iconCenter.B -lt 50 -and $iconBrand.B -gt 120
+  $expectedIconPath = Join-Path $PSScriptRoot '..\build\icon-32.png'
+  Assert-True ([bool](Test-Path -LiteralPath $expectedIconPath)) 'Expected application icon fixture is missing'
+  $expectedIconBitmap = [Drawing.Bitmap]::new((Resolve-Path -LiteralPath $expectedIconPath).Path)
+  $matchingIconPixels = 0
+  $iconPixelCount = $iconBitmap.Width * $iconBitmap.Height
+  if ($iconBitmap.Width -eq $expectedIconBitmap.Width -and $iconBitmap.Height -eq $expectedIconBitmap.Height) {
+    for ($y = 0; $y -lt $iconBitmap.Height; $y++) {
+      for ($x = 0; $x -lt $iconBitmap.Width; $x++) {
+        if ($iconBitmap.GetPixel($x, $y).ToArgb() -eq $expectedIconBitmap.GetPixel($x, $y).ToArgb()) {
+          $matchingIconPixels++
+        }
+      }
+    }
+  }
+  $results.customAppIcon = $iconPixelCount -gt 0 -and $matchingIconPixels -eq $iconPixelCount
+  $expectedIconBitmap.Dispose()
   $iconBitmap.Dispose()
   $appIcon.Dispose()
 

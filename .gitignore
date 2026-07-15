@@ -6,6 +6,7 @@ release/
 build/provider-oauth.json
 build/obs-plugin/
 build/icon.ico
+build/icon-32.png
 .playwright-cli/
 .DS_Store
 *.log
