@@ -71,6 +71,8 @@ Track 6: 予備 / Switch
 
 プラグインが未導入、無効、または vendor request 非対応の場合は警告を表示しますが、通常配信と通常録画は継続します。Aitum Multistream は引き続き OBS 本体の配信開始・停止への公式連動機能を使います。
 
+現行版はAitum MultistreamへのTwitch映像出力資格情報をOAuthから安全に自動投入できません。アプリ内で「Twitch認証保存済み」と表示されても、Aitum側の出力が未設定ならTwitchへ映像は送信されません。実配信状態表示でTwitchが `LIVE` になったことを確認するまで、同時配信成功と判断しないでください。
+
 ## 7. Advanced Scene Switcher
 
 次のマクロを作成します。
