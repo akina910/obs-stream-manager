@@ -1,6 +1,8 @@
 import type { AppConfig, GameProfile } from '../shared/contracts.js'
+import { createGameProfile } from '../shared/profile-factory.js'
 
 export const defaultConfig: AppConfig = {
+  setup: { completed: false },
   obs: { url: 'ws://127.0.0.1:4455', passwordStored: false, startDelaySeconds: 5, endDelaySeconds: 5 },
   sources: {
     microphone: 'MIC', pcGame: 'GAME_PC', geforceNow: 'GAME_GFN', switchGame: 'GAME_SWITCH', discord: 'DISCORD', bgm: 'BGM',
@@ -24,22 +26,7 @@ const pcBase = {
 }
 
 export function createPcProfile(id: string, displayName: string): GameProfile {
-  return {
-    ...structuredClone(pcBase),
-    id,
-    displayName,
-    platformGroup: 'pc',
-    capture: {
-      preferred: 'auto',
-      executableNames: [],
-      localSourceName: 'PC Game Capture',
-      geforceNowEnabled: false,
-      geforceNowSourceName: 'GFN Capture',
-      displaySourceName: 'Display Capture',
-      allowDisplayFallback: false,
-    },
-    twitch: { ...pcBase.twitch, categoryName: displayName },
-  }
+  return createGameProfile(id, displayName)
 }
 
 export const starterProfiles: GameProfile[] = [

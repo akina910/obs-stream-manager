@@ -5,6 +5,7 @@ import {
   Search, Settings, Star, Trash2, Upload, X,
 } from 'lucide-react'
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
+import { createGameProfile } from '../shared/profile-factory'
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider, type SteamSyncResult } from './api'
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
 import { getBroadcastStatus, getExternalDeliveryWarning, getRuntimeOutputs, type RuntimeOutputStatus } from './runtime-status'
@@ -351,8 +352,9 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
   )
 }
 
-function AddGameModal({ initialGroup, template, onClose, onCreate }: { initialGroup: PlatformGroup; template: GameProfile; onClose: () => void; onCreate: (profile: GameProfile) => void }) {
-  const [draft, setDraft] = useState<AddGameDraft>({ name: '', platformGroup: initialGroup, captureMethod: initialGroup === 'switch' ? 'elgato' : 'auto', steamAppId: '' })
+function AddGameModal({ initialGroup, onClose, onCreate }: { initialGroup: PlatformGroup; onClose: () => void; onCreate: (profile: GameProfile) => void }) {
+  const initialCapture = initialGroup === 'switch' ? 'elgato' : initialGroup === 'exception' ? 'window' : 'auto'
+  const [draft, setDraft] = useState<AddGameDraft>({ name: '', platformGroup: initialGroup, captureMethod: initialCapture, steamAppId: '' })
   const modalRef = useRef<HTMLElement>(null)
   useEffect(() => { modalRef.current?.focus() }, [])
   useEffect(() => { const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }; window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey) }, [onClose])
@@ -360,19 +362,17 @@ function AddGameModal({ initialGroup, template, onClose, onCreate }: { initialGr
     const name = draft.name.trim()
     if (!name) return
     const steamAppId = Number(draft.steamAppId)
+    const template = createGameProfile(`new_game_${crypto.randomUUID()}`, name, draft.platformGroup)
     onCreate({
-      ...structuredClone(template), id: `new_game_${crypto.randomUUID()}`, displayName: name, favorite: false, hidden: false,
-      platformGroup: draft.platformGroup,
+      ...template,
       library: { gamePass: false, exception: draft.platformGroup === 'exception', installed: false, ...(Number.isInteger(steamAppId) && steamAppId > 0 ? { steamAppId } : {}) },
       capture: { ...template.capture, preferred: draft.captureMethod },
-      obs: { ...template.obs, sceneName: template.obs.sceneName },
-      state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null },
     })
   }
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section ref={modalRef} className="modal add-game-modal" role="dialog" aria-modal="true" aria-labelledby="add-game-title" tabIndex={-1}><header className="modal-header"><div className="empty-tile"><Plus size={15} /></div><h2 id="add-game-title">ゲームを追加</h2><button className="square-button" aria-label="閉じる" onClick={onClose}><X size={15} /></button></header><div className="add-game-body"><label>ゲーム名<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例: Elden Ring" /></label><div className="field-grid"><label>分類<select value={draft.platformGroup} onChange={(event) => setDraft({ ...draft, platformGroup: event.target.value as PlatformGroup })}><option value="pc">PC</option><option value="switch">Switch</option><option value="exception">例外</option></select></label><label>ソース<select value={draft.captureMethod} onChange={(event) => setDraft({ ...draft, captureMethod: event.target.value as CaptureMethod })}>{Object.entries(captureLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div><label>Steam App ID（任意）<input inputMode="numeric" value={draft.steamAppId} onChange={(event) => setDraft({ ...draft, steamAppId: event.target.value })} placeholder="Steamのゲームのみ" /></label><p>追加後にゲーム設定が開き、キャプチャ方式・タイトル・サムネイルなどを編集できます。</p></div><footer className="modal-footer"><button className="primary-button" disabled={!draft.name.trim()} onClick={create}>追加して設定を開く</button><button className="ghost-button close-button" onClick={onClose}>キャンセル</button></footer></section></div>
 }
 
-function SettingsView({ config, status, oauthStatus, oauthProgress, steamScan, onSave, onBackup, onRestore, onSteamScan, onSteamSync, onOAuthConnect, onReconnect }: { config: AppConfig; status: RuntimeStatus; oauthStatus: OAuthConnectionStatuses; oauthProgress: OAuthProgress; steamScan: SteamSyncResult | null; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamScan: () => Promise<void>; onSteamSync: () => Promise<void>; onOAuthConnect: (provider: OAuthProvider) => Promise<void>; onReconnect: () => Promise<void> }) {
+function SettingsView({ config, status, oauthStatus, oauthProgress, steamScan, onSave, onBackup, onRestore, onSteamScan, onSteamSync, onOAuthConnect, onReconnect, onOpenSetup }: { config: AppConfig; status: RuntimeStatus; oauthStatus: OAuthConnectionStatuses; oauthProgress: OAuthProgress; steamScan: SteamSyncResult | null; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamScan: () => Promise<void>; onSteamSync: () => Promise<void>; onOAuthConnect: (provider: OAuthProvider) => Promise<void>; onReconnect: () => Promise<void>; onOpenSetup: () => void }) {
   const [draft, setDraft] = useState(config)
   const [secrets, setSecrets] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -397,9 +397,97 @@ function SettingsView({ config, status, oauthStatus, oauthProgress, steamScan, o
     <OAuthServiceCard status={oauthStatus.twitch} progress={oauthProgress.twitch} saving={saving} onConnect={() => void attempt(() => onOAuthConnect('twitch'))} />
     <section className="settings-card"><h2>機能</h2><div className="feature-list">{featureRows.map((feature) => <div className="feature-row" key={feature.key}><div><strong>{feature.label}</strong><span>{feature.note}</span></div><Toggle disabled={saving || status.streaming} checked={draft.features[feature.key]} label={draft.features[feature.key] ? '有効' : '無効'} onChange={(value) => updateFeature(feature.key, value)} /></div>)}</div></section>
     <section className="settings-card"><h2>OBS音声ソース名</h2><div className="source-chips">{Object.values(draft.sources).map((source) => <code key={source}>{source}</code>)}</div><details className="settings-details"><summary>ソース名を編集</summary><div className="settings-details-body field-grid">{Object.entries(draft.sources).map(([key, value]) => <label key={key}>{key}<input value={value} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, [key]: event.target.value } })} /></label>)}<button className="primary-button" disabled={saving} onClick={() => void save()}>ソース名を保存</button></div></details></section>
-    <section className="settings-card"><div className="card-title-row"><h2>Steam 自動検出</h2><span className={`connection-label ${steamScan?.libraries.length ? 'connected' : 'error'}`}><StatusDot tone={steamScan?.libraries.length ? 'live' : steamScan ? 'error' : 'pending'} />{steamScan ? steamScan.libraries.length ? '検出済み' : '未検出' : status.streaming ? '配信後に確認' : 'スキャン中'}</span></div><p>起動時にWindowsのSteam設定と全ライブラリを自動スキャンし、インストール済みゲームをPC一覧へ追加します。インストール先の入力は不要です。</p><div className="feature-list"><div className="feature-row"><div><strong>{steamScan ? `${steamScan.installed}本のゲーム` : status.streaming ? '配信中は自動追加を停止' : 'Steamを確認しています'}</strong><span>{steamScan ? `${steamScan.libraries.length}か所のライブラリを検出` : status.streaming ? '配信終了後の再読込または再スキャンで反映します' : '検出後に一覧へ自動反映します'}</span></div></div></div>{steamScan?.libraries.length ? <div className="source-chips">{steamScan.libraries.map((library) => <code key={library}>{library}</code>)}</div> : null}<button className="secondary-button" disabled={saving || status.streaming} onClick={() => void attempt(onSteamScan)}><RefreshCw size={14} />今すぐ再スキャン</button><details className="settings-details"><summary>未インストールの所有ゲームも同期する（任意）</summary><div className="settings-details-body"><label>SteamID64<input value={draft.steam.steamId64} onChange={(event) => setDraft({ ...draft, steam: { ...draft.steam, steamId64: event.target.value } })} /></label><label>Steam Web API Key<input type="password" autoComplete="off" value={secrets['steam-api-key'] ?? ''} onChange={(event) => secret('steam-api-key', event.target.value)} placeholder={draft.steam.apiKeyStored ? '保存済み（変更時のみ入力）' : 'Windows資格情報へ保存'} /></label><button className="primary-button" disabled={saving || status.streaming} onClick={() => void attempt(async () => { await onSave(draft, secrets); setSecrets({}); await onSteamSync() })}>保存して所有ゲームも同期</button></div></details></section>
+    <section className="settings-card"><div className="card-title-row"><h2>Steam 自動検出（任意）</h2><span className={`connection-label ${steamScan?.libraries.length ? 'connected' : 'optional'}`}><StatusDot tone={steamScan?.libraries.length ? 'live' : steamScan ? 'inactive' : 'pending'} />{steamScan ? steamScan.libraries.length ? '検出済み' : 'Steam未使用' : status.streaming ? '配信後に確認' : 'スキャン中'}</span></div><p>Steamがある場合だけ、インストール済みゲームを自動で一覧へ追加します。Steamがない場合も、Game Pass、GeForce NOW、Switch、単体EXEのゲームを手動追加して利用できます。</p><div className="feature-list"><div className="feature-row"><div><strong>{steamScan ? steamScan.libraries.length ? `${steamScan.installed}本のゲーム` : 'Steamなしで利用可能' : status.streaming ? '配信中は自動追加を停止' : 'Steamを確認しています'}</strong><span>{steamScan ? steamScan.libraries.length ? `${steamScan.libraries.length}か所のライブラリを検出` : 'ゲーム一覧の追加ボタンから手動登録できます' : status.streaming ? '配信終了後の再読込または再スキャンで反映します' : '見つかった場合だけ一覧へ自動反映します'}</span></div></div></div>{steamScan?.libraries.length ? <div className="source-chips">{steamScan.libraries.map((library) => <code key={library}>{library}</code>)}</div> : null}<button className="secondary-button" disabled={saving || status.streaming} onClick={() => void attempt(onSteamScan)}><RefreshCw size={14} />今すぐ再スキャン</button><details className="settings-details"><summary>未インストールの所有ゲームも同期する（任意）</summary><div className="settings-details-body"><label>SteamID64<input value={draft.steam.steamId64} onChange={(event) => setDraft({ ...draft, steam: { ...draft.steam, steamId64: event.target.value } })} /></label><label>Steam Web API Key<input type="password" autoComplete="off" value={secrets['steam-api-key'] ?? ''} onChange={(event) => secret('steam-api-key', event.target.value)} placeholder={draft.steam.apiKeyStored ? '保存済み（変更時のみ入力）' : 'Windows資格情報へ保存'} /></label><button className="primary-button" disabled={saving || status.streaming} onClick={() => void attempt(async () => { await onSave(draft, secrets); setSecrets({}); await onSteamSync() })}>保存して所有ゲームも同期</button></div></details></section>
+    <section className="settings-card"><h2>初期セットアップ</h2><p>OBS、配信サービス、ゲーム検出の案内をもう一度開きます。Steamを利用しない設定にも対応しています。</p><button className="secondary-button" disabled={saving || status.streaming} onClick={onOpenSetup}><Settings size={14} />セットアップを開く</button></section>
     <section className="settings-card"><h2>バックアップ / 復元</h2><p>アプリ設定・ゲームプロファイル・サムネイルを書き出します。OBS本体の設定と、OAuthトークンなどの秘密情報は含まれません。</p><div className="button-row"><button className="secondary-button" disabled={saving} onClick={() => void attempt(onBackup)}><ArrowDownToLine size={14} />書き出し</button><label className="ghost-button file-button"><Upload size={14} />復元<input hidden type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void attempt(() => onRestore(file)); event.currentTarget.value = '' }} /></label></div></section>
   </main>
+}
+
+type FirstRunSetupProps = {
+  config: AppConfig
+  status: RuntimeStatus
+  oauthStatus: OAuthConnectionStatuses | null
+  steamScan: SteamSyncResult | null
+  onSaveObs: (url: string, password: string) => Promise<void>
+  onConnect: (provider: OAuthProvider) => Promise<void>
+  onSteamScan: () => Promise<void>
+  onFinish: (openManualGame: boolean) => Promise<void>
+  onDismiss: () => void
+}
+
+function FirstRunSetup({ config, status, oauthStatus, steamScan, onSaveObs, onConnect, onSteamScan, onFinish, onDismiss }: FirstRunSetupProps) {
+  const [step, setStep] = useState(0)
+  const [obsUrl, setObsUrl] = useState(config.obs.url)
+  const [obsPassword, setObsPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const dockUrl = window.obsStreamManagerDesktop?.dockUrl ?? 'http://127.0.0.1:4317'
+  const steps = ['ようこそ', 'OBS', '配信サービス', 'ゲーム']
+  const attempt = async (operation: () => Promise<void>) => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try { await operation() } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) }
+  }
+  const copyDockUrl = async () => {
+    if (window.obsStreamManagerDesktop) await window.obsStreamManagerDesktop.copyDockUrl()
+    else await navigator.clipboard.writeText(dockUrl)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 2_000)
+  }
+  const saveObs = () => attempt(async () => { await onSaveObs(obsUrl, obsPassword); setObsPassword(''); setStep(2) })
+  const finish = (openManualGame: boolean) => attempt(() => onFinish(openManualGame))
+  const steamChecked = steamScan !== null
+  const steamDetected = Boolean(steamScan?.libraries.length)
+
+  return <div className="modal-backdrop setup-backdrop">
+    <section className="modal setup-modal" role="dialog" aria-modal="true" aria-labelledby="first-run-title">
+      <header className="setup-header">
+        <div className="brand-mark"><BrandGlyph /></div>
+        <div><span>初期セットアップ</span><h2 id="first-run-title">{steps[step]}</h2></div>
+      </header>
+      <ol className="setup-progress" aria-label="セットアップ進行状況">
+        {steps.map((label, index) => <li key={label} className={index < step ? 'complete' : index === step ? 'current' : ''}><span>{index < step ? <Check size={11} /> : index + 1}</span><b>{label}</b></li>)}
+      </ol>
+      <div className="setup-body">
+        {error && <div className="inline-warning error" role="alert"><AlertTriangle size={14} /><span>{error}</span></div>}
+        {step === 0 && <div className="setup-step">
+          <div className="setup-lead"><Gamepad2 size={28} /><div><h3>配信準備を順番に確認します</h3><p>Steamは必須ではありません。Game Pass、GeForce NOW、Switch、単体ゲームも手動登録できます。</p></div></div>
+          <div className="setup-dock"><div><strong>OBSブラウザドック URL</strong><code>{dockUrl}</code></div><button className="secondary-button" onClick={() => void attempt(copyDockUrl)}><Copy size={14} />{copied ? 'コピー済み' : 'コピー'}</button></div>
+          <p className="setup-note">OBSの「ドック」→「カスタムブラウザドック」へ、このURLを登録してください。</p>
+        </div>}
+        {step === 1 && <div className="setup-step">
+          <div className="setup-status-row"><div><strong>OBS WebSocket</strong><span>OBS 30以降の「ツール」→「WebSocketサーバー設定」で有効化します。</span></div><span className={`connection-label ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} />{status.obsConnected ? '接続中' : '未接続'}</span></div>
+          <label>接続URL<input value={obsUrl} onChange={(event) => setObsUrl(event.target.value)} /></label>
+          <label>パスワード<input type="password" autoComplete="off" value={obsPassword} onChange={(event) => setObsPassword(event.target.value)} placeholder={config.obs.passwordStored ? '保存済み（変更しない場合は空欄）' : 'Windows資格情報へ保存'} /></label>
+          <p className="setup-note">OBSをまだ起動していなくても保存して先へ進めます。</p>
+        </div>}
+        {step === 2 && <div className="setup-step">
+          <p className="setup-note">利用するサービスだけ接続できます。認証は後から設定画面でも行えます。</p>
+          {(['youtube', 'twitch'] as const).map((provider) => {
+            const connection = oauthStatus?.[provider]
+            const label = provider === 'youtube' ? 'YouTube' : 'Twitch'
+            const connected = connection?.stage === 'connected'
+            return <div className="setup-service" key={provider}><ServiceIcon service={provider} /><div><strong>{label}</strong><span>{connected ? '認証情報を保存済み' : connection?.appConfigured ? 'ブラウザで認証できます' : '配布パッケージ側の設定が必要です'}</span></div><button className={connected ? 'ghost-button' : 'primary-button'} disabled={busy || !connection?.appConfigured} onClick={() => void attempt(() => onConnect(provider))}>{connected ? '再認証' : '接続'}</button></div>
+          })}
+        </div>}
+        {step === 3 && <div className="setup-step">
+          <div className={`setup-steam-result ${steamDetected ? 'detected' : ''}`}><Gamepad2 size={24} /><div><strong>{steamDetected ? `Steamライブラリを${steamScan?.libraries.length}か所検出` : steamChecked ? 'Steamなしでも利用できます' : 'Steamをまだ確認していません'}</strong><span>{steamDetected ? `${steamScan?.installed ?? 0}本のインストール済みゲームを一覧へ反映しました` : steamChecked ? 'Game Pass、GeForce NOW、Switch、単体EXEはセットアップ後に手動追加してください。' : '再スキャンするとSteamの有無を確認できます。Steamを使わず手動追加へ進むこともできます。'}</span></div></div>
+          {steamScan?.warnings[0] && !steamDetected && <p className="setup-note">Steam検出結果: {steamScan.warnings[0]}</p>}
+          <button className="secondary-button setup-rescan" disabled={busy} onClick={() => void attempt(onSteamScan)}><RefreshCw size={14} />Steamを再スキャン</button>
+          <div className="setup-finish-actions"><button className="primary-button" disabled={busy} onClick={() => void finish(false)}>セットアップを完了</button><button className="secondary-button" disabled={busy} onClick={() => void finish(true)}>Steamを使わずゲームを手動追加</button></div>
+        </div>}
+      </div>
+      <footer className="modal-footer setup-footer">
+        {step > 0 && <button className="ghost-button" disabled={busy} onClick={() => setStep((current) => current - 1)}>戻る</button>}
+        <button className="ghost-button close-button" disabled={busy} onClick={onDismiss}>後で設定</button>
+        {step === 0 && <button className="primary-button" disabled={busy} onClick={() => setStep(1)}>はじめる</button>}
+        {step === 1 && <button className="primary-button" disabled={busy || !obsUrl.trim()} onClick={saveObs}>{busy ? <LoaderCircle className="spin" size={14} /> : null}保存して次へ</button>}
+        {step === 2 && <button className="primary-button" disabled={busy} onClick={() => setStep(3)}>次へ</button>}
+      </footer>
+    </section>
+  </div>
 }
 
 function ControlPanel({ status, selected, busy, onStart, onStop, onReplay, onEdit }: { status: RuntimeStatus; selected: GameProfile | null; busy: boolean; onStart: () => void; onStop: () => void; onReplay: () => void; onEdit: () => void }) {
@@ -428,6 +516,7 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<GameProfile | null>(null)
   const [adding, setAdding] = useState(false)
+  const [setupOpen, setSetupOpen] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionBusy, setActionBusy] = useState(false)
@@ -468,7 +557,7 @@ export default function App() {
             initialProfiles = result.profiles
             setSteamScan(result)
             if (result.created) setToast({ kind: 'success', text: `Steamから${result.created}本を自動追加しました` })
-            else if (result.warnings[0]) setToast({ kind: 'warning', text: `Steam自動検出: ${result.warnings[0]}` })
+            else if (result.warnings[0] && result.libraries.length) setToast({ kind: 'warning', text: `Steam自動検出: ${result.warnings[0]}` })
           }
         } catch (error) {
           if (active) setToast({ kind: 'warning', text: `Steam自動検出に失敗しました: ${error instanceof Error ? error.message : String(error)}` })
@@ -477,6 +566,7 @@ export default function App() {
         setProfiles(initialProfiles)
         setConfig(data.config)
         setStatus(data.status)
+        setSetupOpen(!data.config.setup.completed)
         setLoading(false)
         void loadOAuthStatus().catch((error: Error) => setToast({ kind: 'error', text: `OAuth接続状態を取得できません: ${error.message}` }))
       } catch (error) {
@@ -507,7 +597,6 @@ export default function App() {
   const filtered = useMemo(() => profiles.filter((profile) => profile.platformGroup === tab && !profile.hidden && profile.displayName.toLocaleLowerCase().includes(search.toLocaleLowerCase())), [profiles, search, tab])
   const selected = profiles.find((profile) => profile.id === status?.selectedGameId) ?? null
   const activeOperation = Boolean(status && (status.streaming || ['starting', 'live', 'stopping'].includes(status.platforms.youtube.state) || ['starting', 'live', 'stopping'].includes(status.platforms.twitch.state)))
-  const template = profiles.find((profile) => profile.platformGroup === (tab === 'settings' ? 'pc' : tab)) ?? profiles[0]
 
   const run = async (operation: () => Promise<void>) => { if (actionLock.current) return; actionLock.current = true; setActionBusy(true); try { await operation() } catch (error) { setToast({ kind: 'error', text: error instanceof Error ? error.message : String(error) }) } finally { const latest = await api.status().catch(() => null); if (latest) setStatus(latest); actionLock.current = false; setActionBusy(false) } }
   const selectGame = (profile: GameProfile, method?: CaptureMethod) => {
@@ -572,6 +661,41 @@ export default function App() {
     } catch (error) { if (!popup.closed) popup.close(); if (oauthPopup.current === popup) oauthPopup.current = null; const reason = error instanceof Error ? error.message : String(error); setOAuthProgress((current) => ({ ...current, [provider]: `接続に失敗しました: ${reason}` })); await loadOAuthStatus().catch(() => undefined); throw error }
   }
 
+  const saveAppConfig = async (next: AppConfig, secrets: Record<string, string>) => {
+    const saved = await api.saveConfig(next, secrets)
+    setConfig(saved)
+    await loadOAuthStatus()
+    return saved
+  }
+  const scanSteam = async () => {
+    const result = await api.steamScan()
+    if (result.skipped) return
+    setProfiles(result.profiles)
+    setSteamScan(result)
+    setToast({
+      kind: result.warnings.length && result.libraries.length ? 'warning' : 'success',
+      text: result.libraries.length
+        ? `Steam自動検出: ${result.installed}本・新規${result.created}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}`
+        : 'Steamは見つかりませんでした。手動追加でそのまま利用できます',
+    })
+  }
+  const saveSetupObs = async (url: string, password: string) => {
+    if (!config) return
+    await saveAppConfig({ ...config, obs: { ...config.obs, url: url.trim() } }, password ? { 'obs-password': password } : {})
+    setStatus(await api.status())
+  }
+  const finishSetup = async (openManualGame: boolean) => {
+    if (!config) return
+    const saved = await saveAppConfig({ ...config, setup: { completed: true } }, {})
+    setConfig(saved)
+    setSetupOpen(false)
+    if (openManualGame) {
+      setTab('pc')
+      setAdding(true)
+    }
+    setToast({ kind: 'success', text: openManualGame ? 'セットアップを保存しました。最初のゲームを追加してください' : '初期セットアップを保存しました' })
+  }
+
   const uploadThumbnail = async (profile: GameProfile, file: File) => {
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('PNG、JPG、WEBPを選択してください')
     if (file.size > 4 * 1024 * 1024) throw new Error('サムネイルは4MB以下にしてください')
@@ -589,8 +713,8 @@ export default function App() {
     <DesktopLaunchNotice />
     <nav className="tabs">{groups.map(({ id, label }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}</nav>
     <RuntimeStatusBar status={status} />
-    {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} status={status} oauthStatus={oauthStatus} oauthProgress={oauthProgress} steamScan={steamScan} onOAuthConnect={connectOAuth} onReconnect={async () => { await refresh(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { const saved = await api.saveConfig(next, secrets); setConfig(saved); await loadOAuthStatus(); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamScan={async () => { const result = await api.steamScan(); if (result.skipped) return; if (result.created || result.updated) setProfiles(result.profiles); setSteamScan(result); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam自動検出: ${result.installed}本・新規${result.created}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} onSteamSync={async () => { const result = await api.steamSync(); if (result.created || result.updated) setProfiles(result.profiles); setSteamScan(result); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>OAuth接続状態を取得できません。OBS操作は利用できます。</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />状態を再確認</button></main>) : <main className="library-view">
-      <div className="search-row"><label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ゲームを検索" />{search && <button aria-label="検索をクリア" onClick={() => setSearch('')}><X size={14} /></button>}</label><button className="add-button" disabled={activeOperation || !template} onClick={() => setAdding(true)}><Plus size={14} />追加</button></div>
+    {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} status={status} oauthStatus={oauthStatus} oauthProgress={oauthProgress} steamScan={steamScan} onOAuthConnect={connectOAuth} onReconnect={async () => { await refresh(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { await saveAppConfig(next, secrets); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamScan={scanSteam} onSteamSync={async () => { const result = await api.steamSync(); if (result.created || result.updated) setProfiles(result.profiles); setSteamScan(result); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: `Steam同期: 新規${result.created}件・更新${result.updated}件${result.warnings[0] ? ` / ${result.warnings[0]}` : ''}` }) }} onOpenSetup={() => setSetupOpen(true)} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>OAuth接続状態を取得できません。OBS操作は利用できます。</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />状態を再確認</button></main>) : <main className="library-view">
+      <div className="search-row"><label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ゲームを検索" />{search && <button aria-label="検索をクリア" onClick={() => setSearch('')}><X size={14} /></button>}</label><button className="add-button" disabled={activeOperation} onClick={() => setAdding(true)}><Plus size={14} />追加</button></div>
       {selected && <SelectedGameBanner profile={selected} status={status} />}
       {tab === 'switch' && <p className="tab-note">Switchはゲーム名を自動判定しません。配信するゲームを手動で選択してください。</p>}{tab === 'exception' && <p className="tab-note">通常のライブラリ連携が難しいゲームを扱います。</p>}
       {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>お気に入り</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => <button key={profile.id} className={selected?.id === profile.id ? 'selected' : ''} aria-current={selected?.id === profile.id ? 'true' : undefined} disabled={actionBusy} onClick={() => selectGame(profile)}><ProfileArtwork profile={profile} size="favorite" /><strong>{profile.displayName}</strong>{selected?.id === profile.id && <span className="favorite-selected-label"><Check size={10} strokeWidth={3} />選択中</span>}</button>)}</div></section>}
@@ -598,8 +722,9 @@ export default function App() {
       <section className="comments-section"><div className="section-title"><h2>統合コメント</h2><span className={status.streaming ? 'active-text' : ''}>{status.streaming ? '配信中・自動更新' : '配信開始後に表示されます'}</span></div>{status.streaming && comments.length ? <div className="comment-list">{comments.slice(-30).map((comment) => <div className={`comment-row ${comment.mention ? 'mention' : ''}`} key={comment.id}><ServiceIcon service={comment.service} /><div><div><strong>{comment.author}</strong>{comment.moderator && <b>MOD</b>}<time>{new Date(comment.publishedAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</time></div><p>{comment.body}</p></div></div>)}</div> : <div className="comment-empty"><MessageSquareText size={20} /><span>YouTube / Twitch の実際のコメントをここに表示します</span></div>}</section>
     </main>}
     <ControlPanel status={status} selected={selected} busy={actionBusy} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
+    {setupOpen && <FirstRunSetup config={config} status={status} oauthStatus={oauthStatus} steamScan={steamScan} onSaveObs={saveSetupObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}
     {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} readOnly={activeOperation} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(`${editing.displayName}を削除しますか？`)) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} />}
-    {adding && template && <AddGameModal initialGroup={tab === 'settings' ? 'pc' : tab} template={template} onClose={() => setAdding(false)} onCreate={(profile) => { setAdding(false); setEditing(profile) }} />}
+    {adding && <AddGameModal initialGroup={tab === 'settings' ? 'pc' : tab} onClose={() => setAdding(false)} onCreate={(profile) => { setAdding(false); setEditing(profile) }} />}
     <div className="toast-stack" aria-live="polite">{toast && <div className={`toast ${toast.kind}`}><StatusDot tone={toast.kind === 'success' ? 'live' : toast.kind === 'error' ? 'error' : 'pending'} /><span>{toast.text}</span><button aria-label="通知を閉じる" onClick={() => setToast(null)}><X size={14} /></button></div>}</div>
   </div></div>
 }

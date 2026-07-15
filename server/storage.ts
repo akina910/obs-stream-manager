@@ -41,12 +41,24 @@ export class DataStore {
     const configFile = path.join(this.dataDir, 'config', 'app.json')
     if (!(await exists(configFile))) await atomicWrite(configFile, JSON.stringify(defaultConfig, null, 2))
 
+    await this.removeUnmodifiedLegacyStarterProfiles()
     const initializedMarker = path.join(this.dataDir, 'database', 'initialized')
     if (!(await exists(initializedMarker))) {
-      const profiles = await this.listProfiles()
-      if (profiles.length === 0) await Promise.all(starterProfiles.map((profile) => this.saveProfile(profile)))
       await atomicWrite(initializedMarker, new Date().toISOString())
     }
+  }
+
+  private async removeUnmodifiedLegacyStarterProfiles(force = false): Promise<void> {
+    const marker = path.join(this.dataDir, 'database', 'legacy-starter-profiles-v1-removed')
+    if (!force && await exists(marker)) return
+    const profiles = await this.listProfiles()
+    for (const legacy of starterProfiles) {
+      const current = profiles.find((profile) => profile.id === legacy.id)
+      if (!current) continue
+      const normalizedLegacy = GameProfileSchema.parse(legacy)
+      if (JSON.stringify(current) === JSON.stringify(normalizedLegacy)) await this.removeProfile(current.id)
+    }
+    await atomicWrite(marker, new Date().toISOString())
   }
 
   async getConfig(): Promise<AppConfig> {
@@ -280,6 +292,11 @@ export class DataStore {
       const saved = await this.saveProfile(cleanProfile)
       if (thumbnail) await this.saveThumbnail(saved, thumbnail.bytes, thumbnail.mime, saved.state.thumbnailOriginalName)
     }
+    // Old backups can contain the historical sample profiles even after this
+    // installation has already run the one-time migration. Recheck the freshly
+    // imported set while still preserving any profile that was edited or has a
+    // thumbnail/Steam metadata.
+    await this.removeUnmodifiedLegacyStarterProfiles(true)
   }
 
   async copyThumbnail(source: string, profile: GameProfile): Promise<GameProfile> {
