@@ -85,6 +85,9 @@ export const GameProfileSchema = z.object({
 export type GameProfile = z.infer<typeof GameProfileSchema>
 
 export const AppConfigSchema = z.object({
+  setup: z.object({
+    completed: z.boolean().default(true),
+  }).default({ completed: true }),
   obs: z.object({
     url: z.string().default('ws://127.0.0.1:4455'),
     passwordStored: z.boolean().default(false),

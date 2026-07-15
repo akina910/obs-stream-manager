@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import sharp from 'sharp'
@@ -8,25 +8,52 @@ import { DataStore } from './storage.js'
 
 const directories: string[] = []
 
-async function createStore(): Promise<DataStore> {
+async function createStore(withFixtures = true): Promise<DataStore> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'obs-stream-manager-'))
   directories.push(directory)
   const store = new DataStore(directory)
   await store.initialize()
+  if (withFixtures) await Promise.all(starterProfiles.map((profile) => store.saveProfile(profile)))
   return store
 }
 
 afterEach(async () => Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))))
 
 describe('DataStore', () => {
-  it('initializes public starter profiles without credentials', async () => {
-    const store = await createStore()
+  it('initializes an empty library and first-run setup without credentials', async () => {
+    const store = await createStore(false)
     const profiles = await store.listProfiles()
-    expect(profiles).toHaveLength(starterProfiles.length)
-    expect(profiles.map((profile) => profile.id)).toContain('valorant')
+    expect(profiles).toHaveLength(0)
+    expect((await store.getConfig()).setup.completed).toBe(false)
     const configText = await readFile(path.join(store.dataDir, 'config', 'app.json'), 'utf8')
     expect(Object.keys(JSON.parse(configText) as object)).not.toContain('secrets')
     expect(configText).not.toContain('refresh_token')
+  })
+
+  it('treats an existing pre-setup config as already completed', async () => {
+    const store = await createStore(false)
+    const filename = path.join(store.dataDir, 'config', 'app.json')
+    const legacy = JSON.parse(await readFile(filename, 'utf8')) as Record<string, unknown>
+    delete legacy.setup
+    await writeFile(filename, JSON.stringify(legacy))
+
+    expect((await store.getConfig()).setup.completed).toBe(true)
+  })
+
+  it('removes only untouched legacy starter profiles during the one-time migration', async () => {
+    const store = await createStore()
+    const asa = (await store.getProfile('ark_survival_ascended'))!
+    const diablo = (await store.getProfile('diablo_iv'))!
+    await store.saveProfile({ ...asa, library: { ...asa.library, installed: true, installDirectory: 'D:\\Games\\ASA' } })
+    await store.saveProfile({ ...diablo, youtube: { ...diablo.youtube, titleTemplate: 'custom title' } })
+    await rm(path.join(store.dataDir, 'database', 'legacy-starter-profiles-v1-removed'), { force: true })
+
+    await new DataStore(store.dataDir).initialize()
+
+    expect(await store.getProfile('minecraft')).toBeNull()
+    expect(await store.getProfile('zelda_botw')).toBeNull()
+    expect((await store.getProfile('ark_survival_ascended'))?.library.installed).toBe(true)
+    expect((await store.getProfile('diablo_iv'))?.youtube.titleTemplate).toBe('custom title')
   })
 
   it('round-trips profile state and validates profile ids', async () => {
@@ -75,6 +102,19 @@ describe('DataStore', () => {
     await expect(store.importBackup(backup)).resolves.toBeUndefined()
     expect(await store.getProfile('temporary_game')).toBeNull()
     expect((await store.getProfile(profile.id))?.state.thumbnailFilename).toBe('default.png')
+  })
+
+  it('removes untouched legacy starters restored from an old backup', async () => {
+    const store = await createStore()
+    const diablo = (await store.getProfile('diablo_iv'))!
+    await store.saveProfile({ ...diablo, twitch: { ...diablo.twitch, titleTemplate: 'custom backup title' } })
+    const backup = await store.exportBackup()
+
+    await store.importBackup(backup)
+
+    expect(await store.getProfile('minecraft')).toBeNull()
+    expect(await store.getProfile('zelda_botw')).toBeNull()
+    expect((await store.getProfile('diablo_iv'))?.twitch.titleTemplate).toBe('custom backup title')
   })
 
   it('removes a saved thumbnail and resets its automatic-application state', async () => {

@@ -22,7 +22,7 @@ describe('PlatformServices thumbnail preparation', () => {
     directories.push(directory)
     const store = new DataStore(directory)
     await store.initialize()
-    const profile = (await store.listProfiles())[0]
+    const profile = await store.saveProfile(starterProfiles[0])
     const bytes = await sharp({ create: { width: 16, height: 9, channels: 3, background: '#123456' } }).png().toBuffer()
     const saved = await store.saveThumbnail(profile, bytes, 'image/png')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('temporary failure', { status: 500 }))
