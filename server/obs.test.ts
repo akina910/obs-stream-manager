@@ -41,6 +41,7 @@ describe('ObsController recording fallbacks', () => {
   it('starts and stops a secure in-memory Twitch secondary output for simultaneous streaming', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
     let streaming = false
+    let twitchActive = false
     let service = { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
@@ -58,7 +59,11 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'StopStream') { streaming = false; return {} }
         if (request === 'CallVendorRequest') {
           const vendor = data as { vendorName: string; requestType: string }
-          if (vendor.vendorName === 'obs-stream-manager-output') return { responseData: { success: true, outputActive: vendor.requestType !== 'stop_twitch' } }
+          if (vendor.vendorName === 'obs-stream-manager-output') {
+            if (vendor.requestType === 'start_twitch') twitchActive = true
+            if (vendor.requestType === 'stop_twitch') twitchActive = false
+            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: twitchActive } }
+          }
           return { responseData: { success: true } }
         }
         return {}
@@ -445,6 +450,7 @@ describe('ObsController recording fallbacks', () => {
     config.features.sourceRecord = false
     config.features.verticalRecording = false
 
+    await controller.preparePrimaryStream(config, profile)
     await expect(controller.start(config, profile, profile.capture.localSourceName)).rejects.toThrow('OBS配信出力が開始状態になりませんでした')
 
     expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['SetStreamServiceSettings', 'StartStream', 'StopStream']))
@@ -538,5 +544,62 @@ describe('ObsController recording fallbacks', () => {
     expect(warnings).toHaveLength(2)
     expect(warnings.join(' ')).toContain('録画保存先')
     expect(warnings.join(' ')).toContain('リプレイバッファ時間')
+  })
+
+  it('prepares a Twitch-only primary stream once and preserves the original OBS service until cleanup', async () => {
+    const previous = { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'Twitch', server: 'auto' } }
+    let service = structuredClone(previous)
+    const setService = vi.fn((value: typeof service) => { service = structuredClone(value) })
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetStreamStatus') return { outputActive: false }
+        if (request === 'GetStreamServiceSettings') return service
+        if (request === 'SetStreamServiceSettings') { setService(data as typeof service); return {} }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: false } }
+        return {}
+      }),
+    }
+    const secrets = memorySecrets([
+      ['twitch-stream-key', 'test-twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ])
+    const controller = new ObsController(secrets)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    config.features.youtube = false
+    const profile = structuredClone(starterProfiles[0])
+
+    await controller.preparePrimaryStream(config, profile)
+    await controller.preparePrimaryStream(config, profile)
+    expect(setService).toHaveBeenCalledTimes(1)
+    expect(service).toMatchObject({ streamServiceType: 'rtmp_custom', streamServiceSettings: { key: 'test-twitch-key' } })
+
+    await expect(controller.finishObsTriggeredStream(config)).resolves.toEqual([])
+    expect(setService).toHaveBeenCalledTimes(2)
+    expect(service).toEqual(previous)
+  })
+
+  it('does not report an old plugin without an API handshake as ready', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '10_GAME_PC' }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, outputActive: false } }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const status = await controller.status(structuredClone(defaultConfig), null, null, false, null)
+
+    expect(status.twitchOutputPluginReady).toBe(false)
+    expect(status.twitchOutputPlugin?.state).toBe('incompatible')
   })
 })

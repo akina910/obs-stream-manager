@@ -1,6 +1,6 @@
 {
   "name": "obs-stream-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "description": "Local-first OBS dock for managing game profiles, multistream setup, recording and chat.",
   "author": "OBS Stream Manager contributors",
@@ -19,14 +19,16 @@
     "build": "npm run clean && tsc -p tsconfig.server.json && vite build && npm run build:desktop && npm run prepare:provider",
     "build:desktop": "tsc -p tsconfig.desktop.json",
     "prepare:provider": "node scripts/prepare-provider-bundle.mjs",
-    "dist:win": "npm run build && electron-builder --win nsis portable zip --x64 --publish never",
-    "dist:win:dir": "npm run build && electron-builder --win dir --x64",
+    "prepare:icon": "node scripts/generate-app-icon.mjs",
+    "dist:win": "npm run build && npm run prepare:icon && electron-builder --win nsis portable zip --x64 --publish never",
+    "dist:win:dir": "npm run build && npm run prepare:icon && electron-builder --win dir --x64",
     "verify:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-package.ps1",
     "start": "node dist/server/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.desktop.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "check:secrets": "node scripts/check-secrets.mjs --history",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run check:secrets && npm run build"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

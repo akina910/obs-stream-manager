@@ -6,6 +6,8 @@ const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resol
 type StreamServiceSettings = OBSRequestTypes['SetStreamServiceSettings']
 type AppliedStreamService = { streamServiceType: string; server: string; key: string }
 type ObsRuntimeStatus = Omit<RuntimeStatus, 'platforms'>
+type TwitchOutputPluginStatus = NonNullable<ObsRuntimeStatus['twitchOutputPlugin']>
+const twitchOutputPluginApiVersion = 1
 export type TwitchIngestTestResult = {
   ok: true
   durationMs: number
@@ -81,7 +83,39 @@ export class ObsController {
     return response.responseData
   }
 
+  private async getTwitchOutputPluginStatus(): Promise<TwitchOutputPluginStatus> {
+    const installState = process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_INSTALL_STATE
+    try {
+      const response = await this.callVendor('obs-stream-manager-output', 'twitch_status')
+      const version = typeof response.pluginVersion === 'string' ? response.pluginVersion : undefined
+      const apiVersion = typeof response.apiVersion === 'number' ? response.apiVersion : undefined
+      if (apiVersion !== twitchOutputPluginApiVersion) {
+        const restartRequired = installState === 'installed' || installState === 'pending'
+        return {
+          state: restartRequired ? 'restart_required' : 'incompatible',
+          version,
+          detail: restartRequired
+            ? 'OBS Stream Manager Outputを更新しました。OBSを再起動してください'
+            : 'OBS Stream Manager Outputの互換性を確認できません。アプリを再インストールしてOBSを再起動してください',
+          outputActive: response.outputActive === true,
+        }
+      }
+      return { state: 'ready', version, detail: `OBS副出力プラグイン ${version ?? '互換版'} は利用可能です`, outputActive: response.outputActive === true }
+    } catch {
+      if (installState === 'installed' || installState === 'pending') {
+        return { state: 'restart_required', detail: 'OBS副出力プラグインを反映するためOBSを再起動してください', outputActive: false }
+      }
+      if (installState === 'unavailable') {
+        return { state: 'install_failed', detail: 'OBS副出力プラグインを配置できませんでした。アプリを再インストールしてください', outputActive: false }
+      }
+      return { state: 'missing', detail: 'OBS副出力プラグインが読み込まれていません。OBSを再起動してください', outputActive: false }
+    }
+  }
+
   private async startTwitchSecondary(): Promise<void> {
+    const plugin = await this.getTwitchOutputPluginStatus()
+    if (plugin.state !== 'ready') throw new Error(plugin.detail)
+    if (plugin.outputActive) return
     const key = this.secrets.get('twitch-stream-key')
     const server = this.secrets.get('twitch-stream-server')
     if (!key || !server) throw new Error('Twitchへの映像送信準備が未完了です。Twitchを再接続してください')
@@ -173,9 +207,11 @@ export class ObsController {
       } catch { /* invalid snapshots are replaced with the current OBS service below */ }
     }
     if (alreadyConfigured) {
-      this.streamServiceManaged = false
-      this.secrets.set('obs-applied-stream-service', '')
-      this.secrets.set('obs-previous-stream-service', '')
+      this.streamServiceManaged = savedPairMatchesCurrent
+      if (!savedPairMatchesCurrent) {
+        this.secrets.set('obs-applied-stream-service', '')
+        this.secrets.set('obs-previous-stream-service', '')
+      }
       return false
     }
     if (!savedPairMatchesCurrent) {
@@ -211,6 +247,33 @@ export class ObsController {
       return this.configureManagedStream(streamServer, streamKey)
     }
     return false
+  }
+
+  async preparePrimaryStream(config: AppConfig, profile: GameProfile): Promise<void> {
+    await this.connect(config)
+    if ((await this.obs.call('GetStreamStatus')).outputActive) {
+      throw Object.assign(new Error('OBS配信中は配信先を変更できません'), { statusCode: 409 })
+    }
+    await this.configurePrimaryStream(config, profile)
+  }
+
+  async startSecondaryTwitchForObsStream(config: AppConfig, profile: GameProfile): Promise<void> {
+    if (!(config.features.youtube && profile.youtube.enabled && config.features.twitch && profile.twitch.enabled)) return
+    await this.connect(config)
+    await this.startTwitchSecondary()
+    this.started.twitch = true
+  }
+
+  async finishObsTriggeredStream(config: AppConfig): Promise<string[]> {
+    await this.connect(config)
+    const warnings: string[] = []
+    await this.stopTwitchSecondary().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!message.toLowerCase().includes('no vendor was found')) warnings.push(`Twitch副出力を停止できませんでした: ${message}`)
+    })
+    this.started.twitch = false
+    await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    return warnings
   }
 
   private async restorePreviousStreamService(): Promise<void> {
@@ -380,12 +443,12 @@ export class ObsController {
     await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.startingScene })
     const warnings: string[] = []
     const startedNow = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false }
-    let restoreStreamService: (() => Promise<void>) | null = null
+    let restoreManagedStreamServiceOnFailure = false
     try {
       const stream = await this.obs.call('GetStreamStatus')
       if (!stream.outputActive) {
-        const streamServiceChanged = await this.configurePrimaryStream(config, profile)
-        if (streamServiceChanged) restoreStreamService = () => this.restorePreviousStreamService()
+        await this.configurePrimaryStream(config, profile)
+        restoreManagedStreamServiceOnFailure = this.streamServiceManaged
       }
       const record = await this.obs.call('GetRecordStatus')
       if (config.features.recording && profile.recording.enabled && !record.outputActive) {
@@ -443,9 +506,9 @@ export class ObsController {
           rollbackStreamStopped = await this.waitForStreamInactive().catch(() => false)
         }
       }
-      if (restoreStreamService && rollbackStreamStopped) {
-        await restoreStreamService().catch((restoreError) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`))
-      } else if (restoreStreamService) {
+      if (restoreManagedStreamServiceOnFailure && rollbackStreamStopped) {
+        await this.restorePreviousStreamService().catch((restoreError) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`))
+      } else if (restoreManagedStreamServiceOnFailure) {
         warnings.push('OBS配信出力の停止を確認できなかったため、配信サービス設定を復元していません')
       }
       if (startedNow.vertical) await this.callVertical('stop_recording').catch(() => undefined)
@@ -580,17 +643,17 @@ export class ObsController {
   async status(config: AppConfig, selectedGameId: string | null, captureMethod: CaptureMethod | null, busy: boolean, warning: string | null): Promise<ObsRuntimeStatus> {
     try {
       await this.connect(config)
-      const [stream, record, replay, scene, twitchOutputPluginReady] = await Promise.all([
+      const [stream, record, replay, scene, twitchOutputPlugin] = await Promise.all([
         this.obs.call('GetStreamStatus'),
         this.obs.call('GetRecordStatus'),
         this.getReplayBufferStatus(),
         this.obs.call('GetCurrentProgramScene'),
-        this.callVendor('obs-stream-manager-output', 'twitch_status').then(() => true).catch(() => false),
+        this.getTwitchOutputPluginStatus(),
       ])
-      return { obsConnected: true, streaming: stream.outputActive, streamElapsedMs: stream.outputDuration, recording: record.outputActive, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy, twitchOutputPluginReady }
+      return { obsConnected: true, streaming: stream.outputActive, streamElapsedMs: stream.outputDuration, recording: record.outputActive, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy, twitchOutputPluginReady: twitchOutputPlugin.state === 'ready', twitchOutputPlugin }
     } catch {
       this.connected = false
-      return { obsConnected: false, streaming: false, recording: false, replayBuffer: false, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: null, warning, busy, twitchOutputPluginReady: false }
+      return { obsConnected: false, streaming: false, recording: false, replayBuffer: false, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: null, warning, busy, twitchOutputPluginReady: false, twitchOutputPlugin: { state: 'missing', detail: 'OBS未接続のため副出力プラグインを確認できません', outputActive: false } }
     }
   }
 }

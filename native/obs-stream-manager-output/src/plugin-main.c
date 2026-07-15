@@ -16,6 +16,8 @@ the Free Software Foundation; either version 2 of the License, or
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("OBS Stream Manager contributors")
 
+#define OBS_STREAM_MANAGER_OUTPUT_API_VERSION 1
+
 static obs_websocket_vendor vendor;
 static obs_output_t *twitch_output;
 static obs_service_t *twitch_service;
@@ -128,6 +130,8 @@ static void twitch_status(obs_data_t *request, obs_data_t *response, void *priva
 	UNUSED_PARAMETER(private_data);
 	const bool active = twitch_output && obs_output_active(twitch_output);
 	obs_data_set_bool(response, "success", true);
+	obs_data_set_string(response, "pluginVersion", OBS_STREAM_MANAGER_OUTPUT_VERSION);
+	obs_data_set_int(response, "apiVersion", OBS_STREAM_MANAGER_OUTPUT_API_VERSION);
 	obs_data_set_bool(response, "outputActive", active);
 	obs_data_set_int(response, "bytesSent", twitch_output ? (long long)obs_output_get_total_bytes(twitch_output) : 0);
 	obs_data_set_int(response, "totalFrames", twitch_output ? (long long)obs_output_get_total_frames(twitch_output) : 0);

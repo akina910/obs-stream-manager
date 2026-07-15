@@ -75,6 +75,21 @@ try {
   Assert-True ([bool](Test-Path -LiteralPath $obsPlugin)) 'Bundled OBS output plugin is missing'
   $obsPluginLocale = Join-Path $runtime 'resources\obs-plugin\data\locale\en-US.ini'
   Assert-True ([bool](Test-Path -LiteralPath $obsPluginLocale)) 'Bundled OBS output plugin locale is missing'
+  $obsPluginVersionFile = Join-Path $runtime 'resources\obs-plugin\version.json'
+  Assert-True ([bool](Test-Path -LiteralPath $obsPluginVersionFile)) 'Bundled OBS output plugin version metadata is missing'
+  $obsPluginVersion = Get-Content -LiteralPath $obsPluginVersionFile -Raw | ConvertFrom-Json
+  $expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
+  Assert-True ($obsPluginVersion.version -eq $expectedVersion) "Unexpected OBS output plugin version: $($obsPluginVersion.version), expected $expectedVersion"
+
+  Add-Type -AssemblyName System.Drawing
+  $appIcon = [Drawing.Icon]::ExtractAssociatedIcon($exe)
+  Assert-True ($null -ne $appIcon) 'Packaged executable icon is missing'
+  $iconBitmap = $appIcon.ToBitmap()
+  $iconCenter = $iconBitmap.GetPixel([Math]::Floor($iconBitmap.Width / 2), [Math]::Floor($iconBitmap.Height / 2))
+  $iconBrand = $iconBitmap.GetPixel([Math]::Floor($iconBitmap.Width / 4), [Math]::Floor($iconBitmap.Height / 4))
+  $results.customAppIcon = $iconCenter.R -lt 50 -and $iconCenter.G -lt 50 -and $iconCenter.B -lt 50 -and $iconBrand.B -gt 120
+  $iconBitmap.Dispose()
+  $appIcon.Dispose()
 
   $env:OBS_STREAM_MANAGER_DATA_DIR = $dataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $secretService
@@ -92,6 +107,12 @@ try {
   $results.loopbackOnly = @($listener | Where-Object LocalAddress -ne '127.0.0.1').Count -eq 0
   $results.securityHeaders = $web.Headers['Content-Security-Policy'] -match "script-src 'self'" -and $web.Headers['X-Content-Type-Options'] -eq 'nosniff'
   $results.customFavicon = $favicon.StatusCode -eq 200 -and $favicon.Headers['Content-Type'] -match '^image/svg\+xml' -and $web.Content -match 'href="/favicon\.svg"'
+  try {
+    Invoke-WebRequest "http://127.0.0.1:$port/api/stream/stop" -Method Post -Headers @{ Origin = 'https://evil.example'; 'Sec-Fetch-Site' = 'cross-site' } -ContentType 'application/json' -Body '{}' -UseBasicParsing -TimeoutSec 10 | Out-Null
+    $results.crossOriginMutationBlocked = $false
+  } catch {
+    $results.crossOriginMutationBlocked = $_.Exception.Response.StatusCode.value__ -eq 403
+  }
   $results.extractedPackageDoesNotAutoStart = -not $desktopPreferences.startWithWindows -and -not (Test-Path (Join-Path $runtime 'resources\installed-by-nsis'))
   $firstProcessCount = (Get-TestProcesses).Count
 

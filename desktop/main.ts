@@ -284,6 +284,7 @@ if (!app.requestSingleInstanceLock()) {
       const providerFile = await providerBundlePath()
       if (providerFile) process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE = providerFile
       const obsPluginState = await installObsOutputPlugin()
+      process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_INSTALL_STATE = obsPluginState
       await markLifecycle(`obs-output-plugin-${obsPluginState}`).catch(() => undefined)
       serverModule = await import('../server/index.js') as ServerModule
       await markLifecycle('server-module-loaded').catch(() => undefined)

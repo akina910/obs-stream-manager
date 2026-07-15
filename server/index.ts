@@ -15,6 +15,8 @@ import { StreamOrchestrator } from './orchestrator.js'
 import { PlatformServices } from './platforms.js'
 import { getDataDirectory } from './paths.js'
 import { clearYouTubeStreamSecrets, provisionDistributorOAuth } from './provider-provisioning.js'
+import { isUnsafeCrossOriginRequest } from './request-security.js'
+import { reconcileImportedConfig } from './secret-flags.js'
 import { SecretStore, type SecretName } from './secrets.js'
 import { DataStore } from './storage.js'
 
@@ -36,10 +38,19 @@ const allowedOAuthOpenerOrigins = new Set([
   'http://127.0.0.1:4318',
   'http://localhost:4318',
 ])
+const allowedMutationOrigins = new Set(allowedOAuthOpenerOrigins)
 const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpenerOrigins)
 
 export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
+
+app.addHook('onRequest', async (request, reply) => {
+  const origin = typeof request.headers.origin === 'string' ? request.headers.origin : undefined
+  const fetchSite = typeof request.headers['sec-fetch-site'] === 'string' ? request.headers['sec-fetch-site'] : undefined
+  if (isUnsafeCrossOriginRequest(request.method, request.url, origin, fetchSite, allowedMutationOrigins)) {
+    return reply.status(403).send({ error: 'Cross-origin request is not allowed' })
+  }
+})
 
 app.addHook('onSend', async (request, reply, payload) => {
   reply.header('X-Content-Type-Options', 'nosniff')
@@ -129,6 +140,7 @@ app.get<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (reques
 })
 
 app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', async (request) => {
+  await orchestrator.assertNotStreaming()
   const override = request.body.captureMethod ? CaptureMethodSchema.parse(request.body.captureMethod) : undefined
   return orchestrator.select(GameIdSchema.parse(request.body.gameId), override)
 })
@@ -232,7 +244,10 @@ app.post('/api/steam/sync', async () => {
 app.post('/api/backup/export', async () => store.exportBackup())
 app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
   await orchestrator.assertNotStreaming()
+  const providerConfig = await store.getConfig()
   await store.importBackup(request.body)
+  const importedConfig = await store.getConfig()
+  await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
   await obs.disconnect()
   orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
   return { ok: true }

@@ -14,5 +14,6 @@ find_package(obs-frontend-api REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs OBS::obs-frontend-api)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c)
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE OBS_STREAM_MANAGER_OUTPUT_VERSION="${PROJECT_VERSION}")
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

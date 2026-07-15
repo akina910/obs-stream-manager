@@ -10,6 +10,8 @@ $websocketLicenseSha256 = '90b664a6fbc82b38595cbb39606268bef0b2eb9b76b0e9e03826b
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $workspace = [IO.Path]::GetFullPath((Join-Path $tempRoot "obs-stream-manager-plugin-$([guid]::NewGuid().ToString('N'))"))
 $source = Join-Path $PSScriptRoot '..\native\obs-stream-manager-output'
+$originalCi = $env:CI
+$appVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
 
 try {
   git clone --quiet https://github.com/obsproject/obs-plugintemplate.git $workspace
@@ -24,6 +26,7 @@ try {
     throw 'obs-websocket API header checksum mismatch'
   }
 
+  if (-not $env:CI) { $env:CI = 'local' }
   & (Join-Path $workspace '.github\scripts\Build-Windows.ps1') -Target x64 -Configuration Release
   if ($LASTEXITCODE -ne 0) { throw "OBS plugin build failed with exit code $LASTEXITCODE" }
 
@@ -39,8 +42,9 @@ try {
   if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne $websocketLicenseSha256) {
     throw 'obs-websocket license checksum mismatch'
   }
-  Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'version.json') '{"version":"0.2.0","obsMinimumVersion":"31.1.1"}'
+  Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'version.json') (@{ version = $appVersion; obsMinimumVersion = '31.1.1' } | ConvertTo-Json -Compress)
 } finally {
+  $env:CI = $originalCi
   $workspaceParent = [IO.Path]::GetFullPath((Split-Path -Parent $workspace))
   $workspaceName = Split-Path -Leaf $workspace
   if ($workspaceParent -eq $tempRoot.TrimEnd('\') -and $workspaceName.StartsWith('obs-stream-manager-plugin-') -and (Test-Path -LiteralPath $workspace)) {

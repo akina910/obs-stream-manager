@@ -69,6 +69,25 @@ export class StreamOrchestrator {
       const detection = override && override !== 'auto' ? { method: override, warnings: [] } : await this.capture.detect(profile)
       const obsWarnings = await this.obs.applyProfile(config, profile, detection.method)
       const services = await this.platforms.prepare(config, profile)
+      const primaryService = config.features.youtube && profile.youtube.enabled
+        ? 'youtube'
+        : config.features.twitch && profile.twitch.enabled
+          ? 'twitch'
+          : null
+      const primaryPreparation = primaryService ? services.find((service) => service.service === primaryService) : undefined
+      if (!primaryPreparation || primaryPreparation.ok) {
+        try {
+          await this.obs.preparePrimaryStream(config, profile)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (primaryPreparation) {
+            primaryPreparation.ok = false
+            primaryPreparation.message = `OBS配信先を準備できませんでした: ${message}`
+          } else {
+            obsWarnings.push(`OBS配信先を準備できませんでした: ${message}`)
+          }
+        }
+      }
       this.failedServices.clear()
       for (const service of services) if (!service.ok) this.failedServices.add(service.service)
       this.serviceFailures = services.filter((service) => !service.ok).map((service) => `${service.service}: ${service.message}`)
@@ -239,6 +258,9 @@ export class StreamOrchestrator {
     const warnings: string[] = []
     if (active) {
       if (this.selected) {
+        await this.obs.startSecondaryTwitchForObsStream(config, this.selected).catch((error) => {
+          warnings.push(`Twitch副出力: ${error instanceof Error ? error.message : String(error)}`)
+        })
         await this.platforms.startYouTubeBroadcast(config, this.selected).catch((error) => {
           warnings.push(`YouTube: ${error instanceof Error ? error.message : String(error)}`)
         })
@@ -254,6 +276,7 @@ export class StreamOrchestrator {
       this.warning = warnings[0] ?? null
       await this.logger.write('stream.obs_started', { gameId: this.selected?.id ?? null, warnings })
     } else {
+      warnings.push(...await this.obs.finishObsTriggeredStream(config))
       await this.platforms.completeYouTubeBroadcast(config, this.selected).catch((error) => {
         warnings.push(`YouTube: ${error instanceof Error ? error.message : String(error)}`)
       })

@@ -115,6 +115,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(true),
       ownsCurrentStream: vi.fn().mockReturnValue(true),
@@ -148,6 +149,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
       stop: vi.fn().mockResolvedValue([]),
@@ -193,6 +195,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(true),
@@ -231,6 +234,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(false),
@@ -267,6 +271,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(true),
@@ -308,7 +313,12 @@ describe('StreamOrchestrator OBS-triggered external sync', () => {
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
     } as unknown as DataStore
-    const obs = { applyProfile: vi.fn().mockResolvedValue([]) } as unknown as ObsController
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
+      startSecondaryTwitchForObsStream: vi.fn().mockResolvedValue(undefined),
+      finishObsTriggeredStream: vi.fn().mockResolvedValue([]),
+    } as unknown as ObsController
     const platforms = {
       prepare: vi.fn().mockResolvedValue([
         { service: 'youtube', ok: true, message: 'ok' },
@@ -324,13 +334,16 @@ describe('StreamOrchestrator OBS-triggered external sync', () => {
     const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
 
     await orchestrator.select(profile.id, 'window')
+    expect(obs.preparePrimaryStream).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id }))
     orchestrator.handleObsStreamStateChanged(true)
     await vi.waitFor(() => expect(platforms.startYouTubeBroadcast).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id })))
+    expect(obs.startSecondaryTwitchForObsStream).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id }))
     expect(platforms.startComments).toHaveBeenCalledWith(config)
     expect(logger.write).toHaveBeenCalledWith('stream.obs_started', expect.objectContaining({ gameId: profile.id, warnings: [] }))
 
     orchestrator.handleObsStreamStateChanged(false)
     await vi.waitFor(() => expect(platforms.completeYouTubeBroadcast).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id })))
+    expect(obs.finishObsTriggeredStream).toHaveBeenCalledWith(config)
     expect(platforms.stopComments).toHaveBeenCalled()
     expect(logger.write).toHaveBeenCalledWith('stream.obs_stopped', expect.objectContaining({ gameId: profile.id, warnings: [] }))
   })
