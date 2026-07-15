@@ -8,6 +8,7 @@ import {
   hasDesktopArgument,
   quitApplicationArgument,
   supportsWindowsLoginStart,
+  windowsAppId,
   type DesktopIntegrationSettings,
 } from './integration.js'
 import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
@@ -179,7 +180,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   void markLifecycle('single-instance-lock-acquired').catch(() => undefined)
   app.setName('OBS Stream Manager')
-  app.setAppUserModelId('io.github.akina910.obs-stream-manager')
+  app.setAppUserModelId(windowsAppId)
   app.on('second-instance', (_event, argv) => {
     if (hasDesktopArgument(argv, quitApplicationArgument)) {
       requestApplicationQuit()

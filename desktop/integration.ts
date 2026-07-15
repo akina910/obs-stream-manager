@@ -3,6 +3,7 @@ import path from 'node:path'
 
 export const backgroundLaunchArgument = '--background'
 export const quitApplicationArgument = '--quit'
+export const windowsAppId = 'io.github.akina910.obs-stream-manager'
 
 export type DesktopIntegrationSettings = {
   startWithWindows: boolean
