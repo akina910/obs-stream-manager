@@ -1,6 +1,15 @@
+import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import {
+  backgroundLaunchArgument,
+  DesktopPreferenceStore,
+  hasDesktopArgument,
+  quitApplicationArgument,
+  supportsWindowsLoginStart,
+  type DesktopIntegrationSettings,
+} from './integration.js'
 import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
 
 type ServerModule = {
@@ -18,9 +27,14 @@ const allowedExternalHosts = new Set([
 ])
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
 let serverModule: ServerModule | null = null
+let preferences: DesktopPreferenceStore | null = null
+let integrationSettings: DesktopIntegrationSettings = { startWithWindows: false, supported: false }
+let quitRequested = false
 let shutdownStarted = false
 let shutdownComplete = false
+let closeNoticeShown = false
 
 async function markLifecycle(stage: string): Promise<void> {
   const directory = process.env.OBS_STREAM_MANAGER_DATA_DIR?.trim()
@@ -65,6 +79,60 @@ function isAllowedExternalUrl(value: string): boolean {
   }
 }
 
+function trayImage() {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#6f8dff"/><path d="M7 12V9a2 2 0 0 1 2-2h3M20 7h3a2 2 0 0 1 2 2v3M25 20v3a2 2 0 0 1-2 2h-3M12 25H9a2 2 0 0 1-2-2v-3" fill="none" stroke="#090b10" stroke-width="3" stroke-linecap="round"/><circle cx="16" cy="16" r="4" fill="#090b10"/></svg>'
+  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`).resize({ width: 16, height: 16 })
+}
+
+function requestApplicationQuit(): void {
+  quitRequested = true
+  app.quit()
+}
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow()
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+async function setStartWithWindows(startWithWindows: boolean): Promise<DesktopIntegrationSettings> {
+  if (!preferences || !integrationSettings.supported) return integrationSettings
+  await preferences.setStartWithWindows(startWithWindows)
+  integrationSettings = { ...integrationSettings, startWithWindows }
+  if (process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM !== '1') {
+    app.setLoginItemSettings({ openAtLogin: startWithWindows, path: process.execPath, args: startWithWindows ? [backgroundLaunchArgument] : [] })
+  }
+  rebuildTrayMenu()
+  return integrationSettings
+}
+
+function rebuildTrayMenu(): void {
+  if (!tray) return
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'OBS Stream Manager を開く / Open', click: showMainWindow },
+    { label: 'ドックURLをコピー / Copy dock URL', click: () => clipboard.writeText(dockUrl) },
+    { type: 'separator' },
+    {
+      label: 'Windowsログイン時に準備 / Start with Windows',
+      type: 'checkbox',
+      checked: integrationSettings.startWithWindows,
+      enabled: integrationSettings.supported,
+      click: (item) => { void setStartWithWindows(item.checked).catch((error) => void writeStartupError(error)) },
+    },
+    { type: 'separator' },
+    { label: '完全に終了 / Quit completely', click: requestApplicationQuit },
+  ]))
+}
+
+function createTray(): void {
+  if (tray) return
+  tray = new Tray(trayImage())
+  tray.setToolTip('OBS Stream Manager - OBS dock server is running')
+  tray.on('double-click', showMainWindow)
+  rebuildTrayMenu()
+}
+
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 820,
@@ -86,6 +154,19 @@ function createWindow(): BrowserWindow {
     if (!url.startsWith(dockUrl)) event.preventDefault()
   })
   window.once('ready-to-show', () => window.show())
+  window.on('close', (event) => {
+    if (quitRequested) return
+    event.preventDefault()
+    window.hide()
+    if (!closeNoticeShown && tray) {
+      closeNoticeShown = true
+      tray.displayBalloon({
+        title: 'OBS Stream Manager',
+        content: 'OBSドックを維持するためバックグラウンドで動作しています。完全終了はトレイメニューから選べます。',
+        iconType: 'info',
+      })
+    }
+  })
   window.on('closed', () => { mainWindow = null })
   void window.loadURL(`${dockUrl}/?desktop=1`)
   return window
@@ -97,12 +178,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   void markLifecycle('single-instance-lock-acquired').catch(() => undefined)
+  app.setName('OBS Stream Manager')
   app.setAppUserModelId('io.github.akina910.obs-stream-manager')
-  app.on('second-instance', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.show()
-    mainWindow.focus()
+  app.on('second-instance', (_event, argv) => {
+    if (hasDesktopArgument(argv, quitApplicationArgument)) {
+      requestApplicationQuit()
+      return
+    }
+    showMainWindow()
   })
 
   ipcMain.handle('desktop:open-external', async (_event, url: unknown) => {
@@ -110,8 +193,15 @@ if (!app.requestSingleInstanceLock()) {
     await shell.openExternal(url)
   })
   ipcMain.handle('desktop:copy-dock-url', () => clipboard.writeText(dockUrl))
+  ipcMain.handle('desktop:get-integration-settings', () => integrationSettings)
+  ipcMain.handle('desktop:set-start-with-windows', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('自動起動設定が不正です')
+    return setStartWithWindows(value)
+  })
+  ipcMain.handle('desktop:quit', requestApplicationQuit)
 
   app.on('before-quit', (event) => {
+    quitRequested = true
     if (shutdownComplete || !serverModule) return
     event.preventDefault()
     if (shutdownStarted) return
@@ -120,26 +210,46 @@ if (!app.requestSingleInstanceLock()) {
       .catch(async (error) => { await writeStartupError(error) })
       .finally(() => {
         shutdownComplete = true
+        tray?.destroy()
+        tray = null
         app.quit()
       })
   })
-  app.on('window-all-closed', () => app.quit())
+  app.on('window-all-closed', () => undefined)
+  app.on('activate', showMainWindow)
 
   void app.whenReady().then(async () => {
+    if (hasDesktopArgument(process.argv, quitApplicationArgument)) {
+      requestApplicationQuit()
+      return
+    }
     await markLifecycle('electron-ready').catch(() => undefined)
     try {
       process.env.OBS_STREAM_MANAGER_EMBEDDED = '1'
       process.env.PORT = '4317'
       process.env.HOST = '127.0.0.1'
       process.env.OBS_STREAM_MANAGER_DATA_DIR ||= path.join(app.getPath('appData'), 'obs-stream-manager')
+      const installedMarkerExists = existsSync(path.join(process.resourcesPath, 'installed-by-nsis'))
+      const loginItemSupported = supportsWindowsLoginStart(app.isPackaged, process.env.PORTABLE_EXECUTABLE_FILE, installedMarkerExists)
+      preferences = new DesktopPreferenceStore(process.env.OBS_STREAM_MANAGER_DATA_DIR, loginItemSupported)
+      const storedPreferences = await preferences.read()
+      integrationSettings = { supported: loginItemSupported, startWithWindows: loginItemSupported && storedPreferences.startWithWindows }
+      if (loginItemSupported && process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM !== '1') {
+        app.setLoginItemSettings({ openAtLogin: integrationSettings.startWithWindows, path: process.execPath, args: integrationSettings.startWithWindows ? [backgroundLaunchArgument] : [] })
+      }
       const providerFile = await providerBundlePath()
       if (providerFile) process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE = providerFile
       serverModule = await import('../server/index.js') as ServerModule
       await markLifecycle('server-module-loaded').catch(() => undefined)
       await withStartupListenTimeout(serverModule.startServer(), serverStartTimeoutMs)
       await markLifecycle('server-listening').catch(() => undefined)
-      mainWindow = createWindow()
-      await markLifecycle('window-created').catch(() => undefined)
+      createTray()
+      if (!hasDesktopArgument(process.argv, backgroundLaunchArgument)) {
+        mainWindow = createWindow()
+        await markLifecycle('window-created').catch(() => undefined)
+      } else {
+        await markLifecycle('background-ready').catch(() => undefined)
+      }
     } catch (error) {
       if (error instanceof StartupListenTimeoutError && !hasStartupListenRetried(process.argv)) {
         await markLifecycle('server-listen-timeout-retrying').catch(() => undefined)
@@ -153,6 +263,7 @@ if (!app.requestSingleInstanceLock()) {
         'OBS Stream Manager を起動できません',
         `${safeError(error)}\n\n詳細ログ: ${filename}\n\n別のOBS Stream Managerが起動していないか確認してください。`,
       )
+      quitRequested = true
       shutdownComplete = true
       app.quit()
     }

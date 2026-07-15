@@ -58,9 +58,47 @@ function DesktopLaunchNotice() {
   const [copied, setCopied] = useState(false)
   if (!desktop) return null
   return <aside className="desktop-launch-notice">
-    <div><strong>{t('OBSブラウザドック URL')}</strong><code>{desktop.dockUrl}</code><span>{t('OBSの「ドック」→「カスタムブラウザドック」に登録してください。')}</span></div>
+    <div><strong>{t('OBSブラウザドック URL')}</strong><code>{desktop.dockUrl}</code><span>{t('×で閉じてもOBSドック用サーバーは停止せず、通知領域で動作を続けます。')}</span></div>
     <button onClick={() => void desktop.copyDockUrl().then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 2_000) })}><Copy size={14} />{t(copied ? 'コピー済み' : 'コピー')}</button>
   </aside>
+}
+
+function DesktopIntegrationControl({ setup = false }: { setup?: boolean }) {
+  const { t } = useI18n()
+  const desktop = window.obsStreamManagerDesktop
+  const [settings, setSettings] = useState<{ startWithWindows: boolean; supported: boolean } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!desktop) return
+    let cancelled = false
+    void desktop.getIntegrationSettings()
+      .then((value) => { if (!cancelled) setSettings(value) })
+      .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)) })
+    return () => { cancelled = true }
+  }, [desktop])
+  if (!desktop) return null
+  const supported = settings?.supported ?? false
+  const note = supported
+    ? t('Windowsログイン時に画面を出さず準備し、OBSドックをすぐ読み込める状態にします。')
+    : t('Portable版と開発版は自動起動へ登録しません。OBSより先にEXEを起動してください。')
+  const rowClass = setup ? 'setup-status-row desktop-integration-row' : 'feature-row desktop-integration-row'
+  return <div className={rowClass}>
+    <div><strong>{t('OBSドックをバックグラウンドで準備')}</strong><span>{error || note}</span></div>
+    <Toggle
+      disabled={busy || !supported || !settings}
+      checked={settings?.startWithWindows ?? false}
+      label={t(settings?.startWithWindows ? '自動起動ON' : '自動起動OFF')}
+      onChange={(value) => {
+        setBusy(true)
+        setError(null)
+        void desktop.setStartWithWindows(value)
+          .then(setSettings)
+          .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+          .finally(() => setBusy(false))
+      }}
+    />
+  </div>
 }
 
 function ServiceIcon({ service }: { service: 'obs' | 'youtube' | 'twitch' }) {
@@ -436,6 +474,7 @@ function SettingsView({ config, status, oauthStatus, oauthProgress, steamScan, o
     <section className="settings-card obs-settings-card"><div className="card-title-row"><h2>OBS WebSocket</h2><span className={`connection-label ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} />OBS {t(status.obsConnected ? '接続中' : '未接続')}</span></div><div className="connection-actions"><code>{draft.obs.url}</code><button className="secondary-button" disabled={saving} onClick={() => void attempt(onReconnect)}>{t('再接続')}</button></div><details className="settings-details"><summary>{t('接続詳細を編集')}</summary><div className="settings-details-body"><label>{t('接続URL')}<input value={draft.obs.url} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, url: event.target.value } })} /></label><label>{t('パスワード')}<input type="password" autoComplete="off" placeholder={t(draft.obs.passwordStored ? '保存済み（変更時のみ入力）' : 'Windows資格情報へ保存')} value={secrets['obs-password'] ?? ''} onChange={(event) => secret('obs-password', event.target.value)} /></label><div className="field-grid"><label>{t('開始待機（秒）')}<input type="number" value={draft.obs.startDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, startDelaySeconds: Number(event.target.value) } })} /></label><label>{t('終了待機（秒）')}<input type="number" value={draft.obs.endDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, endDelaySeconds: Number(event.target.value) } })} /></label></div><button className="primary-button" disabled={saving} onClick={() => void save()}>{t('接続設定を保存')}</button></div></details></section>
     <OAuthServiceCard status={oauthStatus.youtube} progress={oauthProgress.youtube} saving={saving} onConnect={() => void attempt(() => onOAuthConnect('youtube'))} />
     <OAuthServiceCard status={oauthStatus.twitch} progress={oauthProgress.twitch} saving={saving} onConnect={() => void attempt(() => onOAuthConnect('twitch'))} />
+    {window.obsStreamManagerDesktop && <section className="settings-card"><h2>{t('OBS連携と終了動作')}</h2><p>{t('EXEが同梱ローカルサーバーを自動起動します。利用者がNode.jsやサーバーを準備する必要はありません。画面の×は通知領域へ格納し、OBSドックを維持します。')}</p><div className="feature-list"><DesktopIntegrationControl /></div><button className="danger-outline" disabled={saving || status.streaming} onClick={() => { if (window.confirm(t('完全に終了するとOBSドックも停止します。終了しますか？'))) void window.obsStreamManagerDesktop?.quit() }}>{t('ドックも停止して完全に終了')}</button></section>}
     <section className="settings-card"><h2>{t('機能')}</h2><div className="feature-list">{featureRows.map((feature) => <div className="feature-row" key={feature.key}><div><strong>{feature.label}</strong><span>{feature.note}</span></div><Toggle disabled={saving || status.streaming} checked={draft.features[feature.key]} label={t(draft.features[feature.key] ? '有効' : '無効')} onChange={(value) => updateFeature(feature.key, value)} /></div>)}</div></section>
     <section className="settings-card"><h2>{t('OBS音声ソース名')}</h2><div className="source-chips">{Object.values(draft.sources).map((source) => <code key={source}>{source}</code>)}</div><details className="settings-details"><summary>{t('ソース名を編集')}</summary><div className="settings-details-body field-grid">{Object.entries(draft.sources).map(([key, value]) => <label key={key}>{key}<input value={value} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, [key]: event.target.value } })} /></label>)}<button className="primary-button" disabled={saving} onClick={() => void save()}>{t('ソース名を保存')}</button></div></details></section>
     <section className="settings-card"><div className="card-title-row"><h2>{t('Steam 自動検出（任意）')}</h2><span className={`connection-label ${steamScan?.libraries.length ? 'connected' : 'optional'}`}><StatusDot tone={steamScan?.libraries.length ? 'live' : steamScan ? 'inactive' : 'pending'} />{t(steamScan ? steamScan.libraries.length ? '検出済み' : 'Steam未使用' : status.streaming ? '配信後に確認' : 'スキャン中')}</span></div><p>{t('Steamがある場合だけ、インストール済みゲームを自動で一覧へ追加します。Steamがない場合も、Game Pass、GeForce NOW、Switch、単体EXEのゲームを手動追加して利用できます。')}</p><div className="feature-list"><div className="feature-row"><div><strong>{steamScan ? steamScan.libraries.length ? t('{count}本のゲーム', { count: steamScan.installed }) : t('Steamなしで利用可能') : t(status.streaming ? '配信中は自動追加を停止' : 'Steamを確認しています')}</strong><span>{steamScan ? steamScan.libraries.length ? t('{count}か所のライブラリを検出', { count: steamScan.libraries.length }) : t('ゲーム一覧の追加ボタンから手動登録できます') : t(status.streaming ? '配信終了後の再読込または再スキャンで反映します' : '見つかった場合だけ一覧へ自動反映します')}</span></div></div></div>{steamScan?.libraries.length ? <div className="source-chips">{steamScan.libraries.map((library) => <code key={library}>{library}</code>)}</div> : null}<button className="secondary-button" disabled={saving || status.streaming} onClick={() => void attempt(onSteamScan)}><RefreshCw size={14} />{t('今すぐ再スキャン')}</button><details className="settings-details"><summary>{t('未インストールの所有ゲームも同期する（任意）')}</summary><div className="settings-details-body"><label>SteamID64<input value={draft.steam.steamId64} onChange={(event) => setDraft({ ...draft, steam: { ...draft.steam, steamId64: event.target.value } })} /></label><label>Steam Web API Key<input type="password" autoComplete="off" value={secrets['steam-api-key'] ?? ''} onChange={(event) => secret('steam-api-key', event.target.value)} placeholder={t(draft.steam.apiKeyStored ? '保存済み（変更時のみ入力）' : 'Windows資格情報へ保存')} /></label><button className="primary-button" disabled={saving || status.streaming} onClick={() => void attempt(async () => { await onSave(draft, secrets); setSecrets({}); await onSteamSync() })}>{t('保存して所有ゲームも同期')}</button></div></details></section>
@@ -500,6 +539,7 @@ function FirstRunSetup({ config, status, oauthStatus, steamScan, onSaveObs, onCo
           <div className="setup-lead"><Gamepad2 size={28} /><div><h3>{t('配信準備を順番に確認します')}</h3><p>{t('Steamは必須ではありません。Game Pass、GeForce NOW、Switch、単体ゲームも手動登録できます。')}</p></div></div>
           <div className="setup-dock"><div><strong>{t('OBSブラウザドック URL')}</strong><code>{dockUrl}</code></div><button className="secondary-button" onClick={() => void attempt(copyDockUrl)}><Copy size={14} />{t(copied ? 'コピー済み' : 'コピー')}</button></div>
           <p className="setup-note">{t('OBSの「ドック」→「カスタムブラウザドック」へ、このURLを登録してください。')}</p>
+          <DesktopIntegrationControl setup />
         </div>}
         {step === 1 && <div className="setup-step">
           <div className="setup-status-row"><div><strong>OBS WebSocket</strong><span>{t('OBS 30以降の「ツール」→「WebSocketサーバー設定」で有効化します。')}</span></div><span className={`connection-label ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} />{t(status.obsConnected ? '接続中' : '未接続')}</span></div>

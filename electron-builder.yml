@@ -24,6 +24,7 @@ win:
   forceCodeSigning: false
 nsis:
   artifactName: "${productName}-Setup-${version}-${arch}.${ext}"
+  include: installer.nsh
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
