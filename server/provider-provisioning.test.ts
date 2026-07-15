@@ -36,37 +36,41 @@ describe('distributor OAuth provisioning', () => {
     const test = await harness()
     const filename = path.join(test.directory, 'provider-oauth.json')
     await writeFile(filename, JSON.stringify({
-      version: 1,
-      youtube: { clientId: 'youtube-client' },
+      version: 3,
+      youtube: { clientId: 'youtube-client', clientType: 'desktop', clientSecret: 'youtube-desktop-credential' },
       twitch: { clientId: 'twitch-client' },
     }))
 
     await expect(loadProviderOAuthBundle(filename)).resolves.toEqual({
-      youtube: { clientId: 'youtube-client' },
+      youtube: { clientId: 'youtube-client', clientSecret: 'youtube-desktop-credential' },
       twitch: { clientId: 'twitch-client' },
     })
   })
 
   it('rejects unsupported or incomplete release-time bundles', () => {
-    expect(() => parseProviderOAuthBundle({ version: 2, twitch: { clientId: 'twitch-client' } })).toThrow(/version/)
-    expect(() => parseProviderOAuthBundle({ version: 1, youtube: {} })).toThrow(/youtube.clientId/)
-    expect(() => parseProviderOAuthBundle({ version: 1, youtube: { clientId: 'youtube-client', clientSecret: 'must-not-ship' } })).toThrow(/must not contain/)
-    expect(() => parseProviderOAuthBundle({ version: 1 })).toThrow(/does not contain a provider/)
+    expect(() => parseProviderOAuthBundle({ version: 1, twitch: { clientId: 'twitch-client' } })).toThrow(/version/)
+    expect(() => parseProviderOAuthBundle({ version: 3, youtube: { clientType: 'desktop' } })).toThrow(/youtube.clientId/)
+    expect(() => parseProviderOAuthBundle({ version: 3, youtube: { clientId: 'youtube-client', clientType: 'desktop' } })).toThrow(/youtube.clientSecret/)
+    expect(() => parseProviderOAuthBundle({ version: 3, youtube: { clientId: 'youtube-client', clientType: 'web', clientSecret: 'credential' } })).toThrow(/Desktop app/)
+    expect(() => parseProviderOAuthBundle({ version: 3 })).toThrow(/does not contain a provider/)
   })
 
-  it('accepts a public YouTube client ID without a client secret', async () => {
+  it('loads distributor YouTube Desktop app credentials from the release environment', async () => {
     vi.stubEnv('OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE', '')
     vi.stubEnv('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID', 'youtube-client')
-    vi.stubEnv('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET', '')
+    vi.stubEnv('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_TYPE', 'desktop')
+    vi.stubEnv('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET', 'youtube-desktop-credential')
     vi.stubEnv('OBS_STREAM_MANAGER_TWITCH_CLIENT_ID', '')
 
-    await expect(loadDistributorOAuthCredentials()).resolves.toEqual({ youtube: { clientId: 'youtube-client' } })
+    await expect(loadDistributorOAuthCredentials()).resolves.toEqual({
+      youtube: { clientId: 'youtube-client', clientSecret: 'youtube-desktop-credential' },
+    })
   })
 
   it('persists provider configuration and preserves account links across a restart', async () => {
     const test = await harness()
     const credentials = {
-      youtube: { clientId: 'youtube-client' },
+      youtube: { clientId: 'youtube-client', clientSecret: 'youtube-desktop-credential' },
       twitch: { clientId: 'twitch-client' },
     }
     await provisionProviderOAuth(test.store, test.secrets, credentials)
@@ -74,7 +78,6 @@ describe('distributor OAuth provisioning', () => {
     test.values.set('youtube-refresh-token', 'youtube-refresh')
     test.values.set('youtube-stream-key', 'youtube-stream-key')
     test.values.set('youtube-stream-server', 'rtmps://test.youtube/live2')
-    test.values.set('youtube-client-secret', 'legacy-youtube-secret')
     test.values.set('twitch-access-token', 'twitch-access')
     test.values.set('twitch-refresh-token', 'twitch-refresh')
     test.values.set('twitch-client-secret', 'legacy-twitch-secret')
@@ -89,10 +92,10 @@ describe('distributor OAuth provisioning', () => {
     await restarted.initialize()
 
     await expect(restarted.getConfig()).resolves.toMatchObject({
-      youtube: { clientId: 'youtube-client', clientSecretStored: false, refreshTokenStored: true },
+      youtube: { clientId: 'youtube-client', clientSecretStored: true, refreshTokenStored: true },
       twitch: { clientId: 'twitch-client', accessTokenStored: true, refreshTokenStored: true, broadcasterId: 'broadcaster' },
     })
-    expect(test.values.get('youtube-client-secret')).toBe('legacy-youtube-secret')
+    expect(test.values.get('youtube-client-secret')).toBe('youtube-desktop-credential')
     expect(test.values.get('youtube-refresh-token')).toBe('youtube-refresh')
     expect(test.values.get('youtube-stream-key')).toBe('youtube-stream-key')
     expect(test.values.get('youtube-stream-server')).toBe('rtmps://test.youtube/live2')
@@ -104,7 +107,7 @@ describe('distributor OAuth provisioning', () => {
   it('invalidates old account tokens only when the distributor client changes', async () => {
     const test = await harness()
     await provisionProviderOAuth(test.store, test.secrets, {
-      youtube: { clientId: 'youtube-old' },
+      youtube: { clientId: 'youtube-old', clientSecret: 'youtube-old-credential' },
       twitch: { clientId: 'twitch-old' },
     })
     const configured = await test.store.getConfig()
@@ -122,7 +125,7 @@ describe('distributor OAuth provisioning', () => {
     })
 
     const changed = await provisionProviderOAuth(test.store, test.secrets, {
-      youtube: { clientId: 'youtube-new' },
+      youtube: { clientId: 'youtube-new', clientSecret: 'youtube-new-credential' },
       twitch: { clientId: 'twitch-new' },
     })
 
@@ -131,7 +134,7 @@ describe('distributor OAuth provisioning', () => {
     expect(test.values.has('youtube-refresh-token')).toBe(false)
     expect(test.values.has('youtube-stream-key')).toBe(false)
     expect(test.values.has('youtube-stream-server')).toBe(false)
-    expect(test.values.has('youtube-client-secret')).toBe(false)
+    expect(test.values.get('youtube-client-secret')).toBe('youtube-new-credential')
     expect(test.values.has('twitch-access-token')).toBe(false)
     expect(test.values.has('twitch-refresh-token')).toBe(false)
     expect(test.values.has('twitch-client-secret')).toBe(false)

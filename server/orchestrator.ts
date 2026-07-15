@@ -19,6 +19,7 @@ export class StreamOrchestrator {
   private obsStreamStateRevision = 0
   private warning: string | null = null
   private serviceFailures: string[] = []
+  private readonly failedServices = new Set<'youtube' | 'twitch'>()
   private partAdvancedForCurrentStream = false
 
   constructor(
@@ -68,6 +69,8 @@ export class StreamOrchestrator {
       const detection = override && override !== 'auto' ? { method: override, warnings: [] } : await this.capture.detect(profile)
       const obsWarnings = await this.obs.applyProfile(config, profile, detection.method)
       const services = await this.platforms.prepare(config, profile)
+      this.failedServices.clear()
+      for (const service of services) if (!service.ok) this.failedServices.add(service.service)
       this.serviceFailures = services.filter((service) => !service.ok).map((service) => `${service.service}: ${service.message}`)
       const thumbnail = services.find((service) => service.service === 'youtube')?.thumbnail
       const thumbnailWarning = thumbnail?.status === 'failed' || thumbnail?.status === 'not_registered' ? [thumbnail.message] : []
@@ -97,19 +100,25 @@ export class StreamOrchestrator {
       if (!this.selected || !this.method) throw new Error('先にゲームを選択してください')
       if (this.serviceFailures.length && !allowServiceFailures) throw new Error(`配信サービスの設定に失敗しています: ${this.serviceFailures.join(' / ')}`)
       const config = await this.store.getConfig()
+      if (allowServiceFailures && this.failedServices.has('youtube')) {
+        throw new Error('YouTubeの配信準備に失敗しているため、OBSへ触れずに開始を中止しました。YouTubeを再接続してゲームを選び直してください')
+      }
+      const runtimeConfig = allowServiceFailures && this.failedServices.has('twitch')
+        ? { ...config, features: { ...config.features, twitch: false } }
+        : config
       const selected = this.selected
       const method = this.method
       let ownsCurrentStream = false
       let obsStartCompleted = false
       let lastManagedStateRevision = this.obsStreamStateRevision
       try {
-        const warnings = await this.obs.start(config, selected, this.captureSource(selected, method))
+        const warnings = await this.obs.start(runtimeConfig, selected, this.captureSource(selected, method))
         obsStartCompleted = true
         lastManagedStateRevision = this.obsStreamStateRevision
         ownsCurrentStream = this.obs.ownsCurrentStream()
-        await this.platforms.startYouTubeBroadcast(config, selected)
-        await this.platforms.startComments(config)
-        if (!await this.obs.isStreaming(config)) throw new Error('外部サービスの開始処理中にOBS配信出力が停止しました')
+        await this.platforms.startYouTubeBroadcast(runtimeConfig, selected)
+        await this.platforms.startComments(runtimeConfig)
+        if (!await this.obs.isStreaming(runtimeConfig)) throw new Error('外部サービスの開始処理中にOBS配信出力が停止しました')
         await this.advancePartNumber(selected).catch((error) => warnings.push(`次回のPart番号を保存できませんでした: ${error instanceof Error ? error.message : String(error)}`))
         this.platforms.invalidateLiveStatus()
         this.markManagedObsState(true)
@@ -122,20 +131,20 @@ export class StreamOrchestrator {
         if (ownsCurrentStream) {
           let streamStopped = false
           try {
-            const obsWarnings = await this.obs.stop(config, selected)
+            const obsWarnings = await this.obs.rollbackStart(runtimeConfig, selected)
             rollbackWarnings.push(...obsWarnings.map((warning) => `OBS: ${warning}`))
-            streamStopped = !await this.obs.isStreaming(config)
+            streamStopped = !await this.obs.isStreaming(runtimeConfig)
             streamStateAfterFailure = !streamStopped
             if (!streamStopped) rollbackWarnings.push('OBS: 配信出力が継続しているためYouTube配信枠を終了していません')
           } catch (rollbackError) {
             rollbackWarnings.push(`OBS: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`)
-            streamStateAfterFailure = await this.obs.isStreaming(config).catch(() => null)
+            streamStateAfterFailure = await this.obs.isStreaming(runtimeConfig).catch(() => null)
           }
           if (streamStopped) {
-            await this.platforms.completeYouTubeBroadcast(config, selected).catch((rollbackError) => rollbackWarnings.push(`YouTube: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`))
+            await this.platforms.completeYouTubeBroadcast(runtimeConfig, selected).catch((rollbackError) => rollbackWarnings.push(`YouTube: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`))
           }
         } else if (obsStartCompleted) {
-          streamStateAfterFailure = await this.obs.isStreaming(config).catch(() => null)
+          streamStateAfterFailure = await this.obs.isStreaming(runtimeConfig).catch(() => null)
         }
         if (streamStateAfterFailure === null) {
           if (this.obsStreamStateRevision === lastManagedStateRevision) this.pendingObsStreamState = null

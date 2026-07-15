@@ -57,6 +57,7 @@ export class PlatformServices {
   private youtubeChatId: string | null = null
   private youtubePageToken: string | undefined
   private youtubeToken: { value: string; expiresAt: number; credentialKey: string } | null = null
+  private youtubeTokenRefresh: { credentialKey: string; promise: Promise<string> } | null = null
   private twitchToken: { value: string; expiresAt: number; credentialKey: string } | null = null
   private twitchTokenRefresh: { credentialKey: string; promise: Promise<string> } | null = null
   private commentsGeneration = 0
@@ -146,13 +147,32 @@ export class PlatformServices {
 
   private async youtubeAccessToken(config: AppConfig): Promise<string> {
     const refreshToken = this.secrets.get('youtube-refresh-token')
-    if (!config.youtube.clientId || !refreshToken) throw new Error('YouTube OAuth が未設定です')
-    const credentialKey = crypto.createHash('sha256').update(`${config.youtube.clientId}\0${refreshToken}`).digest('hex')
+    const clientSecret = this.secrets.get('youtube-client-secret')
+    if (!config.youtube.clientId || !refreshToken || !clientSecret) throw new Error('YouTube OAuth が未設定です。アプリを最新版へ更新し、再接続してください')
+    const credentialKey = crypto.createHash('sha256').update(`${config.youtube.clientId}\0${refreshToken}\0${clientSecret}`).digest('hex')
     if (this.youtubeToken?.credentialKey === credentialKey && this.youtubeToken.expiresAt > Date.now() + 60_000) return this.youtubeToken.value
-    const body = new URLSearchParams({ client_id: config.youtube.clientId, refresh_token: refreshToken, grant_type: 'refresh_token' })
-    const token = await apiJson<{ access_token: string; expires_in?: number }>('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
-    this.youtubeToken = { value: token.access_token, expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000, credentialKey }
-    return token.access_token
+    if (this.youtubeTokenRefresh?.credentialKey === credentialKey) return this.youtubeTokenRefresh.promise
+    const promise = (async () => {
+      const refreshStartedAt = Date.now()
+      const body = new URLSearchParams({ client_id: config.youtube.clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' })
+      const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
+      const raw = await response.text()
+      let token: { access_token?: string; expires_in?: number; error?: string; error_description?: string } = {}
+      try { token = JSON.parse(raw) as typeof token } catch { /* retain the HTTP response below */ }
+      if (!response.ok || !token.access_token) {
+        if ([400, 401].includes(response.status) && ['invalid_client', 'invalid_grant', 'invalid_request'].includes(token.error ?? '')) {
+          this.secrets.set('youtube-oauth-health', 'reconnect_required')
+        }
+        throw new Error(`${response.status} ${raw || response.statusText}`)
+      }
+      this.secrets.set('youtube-oauth-health', '')
+      this.youtubeToken = { value: token.access_token, expiresAt: refreshStartedAt + (token.expires_in ?? 3600) * 1000, credentialKey }
+      return token.access_token
+    })()
+    this.youtubeTokenRefresh = { credentialKey, promise }
+    try { return await promise } finally {
+      if (this.youtubeTokenRefresh?.promise === promise) this.youtubeTokenRefresh = null
+    }
   }
 
   private async applyYouTubeThumbnail(accessToken: string, videoId: string, profile: GameProfile): Promise<ThumbnailPreparation> {

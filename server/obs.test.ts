@@ -312,6 +312,7 @@ describe('ObsController recording fallbacks', () => {
       call: vi.fn(async (request: string, data?: unknown) => {
         calls.push({ request, data })
         if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '10_GAME_PC' }
         if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
         if (request === 'GetStreamServiceSettings') return service
         if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
@@ -345,6 +346,33 @@ describe('ObsController recording fallbacks', () => {
       streamServiceType: 'rtmp_common',
       streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
     })
+    expect(calls.filter(({ request }) => request === 'SetCurrentProgramScene').at(-1)?.data).toEqual({ sceneName: '10_GAME_PC' })
+  })
+
+  it('rolls back a failed publication without switching to the ending scene', async () => {
+    const scenes: string[] = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'CallVendorRequest') return { responseData: { success: true } }
+        if (request === 'SetCurrentProgramScene') scenes.push((data as { sceneName: string }).sceneName)
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake; rollbackScene: string | null }).obs = fake
+    ;(controller as unknown as { rollbackScene: string | null }).rollbackScene = '10_GAME_PC'
+    const profile = structuredClone(starterProfiles[0])
+
+    await expect(controller.rollbackStart(structuredClone(defaultConfig), profile)).resolves.toEqual([])
+    expect(scenes).toEqual(['10_GAME_PC'])
+    expect(scenes).not.toContain(profile.obs.endingScene)
+    expect(fake.call).not.toHaveBeenCalledWith('StopStream')
+    expect(fake.call).not.toHaveBeenCalledWith('StopRecord')
+    expect(fake.call).not.toHaveBeenCalledWith('StopReplayBuffer')
   })
 
   it('disables an existing ducking filter when the selected profile requests zero dB', async () => {

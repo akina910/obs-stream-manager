@@ -110,6 +110,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
       start: vi.fn().mockResolvedValue([]),
+      rollbackStart: vi.fn().mockResolvedValue([]),
       stop: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(false),
       ownsCurrentStream: vi.fn().mockReturnValue(true),
@@ -131,7 +132,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     await orchestrator.select(profile.id, 'window')
     await expect(orchestrator.start()).rejects.toThrow('YouTube transition failed')
 
-    expect(obs.stop).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id }))
+    expect(obs.rollbackStart).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id }))
     expect(platforms.completeYouTubeBroadcast).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id }))
     expect(platforms.stopComments).toHaveBeenCalledOnce()
     expect(logger.write).toHaveBeenCalledWith('stream.start_failed', expect.objectContaining({ error: 'YouTube transition failed' }))
@@ -141,12 +142,80 @@ describe('StreamOrchestrator stream startup rollback', () => {
     vi.mocked(obs.isStreaming).mockResolvedValue(true)
     await expect(orchestrator.stop()).resolves.toEqual(expect.arrayContaining([expect.stringContaining('YouTube配信枠を終了していません')]))
     expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+  })
 
-    vi.mocked(obs.stop).mockClear()
-    vi.mocked(obs.ownsCurrentStream).mockReturnValue(false)
+  it('does not roll back a stream that was already active before the managed start attempt', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue([]),
+      start: vi.fn().mockResolvedValue([]),
+      rollbackStart: vi.fn().mockResolvedValue([]),
+      isStreaming: vi.fn().mockResolvedValue(true),
+      ownsCurrentStream: vi.fn().mockReturnValue(false),
+    } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      startYouTubeBroadcast: vi.fn().mockRejectedValue(new Error('YouTube transition failed')),
+      completeYouTubeBroadcast: vi.fn().mockResolvedValue(undefined),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      stopComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await orchestrator.select(profile.id, 'window')
     await expect(orchestrator.start()).rejects.toThrow('YouTube transition failed')
-    expect(obs.stop).not.toHaveBeenCalled()
+
+    expect(obs.ownsCurrentStream).toHaveBeenCalledOnce()
+    expect(obs.rollbackStart).not.toHaveBeenCalled()
     expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+    await expect(obs.isStreaming(config)).resolves.toBe(true)
+  })
+
+  it('does not touch OBS when YouTube preparation already failed', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue([]),
+      start: vi.fn().mockResolvedValue([]),
+      rollbackStart: vi.fn().mockResolvedValue([]),
+      isStreaming: vi.fn().mockResolvedValue(false),
+      ownsCurrentStream: vi.fn().mockReturnValue(false),
+    } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: false, message: 'client_secret is missing' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      startYouTubeBroadcast: vi.fn(),
+      startComments: vi.fn(),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await orchestrator.select(profile.id, 'window')
+    await expect(orchestrator.start()).rejects.toThrow('配信サービスの設定に失敗')
+    await expect(orchestrator.start(true)).rejects.toThrow('OBSへ触れずに開始を中止')
+
+    expect(obs.start).not.toHaveBeenCalled()
+    expect(obs.rollbackStart).not.toHaveBeenCalled()
+    expect(platforms.startYouTubeBroadcast).not.toHaveBeenCalled()
   })
 
   it('does not silently retry external startup after a failed managed start', async () => {
@@ -160,7 +229,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
       start: vi.fn().mockResolvedValue([]),
-      stop: vi.fn().mockResolvedValue([]),
+      rollbackStart: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(true),
       ownsCurrentStream: vi.fn().mockReturnValue(true),
     } as unknown as ObsController

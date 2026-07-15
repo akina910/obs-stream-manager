@@ -107,6 +107,8 @@ try {
   $results.closeKeepsDockAlive = [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) -and [bool](Get-Process -Id $primary.Id -ErrorAction SilentlyContinue)
 
   $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
+  $oauthStatus = Invoke-RestMethod "http://127.0.0.1:$port/api/oauth/status" -TimeoutSec 10
+  $results.providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
   $bootstrap.config.obs.startDelaySeconds = 7
   $bootstrap.config.ui.language = 'en'
   $saveBody = @{ config = $bootstrap.config; secrets = @{ 'obs-password' = $secretMarker } } | ConvertTo-Json -Depth 30
@@ -137,6 +139,7 @@ try {
   $results.restartPersistence = $restarted.config.obs.startDelaySeconds -eq 7 -and $restarted.config.obs.passwordStored
   $results.languagePersistence = $restarted.config.ui.language -eq 'en'
 
+  $restarted.config.youtube.clientId = ''
   $clearBody = @{ config = $restarted.config; secrets = @{ 'obs-password' = '' } } | ConvertTo-Json -Depth 30
   [void](Invoke-RestMethod "http://127.0.0.1:$port/api/config" -Method Put -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($clearBody)) -TimeoutSec 10)
   Stop-TestApp

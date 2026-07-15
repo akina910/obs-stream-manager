@@ -1,9 +1,11 @@
 {
-  "version": 1,
+  "version": 3,
   "youtube": {
-    "clientId": "release-time-google-public-client-id"
+    "clientId": "YOUR_GOOGLE_CLIENT_ID",
+    "clientType": "desktop",
+    "clientSecret": "YOUR_GOOGLE_DESKTOP_CLIENT_CREDENTIAL"
   },
   "twitch": {
-    "clientId": "release-time-twitch-client-id"
+    "clientId": "YOUR_TWITCH_CLIENT_ID"
   }
 }

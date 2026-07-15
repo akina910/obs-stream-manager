@@ -44,10 +44,31 @@ describe('OAuthManager one-button authorization', () => {
     const configured = structuredClone(defaultConfig)
     configured.youtube.clientId = 'youtube-public-client'
     test.setConfig(configured)
+    test.secretValues.set('youtube-client-secret', 'youtube-desktop-credential')
     await expect(test.oauth.status()).resolves.toMatchObject({ youtube: { stage: 'ready', appConfigured: true } })
 
     await test.oauth.start('youtube', 'http://127.0.0.1:4417')
     await expect(test.oauth.status()).resolves.toMatchObject({ youtube: { stage: 'authorizing', authorizationInProgress: true } })
+  })
+
+  it('does not report YouTube as connected after a token refresh requires reconnection', async () => {
+    const test = harness()
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-public-client'
+    configured.youtube.refreshTokenStored = true
+    test.setConfig(configured)
+    test.secretValues.set('youtube-client-secret', 'youtube-desktop-credential')
+    test.secretValues.set('youtube-refresh-token', 'youtube-refresh')
+    test.secretValues.set('youtube-oauth-health', 'reconnect_required')
+
+    await expect(test.oauth.status()).resolves.toMatchObject({
+      youtube: {
+        stage: 'partial',
+        refreshTokenStored: true,
+        accountLinked: false,
+        detail: expect.stringContaining('再接続'),
+      },
+    })
   })
 
   it('uses the OS secret store as connection truth and exposes incomplete Twitch state', async () => {
@@ -65,6 +86,7 @@ describe('OAuthManager one-button authorization', () => {
     })
 
     test.secretValues.set('youtube-refresh-token', 'youtube-refresh')
+    test.secretValues.set('youtube-client-secret', 'youtube-desktop-credential')
     test.secretValues.set('twitch-access-token', 'twitch-access')
     test.secretValues.set('twitch-refresh-token', 'twitch-refresh')
     configured.twitch.refreshTokenStored = true
@@ -77,11 +99,12 @@ describe('OAuthManager one-button authorization', () => {
     })
   })
 
-  it('starts and exchanges Google desktop OAuth with PKCE as a public client', async () => {
+  it('starts Google desktop OAuth with PKCE and exchanges using the provisioned app credential', async () => {
     const test = harness()
     const configured = structuredClone(defaultConfig)
     configured.youtube.clientId = 'youtube-public-client'
     test.setConfig(configured)
+    test.secretValues.set('youtube-client-secret', 'youtube-desktop-credential')
     const started = await test.oauth.start('youtube', 'http://127.0.0.1:4417')
     expect(started.mode).toBe('redirect')
     if (started.mode !== 'redirect') throw new Error('Expected redirect mode')
@@ -107,11 +130,11 @@ describe('OAuthManager one-button authorization', () => {
     const tokenBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(tokenBody.get('client_id')).toBe('youtube-public-client')
     expect(tokenBody.get('code_verifier')).toBeTruthy()
-    expect(tokenBody.has('client_secret')).toBe(false)
+    expect(tokenBody.get('client_secret')).toBe('youtube-desktop-credential')
     expect(test.secretValues.get('youtube-refresh-token')).toBe('youtube-refresh')
     expect(test.secretValues.has('youtube-stream-key')).toBe(false)
     expect(test.secretValues.has('youtube-stream-server')).toBe(false)
-    expect(test.config().youtube).toMatchObject({ refreshTokenStored: true, clientSecretStored: false, broadcastId: '' })
+    expect(test.config().youtube).toMatchObject({ refreshTokenStored: true, clientSecretStored: true, broadcastId: '' })
   })
 
   it('does not start a YouTube flow when the distributor client ID is absent', async () => {

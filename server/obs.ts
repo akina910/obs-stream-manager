@@ -11,6 +11,7 @@ export class ObsController {
   private readonly obs = new OBSWebSocket()
   private connected = false
   private streamServiceManaged = false
+  private rollbackScene: string | null = null
   private readonly streamStateListeners = new Set<(active: boolean) => void>()
   private started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
 
@@ -287,6 +288,9 @@ export class ObsController {
     const active = await this.obs.call('GetSourceActive', { sourceName: selectedSource }).catch(() => null)
     if (!active?.videoActive) throw new Error(`キャプチャ映像「${selectedSource}」を確認できないため、配信を開始しません`)
 
+    const previousScene = await this.obs.call('GetCurrentProgramScene')
+      .then(({ currentProgramSceneName }) => currentProgramSceneName)
+      .catch(() => profile.obs.sceneName)
     await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.startingScene })
     const warnings: string[] = []
     const startedNow = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false }
@@ -333,6 +337,7 @@ export class ObsController {
       await wait(config.obs.startDelaySeconds * 1000)
       if (!(await this.obs.call('GetStreamStatus')).outputActive) throw new Error('OBS配信出力が開始直後に停止しました。OBSログを確認してください')
       await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.sceneName })
+      this.rollbackScene = previousScene
       return warnings
     } catch (error) {
       let rollbackStreamStopped = true
@@ -358,16 +363,16 @@ export class ObsController {
       if (startedNow.sourceRecord) { this.started.sourceRecord = false; this.started.sourceRecordSource = null }
       if (startedNow.replay) this.started.replay = false
       if (startedNow.record) this.started.record = false
+      await this.obs.call('SetCurrentProgramScene', { sceneName: previousScene })
+        .catch((restoreError) => warnings.push(`開始前のOBSシーンへ復元できませんでした: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`))
+      this.rollbackScene = null
       const message = error instanceof Error ? error.message : String(error)
       throw new Error(warnings.length ? `${message} / 先行警告: ${warnings.join(' / ')}` : message, { cause: error })
     }
   }
 
-  async stop(config: AppConfig, profile: GameProfile | null): Promise<string[]> {
-    await this.connect(config)
+  private async stopOutputs(): Promise<string[]> {
     const warnings: string[] = []
-    await this.obs.call('SetCurrentProgramScene', { sceneName: profile?.obs.endingScene ?? '90_ENDING' })
-    await wait(config.obs.endDelaySeconds * 1000)
     const [stream, record, replay] = await Promise.all([
       this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.getReplayBufferStatus(),
     ])
@@ -392,6 +397,61 @@ export class ObsController {
       await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     }
     this.started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
+    return warnings
+  }
+
+  private async rollbackStartedOutputs(): Promise<string[]> {
+    const warnings: string[] = []
+    if (this.started.sourceRecord && this.started.sourceRecordSource) {
+      await this.callVendor('source-record', 'record_stop', { source: this.started.sourceRecordSource })
+        .catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    if (this.started.vertical) {
+      await this.callVertical('stop_recording')
+        .catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    if (this.started.replay) {
+      await this.obs.call('StopReplayBuffer')
+        .catch((error) => warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    if (this.started.record) {
+      await this.obs.call('StopRecord')
+        .catch((error) => warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    let streamStopped = !this.started.stream
+    if (this.started.stream) {
+      try {
+        await this.obs.call('StopStream')
+        streamStopped = await this.waitForStreamInactive()
+        if (!streamStopped) warnings.push('OBS配信出力の停止を確認できませんでした')
+      } catch (error) {
+        warnings.push(`配信を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+        streamStopped = await this.waitForStreamInactive().catch(() => false)
+      }
+    }
+    if (streamStopped) {
+      await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    this.started = { stream: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
+    return warnings
+  }
+
+  async rollbackStart(config: AppConfig, profile: GameProfile): Promise<string[]> {
+    await this.connect(config)
+    const warnings = await this.rollbackStartedOutputs()
+    const sceneName = this.rollbackScene ?? profile.obs.sceneName
+    await this.obs.call('SetCurrentProgramScene', { sceneName })
+      .catch((error) => warnings.push(`開始前のOBSシーンへ復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    this.rollbackScene = null
+    return warnings
+  }
+
+  async stop(config: AppConfig, profile: GameProfile | null): Promise<string[]> {
+    await this.connect(config)
+    await this.obs.call('SetCurrentProgramScene', { sceneName: profile?.obs.endingScene ?? '90_ENDING' })
+    await wait(config.obs.endDelaySeconds * 1000)
+    const warnings = await this.stopOutputs()
+    this.rollbackScene = null
     return warnings
   }
 

@@ -612,6 +612,7 @@ export default function App() {
   const oauthPopup = useRef<Window | null>(null)
   const oauthStatusRequest = useRef(0)
   const previousOAuthStatus = useRef<OAuthConnectionStatuses | null>(null)
+  const selectedServiceResults = useRef<Array<{ service: OAuthProvider; ok: boolean; message: string }>>([])
   const language = config?.ui.language ?? 'ja'
   const t = useMemo(() => createTranslator(language), [language])
 
@@ -672,6 +673,7 @@ export default function App() {
     if (wasStreaming.current && !streaming) void api.profiles().then(setProfiles).catch(() => undefined)
     wasStreaming.current = streaming
   }, [status?.streaming])
+  useEffect(() => { if (!status?.selectedGameId) selectedServiceResults.current = [] }, [status?.selectedGameId])
   useEffect(() => { const load = () => void loadOAuthStatus().catch(() => undefined); const visible = () => { if (document.visibilityState === 'visible') load() }; window.addEventListener('focus', load); document.addEventListener('visibilitychange', visible); return () => { window.removeEventListener('focus', load); document.removeEventListener('visibilitychange', visible) } }, [loadOAuthStatus])
   useEffect(() => { const timer = window.setInterval(() => void loadOAuthStatus().catch(() => undefined), oauthPollingInterval); return () => window.clearInterval(timer) }, [loadOAuthStatus, oauthPollingInterval])
   useEffect(() => { if (!status?.streaming) return; const load = () => void api.comments().then(setComments).catch(() => undefined); load(); const timer = window.setInterval(load, 3_000); return () => window.clearInterval(timer) }, [status?.streaming])
@@ -694,15 +696,18 @@ export default function App() {
   const run = async (operation: () => Promise<void>) => { if (actionLock.current) return; actionLock.current = true; setActionBusy(true); try { await operation() } catch (error) { setToast({ kind: 'error', text: error instanceof Error ? error.message : String(error) }) } finally { const latest = await api.status().catch(() => null); if (latest) setStatus(latest); actionLock.current = false; setActionBusy(false) } }
   const selectGame = (profile: GameProfile, method?: CaptureMethod) => {
     if (activeOperation) { setToast({ kind: 'warning', text: '配信中はゲームを切り替えられません' }); return }
-    void run(async () => { const result = await api.select(profile.id, method); setProfiles((current) => current.map((item) => item.id === profile.id ? result.profile : item)); setToast(result.warnings[0] ? { kind: 'warning', text: result.warnings[0] } : { kind: 'success', text: '{game}を適用しました', values: { game: profile.displayName } }) })
+    void run(async () => { const result = await api.select(profile.id, method); selectedServiceResults.current = result.services; setProfiles((current) => current.map((item) => item.id === profile.id ? result.profile : item)); setToast(result.warnings[0] ? { kind: 'warning', text: result.warnings[0] } : { kind: 'success', text: '{game}を適用しました', values: { game: profile.displayName } }) })
   }
   const toggleFavorite = (profile: GameProfile) => {
     if (activeOperation) { setToast({ kind: 'warning', text: '配信中はゲーム設定を変更できません' }); return }
     void run(async () => { const saved = await api.saveProfile({ ...profile, favorite: !profile.favorite }); setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item)); setToast({ kind: 'success', text: saved.favorite ? 'お気に入りに追加しました' : 'お気に入りから外しました' }) })
   }
   const start = () => void run(async () => {
-    let result: Awaited<ReturnType<typeof api.start>>
-    try { result = await api.start() } catch (error) { const message = error instanceof Error ? error.message : String(error); if (message.includes('配信サービスの設定に失敗')) { if (!window.confirm(`${t(message)}\n\n${t('利用できる配信先だけで続行しますか？')}`)) throw error; result = await api.start(true) } else throw error }
+    const failures = selectedServiceResults.current.filter((service) => !service.ok)
+    const twitchFailure = failures.find((service) => service.service === 'twitch')
+    const canContinueYouTubeOnly = Boolean(twitchFailure) && failures.every((service) => service.service === 'twitch')
+    if (canContinueYouTubeOnly && !window.confirm(`${t('Twitchの配信準備に失敗しています: {error}', { error: twitchFailure?.message ?? '' })}\n\n${t('YouTubeだけで続行しますか？')}`)) return
+    const result = await api.start(canContinueYouTubeOnly)
     setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信と録画を開始しました' })
   })
   const stop = () => void run(async () => { const result = await api.stop(); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信を終了しました' }) })

@@ -69,9 +69,10 @@ describe('PlatformServices Twitch token management', () => {
 })
 
 describe('PlatformServices YouTube token management', () => {
-  it('refreshes an installed-app token as a public client without a client secret', async () => {
+  it('refreshes an installed-app token with the provisioned Desktop app credential', async () => {
     const secrets = new Map([
       ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-desktop-credential'],
     ])
     const secretStore = {
       get: vi.fn((name: string) => secrets.get(name) ?? null),
@@ -91,7 +92,30 @@ describe('PlatformServices YouTube token management', () => {
 
     const refreshBody = fetchMock.mock.calls[0]?.[1]?.body as URLSearchParams
     expect(refreshBody.get('client_id')).toBe('youtube-client-id')
-    expect(refreshBody.has('client_secret')).toBe(false)
+    expect(refreshBody.get('client_secret')).toBe('youtube-desktop-credential')
+    expect(secrets.get('youtube-oauth-health')).toBe('')
+  })
+
+  it('marks stored YouTube credentials for reconnection when Google rejects the client type', async () => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'stale-desktop-credential'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: 'invalid_request',
+      error_description: 'client_secret is missing.',
+    }), { status: 400, headers: { 'content-type': 'application/json' } }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'web-client-used-by-mistake'
+    const accessToken = (platforms as unknown as { youtubeAccessToken: (value: typeof configured) => Promise<string> }).youtubeAccessToken.bind(platforms)
+
+    await expect(accessToken(configured)).rejects.toThrow('client_secret is missing')
+    expect(secrets.get('youtube-oauth-health')).toBe('reconnect_required')
   })
 
   it('stores the bound YouTube ingestion key in the OS secret store during preparation', async () => {
@@ -189,7 +213,10 @@ describe('PlatformServices YouTube token management', () => {
   })
 
   it('creates and binds a reusable YouTube stream when the channel has none', async () => {
-    const values = new Map([['youtube-refresh-token', 'youtube-refresh']])
+    const values = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-desktop-credential'],
+    ])
     const secretStore = {
       get: vi.fn((name: string) => values.get(name) ?? null),
       set: vi.fn((name: string, value: string) => { values.set(name, value) }),

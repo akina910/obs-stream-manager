@@ -5,11 +5,15 @@ import type { SecretStore } from './secrets.js'
 import type { DataStore } from './storage.js'
 
 export type ProviderOAuthCredentials = {
-  youtube?: { clientId: string }
+  youtube?: { clientId: string; clientSecret: string }
   twitch?: { clientId: string }
 }
 
-type ProviderOAuthBundle = ProviderOAuthCredentials & { version: 1 }
+type ProviderOAuthBundle = {
+  version: 3
+  youtube?: { clientId: string; clientType: 'desktop'; clientSecret: string }
+  twitch?: { clientId: string }
+}
 
 export function clearYouTubeStreamSecrets(secrets: SecretStore): void {
   secrets.set('youtube-stream-key', '')
@@ -24,13 +28,14 @@ function requiredString(value: unknown, field: string): string {
 export function parseProviderOAuthBundle(value: unknown): ProviderOAuthCredentials {
   if (!value || typeof value !== 'object') throw new Error('Provider OAuth bundle must be a JSON object')
   const bundle = value as Partial<ProviderOAuthBundle>
-  if (bundle.version !== 1) throw new Error('Unsupported provider OAuth bundle version')
+  if (bundle.version !== 3) throw new Error('Unsupported provider OAuth bundle version')
   if (!bundle.youtube && !bundle.twitch) throw new Error('Provider OAuth bundle does not contain a provider')
-  if (bundle.youtube && 'clientSecret' in bundle.youtube) throw new Error('Provider OAuth bundle must not contain youtube.clientSecret')
+  if (bundle.youtube && bundle.youtube.clientType !== 'desktop') throw new Error('Provider OAuth bundle must use a Google Desktop app client')
   return {
     youtube: bundle.youtube
       ? {
           clientId: requiredString(bundle.youtube.clientId, 'youtube.clientId'),
+          clientSecret: requiredString(bundle.youtube.clientSecret, 'youtube.clientSecret'),
         }
       : undefined,
     twitch: bundle.twitch
@@ -48,10 +53,14 @@ export async function loadDistributorOAuthCredentials(): Promise<ProviderOAuthCr
   if (filename) return loadProviderOAuthBundle(filename)
 
   const youtubeClientId = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID?.trim()
+  const youtubeClientType = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_TYPE?.trim()
+  const youtubeClientSecret = process.env.OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET?.trim()
   const twitchClientId = process.env.OBS_STREAM_MANAGER_TWITCH_CLIENT_ID?.trim()
   if (!youtubeClientId && !twitchClientId) return null
+  if (youtubeClientId && youtubeClientType !== 'desktop') throw new Error('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_TYPE must be desktop')
+  if (youtubeClientId && !youtubeClientSecret) throw new Error('OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET is required for the Google Desktop app client')
   return {
-    youtube: youtubeClientId ? { clientId: youtubeClientId } : undefined,
+    youtube: youtubeClientId ? { clientId: youtubeClientId, clientSecret: youtubeClientSecret! } : undefined,
     twitch: twitchClientId ? { clientId: twitchClientId } : undefined,
   }
 }
@@ -66,11 +75,8 @@ export async function provisionProviderOAuth(
   const twitchClientChanged = Boolean(credentials.twitch && credentials.twitch.clientId !== current.twitch.clientId)
 
   if (youtubeClientChanged) {
-    // Delete obsolete confidential-client material only as part of an actual
-    // distributor client migration. Repeating this on every startup can destroy
-    // credentials before a replacement public client has been validated.
-    secrets.set('youtube-client-secret', '')
     secrets.set('youtube-refresh-token', '')
+    secrets.set('youtube-oauth-health', '')
     clearYouTubeStreamSecrets(secrets)
   }
   if (twitchClientChanged) {
@@ -79,13 +85,15 @@ export async function provisionProviderOAuth(
     secrets.set('twitch-refresh-token', '')
   }
 
+  if (credentials.youtube) secrets.set('youtube-client-secret', credentials.youtube.clientSecret)
+
   return store.saveConfig({
     ...current,
     youtube: credentials.youtube
       ? {
           ...current.youtube,
           clientId: credentials.youtube.clientId,
-          clientSecretStored: false,
+          clientSecretStored: true,
           refreshTokenStored: youtubeClientChanged ? false : current.youtube.refreshTokenStored,
           broadcastId: youtubeClientChanged ? '' : current.youtube.broadcastId,
         }
