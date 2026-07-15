@@ -198,6 +198,10 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .control-panel { position: sticky; z-index: 31; bottom: 0; padding: 11px 16px 13px; display: flex; flex-direction: column; gap: 9px; border-top: 1px solid #232938; background: rgba(16, 19, 27, .98); box-shadow: 0 -8px 24px rgba(0, 0, 0, .4); backdrop-filter: blur(14px); }
 .selection-summary { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .selection-summary.has-selection { padding: 9px 10px; border: 1px solid rgba(111, 141, 255, .65); border-radius: 11px; background: linear-gradient(100deg, rgba(111, 141, 255, .16), rgba(111, 141, 255, .04)); box-shadow: inset 3px 0 var(--accent); }
+.empty-selection-action { appearance: none; width: 100%; padding: 8px 9px; border: 1px dashed var(--border-strong); border-radius: 11px; color: var(--text); background: rgba(255, 255, 255, .015); text-align: left; cursor: pointer; }
+.empty-selection-action:hover { border-color: var(--accent); background: rgba(111, 141, 255, .08); }
+.empty-selection-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.empty-selection-action:hover .empty-tile { color: var(--accent); border-color: var(--accent); }
 .selection-summary-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .selection-summary strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .selection-summary strong.muted { color: var(--muted); }
@@ -256,6 +260,21 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .source-chips { display: flex; gap: 6px; flex-wrap: wrap; }
 
 label { min-width: 0; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.template-field { min-width: 0; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.field-label-with-help { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.field-label-with-help > label { margin: 0; display: inline; }
+.template-help { position: relative; }
+.template-help summary { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 99px; color: var(--muted); cursor: help; list-style: none; }
+.template-help summary::-webkit-details-marker { display: none; }
+.template-help summary:hover, .template-help summary:focus-visible { color: var(--accent); background: rgba(111, 141, 255, .12); outline: none; }
+.template-help-popover { position: absolute; z-index: 80; left: -8px; bottom: calc(100% + 6px); width: min(300px, calc(100vw - 48px)); padding: 10px 11px; display: none; border: 1px solid var(--border-strong); border-radius: 9px; color: var(--text-sub); background: #171b25; box-shadow: 0 12px 32px rgba(0, 0, 0, .5); font-size: 11px; font-weight: 400; line-height: 1.45; }
+.template-help[open] .template-help-popover, .template-help:hover .template-help-popover, .template-help:focus-within .template-help-popover { display: block; }
+.template-help-popover > strong { display: block; margin-bottom: 6px; color: var(--text); font-size: 12px; }
+.template-help-popover > div { margin-top: 5px; display: grid; grid-template-columns: 74px minmax(0, 1fr); align-items: start; gap: 8px; }
+.template-help-popover code { padding: 2px 5px; border-radius: 4px; color: #c4ceff; background: rgba(111, 141, 255, .18); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.template-help-popover p { margin: 6px 0 0; color: var(--muted); }
+.template-preview { overflow: hidden; color: var(--dim); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.field-hint { color: var(--dim); font-size: 10px; font-weight: 400; }
 input, select, textarea { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-mid); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface-1); font-size: 13px; font-weight: 400; }
 input, select { height: 36px; }
 textarea { min-height: 78px; resize: vertical; line-height: 1.5; }

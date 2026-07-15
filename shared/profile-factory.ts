@@ -34,6 +34,6 @@ export function createGameProfile(id: string, displayName: string, platformGroup
     twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: displayName, tags: ['日本語'] },
     audio: { microphoneDb: -3, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
     recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: true, verticalRecording: true },
-    state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null },
+    state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null, nextPartNumber: 1 },
   }
 }

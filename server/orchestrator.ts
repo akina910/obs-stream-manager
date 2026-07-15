@@ -19,6 +19,7 @@ export class StreamOrchestrator {
   private obsStreamStateRevision = 0
   private warning: string | null = null
   private serviceFailures: string[] = []
+  private partAdvancedForCurrentStream = false
 
   constructor(
     private readonly store: DataStore,
@@ -42,6 +43,21 @@ export class StreamOrchestrator {
     if (method === 'window') return profile.capture.windowSourceName ?? profile.capture.localSourceName
     if (method === 'display') return profile.capture.displaySourceName
     return profile.capture.localSourceName
+  }
+
+  private usesPartVariable(profile: GameProfile): boolean {
+    return profile.youtube.titleTemplate.includes('{part}') || profile.twitch.titleTemplate.includes('{part}')
+  }
+
+  private async advancePartNumber(profile: GameProfile): Promise<void> {
+    if (this.partAdvancedForCurrentStream || !this.usesPartVariable(profile)) return
+    const latest = await this.store.getProfile(profile.id) ?? profile
+    const updated = await this.store.saveProfile({
+      ...latest,
+      state: { ...latest.state, nextPartNumber: Math.min(9999, latest.state.nextPartNumber + 1) },
+    })
+    if (this.selected?.id === updated.id) this.selected = updated
+    this.partAdvancedForCurrentStream = true
   }
 
   async select(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
@@ -94,6 +110,7 @@ export class StreamOrchestrator {
         await this.platforms.startYouTubeBroadcast(config, selected)
         await this.platforms.startComments(config)
         if (!await this.obs.isStreaming(config)) throw new Error('外部サービスの開始処理中にOBS配信出力が停止しました')
+        await this.advancePartNumber(selected).catch((error) => warnings.push(`次回のPart番号を保存できませんでした: ${error instanceof Error ? error.message : String(error)}`))
         this.platforms.invalidateLiveStatus()
         this.markManagedObsState(true)
         this.warning = warnings[0] ?? this.serviceFailures[0] ?? null
@@ -171,6 +188,7 @@ export class StreamOrchestrator {
   handleObsStreamStateChanged(active: boolean): void {
     this.obsStreamStateRevision += 1
     if (this.observedObsStreaming === active) return
+    if (!active) this.partAdvancedForCurrentStream = false
     this.observedObsStreaming = active
     this.pendingObsStreamState = active
     this.scheduleObsStreamStateSync()
@@ -180,6 +198,7 @@ export class StreamOrchestrator {
     this.obsStreamStateRevision += 1
     this.observedObsStreaming = active
     this.pendingObsStreamState = null
+    if (!active) this.partAdvancedForCurrentStream = false
   }
 
   private scheduleObsStreamStateSync(): void {
@@ -219,6 +238,9 @@ export class StreamOrchestrator {
       }
       await this.platforms.startComments(config).catch((error) => {
         warnings.push(`コメント: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      if (this.selected) await this.advancePartNumber(this.selected).catch((error) => {
+        warnings.push(`次回のPart番号を保存できませんでした: ${error instanceof Error ? error.message : String(error)}`)
       })
       this.warning = warnings[0] ?? null
       await this.logger.write('stream.obs_started', { gameId: this.selected?.id ?? null, warnings })

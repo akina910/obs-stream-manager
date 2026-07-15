@@ -13,7 +13,7 @@ describe('UI translations', () => {
   })
 
   it('contains the language selector and core broadcast actions', () => {
-    for (const key of ['言語', '日本語', '英語', '配信開始', '配信終了', '設定']) {
+    for (const key of ['言語', '日本語', '英語', '配信開始', '配信終了', '設定', '配信するゲームを選んでください', 'タイトルテンプレートの変数ヘルプ', '使用できる変数', '次回のPart番号', 'ゲーム適用時の日付と時刻']) {
       expect(englishTranslations[key]).toBeTruthy()
     }
   })

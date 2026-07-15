@@ -23,7 +23,7 @@ const pcBase = {
   twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: '', tags: ['日本語'] },
   audio: { microphoneDb: -3, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
   recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: true, verticalRecording: true },
-  state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered' as const, thumbnailLastAppliedAt: null },
+  state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered' as const, thumbnailLastAppliedAt: null, nextPartNumber: 1 },
 }
 
 export function createPcProfile(id: string, displayName: string): GameProfile {
