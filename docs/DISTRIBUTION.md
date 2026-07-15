@@ -41,3 +41,5 @@ npm run verify:package
 リポジトリ変数 `YOUTUBE_CLIENT_ID` と `TWITCH_CLIENT_ID` に公開Client IDを登録し、`Windows distribution` ワークフローを手動実行します。ワークフローは検証済み成果物をActions artifactとして保存しますが、タグ作成やGitHub Release公開は行いません。
 
 Releaseへ添付する前に、署名、ウイルス対策ソフトでの確認、クリーンなWindows 11環境でのインストール、実アカウントOAuth、YouTube非公開配信、Twitchテスト配信を実施してください。
+
+現行版はAitum MultistreamへのTwitch映像出力資格情報を安全に自動設定できません。OAuthだけで新規環境のYouTube／Twitch同時配信が完了することをリリース条件にする場合、この項目は未達です。Aitumを事前設定した検証環境では、OBS開始後にYouTubeとTwitchの両方が実際に `LIVE` になることを確認し、認証保存表示だけで合格にしないでください。
