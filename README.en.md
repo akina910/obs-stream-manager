@@ -73,6 +73,8 @@ YouTube uses PKCE for a desktop public client, and Twitch uses Device Code Flow.
 
 Aitum Multistream is not required. If Source Record or Aitum Vertical is unavailable, only its corresponding extra recording feature is disabled with a warning.
 
+The bundled plugin is installed in OBS's official Windows plugin directory at `C:\ProgramData\obs-studio\plugins\obs-stream-manager-output`. If that directory is not writable for a standard user, ask an administrator to approve the installation.
+
 ## Main features
 
 - Profiles for PC, Nintendo Switch, and exception games

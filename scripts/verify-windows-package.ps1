@@ -71,8 +71,10 @@ try {
   }
   $exe = Join-Path $runtime 'OBS Stream Manager.exe'
   Assert-True ([bool](Test-Path -LiteralPath $exe)) 'Packaged executable is missing'
-  $obsPlugin = Join-Path $runtime 'resources\obs-plugin\obs-stream-manager-output.dll'
+  $obsPlugin = Join-Path $runtime 'resources\obs-plugin\bin\64bit\obs-stream-manager-output.dll'
   Assert-True ([bool](Test-Path -LiteralPath $obsPlugin)) 'Bundled OBS output plugin is missing'
+  $obsPluginLocale = Join-Path $runtime 'resources\obs-plugin\data\locale\en-US.ini'
+  Assert-True ([bool](Test-Path -LiteralPath $obsPluginLocale)) 'Bundled OBS output plugin locale is missing'
 
   $env:OBS_STREAM_MANAGER_DATA_DIR = $dataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $secretService

@@ -71,7 +71,7 @@ Track 6: 予備 / Switch
 
 - OBS 録画形式は MKV にします。
 - リプレイバッファを有効にします。秒数はゲーム選択時にアプリが更新します。
-- OBS Stream Manager Output は配布物に同梱され、アプリ起動時にユーザー用OBSプラグイン領域へ自動配置されます。初回または更新後はOBSを再起動してください。
+- OBS Stream Manager Output は配布物に同梱され、アプリ起動時にOBS公式のWindows用プラグイン領域`C:\ProgramData\obs-studio\plugins`へ自動配置されます。初回または更新後はOBSを再起動してください。
 - Source Record はゲーム映像ソース一系統だけへフィルターを設定します。アプリは Source Record の公式 WebSocket vendor request で選択ソースの録画を開始・停止します。
 - Aitum Vertical は 1080×1920 の録画を作ります。アプリは Aitum Vertical の公式 WebSocket vendor request で縦録画を開始・停止します。
 

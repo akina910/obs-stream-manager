@@ -74,26 +74,43 @@ async function providerBundlePath(): Promise<string | null> {
 
 async function installObsOutputPlugin(): Promise<'unavailable' | 'current' | 'installed' | 'pending'> {
   if (!app.isPackaged) return 'unavailable'
-  const source = path.join(process.resourcesPath, 'obs-plugin', 'obs-stream-manager-output.dll')
+  const source = path.join(process.resourcesPath, 'obs-plugin', 'bin', '64bit', 'obs-stream-manager-output.dll')
   if (!existsSync(source)) return 'unavailable'
-  const targetDirectory = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output', 'bin', '64bit')
+  const legacyPluginRoot = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output')
+  await rm(legacyPluginRoot, { recursive: true, force: true }).catch(() => {
+    // A running OBS instance can keep the previous DLL locked. The installer also retries this migration.
+  })
+  const programData = process.env.PROGRAMDATA?.trim() || process.env.ProgramData?.trim() || 'C:\\ProgramData'
+  const pluginRoot = path.join(programData, 'obs-studio', 'plugins', 'obs-stream-manager-output')
+  const targetDirectory = path.join(pluginRoot, 'bin', '64bit')
   const target = path.join(targetDirectory, 'obs-stream-manager-output.dll')
   const pending = path.join(targetDirectory, 'obs-stream-manager-output.pending.dll')
   const digest = async (filename: string) => crypto.createHash('sha256').update(await readFile(filename)).digest('hex')
-  await mkdir(targetDirectory, { recursive: true })
-  if (existsSync(pending)) {
-    try {
-      await rm(target, { force: true })
-      await rename(pending, target)
-    } catch { /* OBS may still have the previous DLL loaded */ }
-  }
-  if (existsSync(target) && await digest(target) === await digest(source)) return 'current'
   try {
-    await copyFile(source, target)
-    return 'installed'
+    await mkdir(targetDirectory, { recursive: true })
+    const localeSource = path.join(process.resourcesPath, 'obs-plugin', 'data', 'locale', 'en-US.ini')
+    if (existsSync(localeSource)) {
+      const localeTarget = path.join(pluginRoot, 'data', 'locale', 'en-US.ini')
+      await mkdir(path.dirname(localeTarget), { recursive: true })
+      await copyFile(localeSource, localeTarget)
+    }
+    if (existsSync(pending)) {
+      try {
+        await rm(target, { force: true })
+        await rename(pending, target)
+      } catch { /* OBS may still have the previous DLL loaded */ }
+    }
+    if (existsSync(target) && await digest(target) === await digest(source)) return 'current'
+    try {
+      await copyFile(source, target)
+      return 'installed'
+    } catch {
+      await copyFile(source, pending)
+      return 'pending'
+    }
   } catch {
-    await copyFile(source, pending)
-    return 'pending'
+    // Plugin installation must not prevent the local manager from starting.
+    return 'unavailable'
   }
 }
 

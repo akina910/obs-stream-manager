@@ -29,8 +29,11 @@ try {
 
   $dll = Get-ChildItem $workspace -Recurse -Filter 'obs-stream-manager-output.dll' -File | Select-Object -First 1
   if (-not $dll) { throw 'Built OBS plugin DLL was not found' }
-  New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-  Copy-Item $dll.FullName (Join-Path $OutputDirectory $dll.Name) -Force
+  $binaryDirectory = Join-Path $OutputDirectory 'bin\64bit'
+  $localeDirectory = Join-Path $OutputDirectory 'data\locale'
+  New-Item -ItemType Directory -Force -Path $binaryDirectory, $localeDirectory | Out-Null
+  Copy-Item $dll.FullName (Join-Path $binaryDirectory $dll.Name) -Force
+  Copy-Item (Join-Path $source 'data\locale\en-US.ini') (Join-Path $localeDirectory 'en-US.ini') -Force
   $license = Join-Path $OutputDirectory 'GPL-2.0.txt'
   Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/obsproject/obs-websocket/$websocketCommit/LICENSE" -OutFile $license
   if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne $websocketLicenseSha256) {
