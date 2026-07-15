@@ -13,6 +13,7 @@ $secretMarker = 'VERIFY-SECRET-8f429421-2db8-47bb-af75-4f0731c7f1c2'
 $originalPath = $env:PATH
 $originalDataDirectory = $env:OBS_STREAM_MANAGER_DATA_DIR
 $originalSecretService = $env:OBS_STREAM_MANAGER_SECRET_SERVICE
+$originalDisableLoginItem = $env:OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
@@ -35,11 +36,8 @@ function Get-TestProcesses {
 }
 
 function Stop-TestApp {
-  $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-  if ($listener) {
-    $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
-    if ($process) { [void]$process.CloseMainWindow() }
-  }
+  $quit = Start-Process -FilePath $exe -ArgumentList '--quit' -WorkingDirectory $runtime -PassThru
+  Assert-True $quit.WaitForExit(10000) 'Quit command process did not exit'
   $deadline = (Get-Date).AddSeconds(20)
   do {
     $remaining = Get-TestProcesses
@@ -76,6 +74,7 @@ try {
 
   $env:OBS_STREAM_MANAGER_DATA_DIR = $dataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $secretService
+  $env:OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM = '1'
   $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
   $results.nodeOnPath = [bool](Get-Command node -ErrorAction SilentlyContinue)
 
@@ -83,15 +82,29 @@ try {
   $listener = Wait-ForListener $true
   $health = Invoke-RestMethod "http://127.0.0.1:$port/api/health" -TimeoutSec 10
   $web = Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 10
+  $desktopPreferences = Get-Content (Join-Path $dataDirectory 'config\desktop.json') -Raw | ConvertFrom-Json
   $results.freshStart = $health.ok -and $health.dataDirectory -eq $dataDirectory
   $results.loopbackOnly = @($listener | Where-Object LocalAddress -ne '127.0.0.1').Count -eq 0
   $results.securityHeaders = $web.Headers['Content-Security-Policy'] -match "script-src 'self'" -and $web.Headers['X-Content-Type-Options'] -eq 'nosniff'
+  $results.extractedPackageDoesNotAutoStart = -not $desktopPreferences.startWithWindows -and -not (Test-Path (Join-Path $runtime 'resources\installed-by-nsis'))
   $firstProcessCount = (Get-TestProcesses).Count
 
   $second = Start-Process -FilePath $exe -WorkingDirectory $runtime -PassThru
   Assert-True $second.WaitForExit(10000) 'Second instance did not exit'
   Start-Sleep -Milliseconds 500
   $results.singleInstance = $second.ExitCode -eq 0 -and (Get-TestProcesses).Count -eq $firstProcessCount
+
+  $primary = Get-Process -Id $listener.OwningProcess -ErrorAction Stop
+  $windowDeadline = (Get-Date).AddSeconds(10)
+  do {
+    $primary.Refresh()
+    if ($primary.MainWindowHandle -ne 0) { break }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $windowDeadline)
+  Assert-True ($primary.MainWindowHandle -ne 0) 'Primary window did not become available for close-to-tray verification'
+  Assert-True $primary.CloseMainWindow() 'Primary window did not accept a close request'
+  Start-Sleep -Seconds 1
+  $results.closeKeepsDockAlive = [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) -and [bool](Get-Process -Id $primary.Id -ErrorAction SilentlyContinue)
 
   $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
   $bootstrap.config.obs.startDelaySeconds = 7
@@ -106,8 +119,20 @@ try {
   Stop-TestApp
   $results.cleanExit = (Get-TestProcesses).Count -eq 0 -and -not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
 
-  Start-Process -FilePath $exe -WorkingDirectory $runtime
-  [void](Wait-ForListener $true)
+  Start-Process -FilePath $exe -ArgumentList '--background' -WorkingDirectory $runtime
+  $backgroundListener = Wait-ForListener $true
+  Start-Sleep -Seconds 1
+  $backgroundProcess = Get-Process -Id $backgroundListener.OwningProcess -ErrorAction Stop
+  $results.backgroundStartsHidden = $backgroundProcess.MainWindowHandle -eq 0
+  $foregroundRequest = Start-Process -FilePath $exe -WorkingDirectory $runtime -PassThru
+  Assert-True $foregroundRequest.WaitForExit(10000) 'Foreground request process did not exit'
+  $windowDeadline = (Get-Date).AddSeconds(10)
+  do {
+    $backgroundPrimary = Get-Process -Id $backgroundProcess.Id -ErrorAction SilentlyContinue
+    if ($backgroundPrimary -and $backgroundPrimary.MainWindowHandle -ne 0) { break }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $windowDeadline)
+  $results.secondLaunchShowsWindow = [bool]$backgroundPrimary -and $backgroundPrimary.MainWindowHandle -ne 0
   $restarted = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
   $results.restartPersistence = $restarted.config.obs.startDelaySeconds -eq 7 -and $restarted.config.obs.passwordStored
   $results.languagePersistence = $restarted.config.ui.language -eq 'en'
@@ -126,4 +151,5 @@ try {
   $env:PATH = $originalPath
   $env:OBS_STREAM_MANAGER_DATA_DIR = $originalDataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $originalSecretService
+  $env:OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM = $originalDisableLoginItem
 }

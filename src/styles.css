@@ -257,6 +257,8 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .feature-row > div span { color: var(--muted); font-size: 11px; }
 .feature-row .toggle-row { flex: none; margin: 0; }
 .feature-row .toggle-row > span:last-child { display: none; }
+.desktop-integration-row > .toggle-row { flex: none; }
+.setup-status-row.desktop-integration-row > .toggle-row > span:last-child { display: none; }
 .source-chips { display: flex; gap: 6px; flex-wrap: wrap; }
 
 label { min-width: 0; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
