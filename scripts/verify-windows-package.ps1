@@ -1,5 +1,6 @@
 param(
-  [string]$PackageDirectory = (Join-Path $PSScriptRoot '..\release\win-unpacked')
+  [string]$PackageDirectory = '',
+  [string]$PackageArchive = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,13 +52,25 @@ function Stop-TestApp {
 
 $results = [ordered]@{}
 try {
+  if ($PackageDirectory -and $PackageArchive) { throw 'Specify either PackageDirectory or PackageArchive, not both' }
+  if (-not $PackageDirectory -and -not $PackageArchive) {
+    $PackageDirectory = Join-Path $PSScriptRoot '..\release\win-unpacked'
+  }
+
   $resolvedTemp = [IO.Path]::GetFullPath($env:TEMP)
   $resolvedTestRoot = [IO.Path]::GetFullPath($testRoot)
   Assert-True ($resolvedTestRoot.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase)) 'Unsafe test directory'
   Assert-True (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) "Port $port is already in use"
   if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $testRoot, $dataDirectory | Out-Null
-  Copy-Item -LiteralPath (Resolve-Path $PackageDirectory).Path -Destination $runtime -Recurse
+  if ($PackageArchive) {
+    $resolvedArchive = (Resolve-Path -LiteralPath $PackageArchive).Path
+    Assert-True ([IO.Path]::GetExtension($resolvedArchive) -eq '.zip') 'Package archive must be a ZIP file'
+    Expand-Archive -LiteralPath $resolvedArchive -DestinationPath $runtime
+    $results.archiveExtracted = $true
+  } else {
+    Copy-Item -LiteralPath (Resolve-Path -LiteralPath $PackageDirectory).Path -Destination $runtime -Recurse
+  }
   $exe = Join-Path $runtime 'OBS Stream Manager.exe'
   Assert-True ([bool](Test-Path -LiteralPath $exe)) 'Packaged executable is missing'
 

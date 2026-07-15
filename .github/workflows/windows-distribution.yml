@@ -26,7 +26,12 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run dist:win
-      - run: npm run verify:package
+      - name: Verify extracted ZIP package
+        shell: powershell
+        run: |
+          $archives = @(Get-ChildItem release -Filter '*-win.zip' -File)
+          if ($archives.Count -ne 1) { throw "Expected exactly one Windows ZIP package, found $($archives.Count)" }
+          & .\scripts\verify-windows-package.ps1 -PackageArchive $archives[0].FullName
       - uses: actions/upload-artifact@v4
         with:
           name: obs-stream-manager-windows-${{ github.sha }}
