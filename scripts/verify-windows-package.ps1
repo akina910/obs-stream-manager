@@ -86,10 +86,12 @@ try {
   $listener = Wait-ForListener $true
   $health = Invoke-RestMethod "http://127.0.0.1:$port/api/health" -TimeoutSec 10
   $web = Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 10
+  $favicon = Invoke-WebRequest "http://127.0.0.1:$port/favicon.svg" -UseBasicParsing -TimeoutSec 10
   $desktopPreferences = Get-Content (Join-Path $dataDirectory 'config\desktop.json') -Raw | ConvertFrom-Json
   $results.freshStart = $health.ok -and $health.dataDirectory -eq $dataDirectory
   $results.loopbackOnly = @($listener | Where-Object LocalAddress -ne '127.0.0.1').Count -eq 0
   $results.securityHeaders = $web.Headers['Content-Security-Policy'] -match "script-src 'self'" -and $web.Headers['X-Content-Type-Options'] -eq 'nosniff'
+  $results.customFavicon = $favicon.StatusCode -eq 200 -and $favicon.Headers['Content-Type'] -match '^image/svg\+xml' -and $web.Content -match 'href="/favicon\.svg"'
   $results.extractedPackageDoesNotAutoStart = -not $desktopPreferences.startWithWindows -and -not (Test-Path (Join-Path $runtime 'resources\installed-by-nsis'))
   $firstProcessCount = (Get-TestProcesses).Count
 
