@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
 
 type ServerModule = {
   startServer: () => Promise<{ url: string }>
@@ -8,6 +9,7 @@ type ServerModule = {
 }
 
 const dockUrl = 'http://127.0.0.1:4317'
+const serverStartTimeoutMs = 10_000
 const allowedExternalHosts = new Set([
   'accounts.google.com',
   'www.twitch.tv',
@@ -134,11 +136,18 @@ if (!app.requestSingleInstanceLock()) {
       if (providerFile) process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE = providerFile
       serverModule = await import('../server/index.js') as ServerModule
       await markLifecycle('server-module-loaded').catch(() => undefined)
-      await serverModule.startServer()
+      await withStartupListenTimeout(serverModule.startServer(), serverStartTimeoutMs)
       await markLifecycle('server-listening').catch(() => undefined)
       mainWindow = createWindow()
       await markLifecycle('window-created').catch(() => undefined)
     } catch (error) {
+      if (error instanceof StartupListenTimeoutError && !hasStartupListenRetried(process.argv)) {
+        await markLifecycle('server-listen-timeout-retrying').catch(() => undefined)
+        app.relaunch({ args: startupListenRetryArgs(process.argv.slice(1)) })
+        shutdownComplete = true
+        app.exit(0)
+        return
+      }
       const filename = await writeStartupError(error).catch(() => '(ログを保存できませんでした)')
       dialog.showErrorBox(
         'OBS Stream Manager を起動できません',
