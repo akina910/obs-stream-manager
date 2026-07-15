@@ -11,5 +11,7 @@
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OBS Stream Manager"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "obs-stream-manager"
   RMDir /r "$APPDATA\obs-studio\plugins\obs-stream-manager-output"
-  RMDir /r "$COMMONAPPDATA\obs-studio\plugins\obs-stream-manager-output"
+  ReadEnvStr $1 "ProgramData"
+  StrCmp $1 "" +2
+  RMDir /r "$1\obs-studio\plugins\obs-stream-manager-output"
 !macroend
