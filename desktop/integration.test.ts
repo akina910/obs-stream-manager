@@ -9,6 +9,7 @@ import {
   parseDesktopPreferences,
   quitApplicationArgument,
   supportsWindowsLoginStart,
+  windowsAppId,
 } from './integration.js'
 
 const directories: string[] = []
@@ -46,5 +47,10 @@ describe('desktop integration lifecycle', () => {
     const restarted = new DesktopPreferenceStore(directory, true)
     await expect(restarted.read()).resolves.toEqual({ version: 1, startWithWindows: false })
     await expect(readFile(path.join(directory, 'config', 'desktop.json'), 'utf8')).resolves.toContain('"startWithWindows": false')
+  })
+
+  it('removes the exact Electron login item during NSIS uninstall', async () => {
+    const installer = await readFile(new URL('../installer.nsh', import.meta.url), 'utf8')
+    expect(installer).toContain(`"${windowsAppId}"`)
   })
 })
