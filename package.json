@@ -19,7 +19,7 @@
     "build": "npm run clean && tsc -p tsconfig.server.json && vite build && npm run build:desktop && npm run prepare:provider",
     "build:desktop": "tsc -p tsconfig.desktop.json",
     "prepare:provider": "node scripts/prepare-provider-bundle.mjs",
-    "dist:win": "npm run build && electron-builder --win nsis portable zip --x64",
+    "dist:win": "npm run build && electron-builder --win nsis portable zip --x64 --publish never",
     "dist:win:dir": "npm run build && electron-builder --win dir --x64",
     "verify:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-package.ps1",
     "start": "node dist/server/index.js",
