@@ -1,6 +1,6 @@
 appId: io.github.akina910.obs-stream-manager
 productName: OBS Stream Manager
-copyright: Copyright © 2026 OBS Stream Manager contributors
+copyright: Copyright 2026 OBS Stream Manager contributors
 directories:
   output: release
 files:
