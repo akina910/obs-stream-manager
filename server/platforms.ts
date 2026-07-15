@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import sharp from 'sharp'
 import type { AppConfig, ChatMessage, GameProfile, PlatformRuntimeStatus, PlatformRuntimeStatuses } from '../shared/contracts.js'
+import { renderTitleTemplate } from '../shared/title-template.js'
 import { SecretStore } from './secrets.js'
 import { scanSteamLibraries, type SteamLibraryScan } from './steam-library.js'
 import type { DataStore } from './storage.js'
@@ -47,10 +48,6 @@ async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
   return response.json() as Promise<T>
-}
-
-function title(template: string, profile: GameProfile): string {
-  return template.replaceAll('{game}', profile.displayName).slice(0, 100)
 }
 
 export class PlatformServices {
@@ -187,8 +184,9 @@ export class PlatformServices {
     }
   }
 
-  private async prepareYouTube(config: AppConfig, profile: GameProfile): Promise<ThumbnailPreparation> {
+  private async prepareYouTube(config: AppConfig, profile: GameProfile, preparedAt: Date): Promise<ThumbnailPreparation> {
     if (!config.features.youtube || !profile.youtube.enabled) return { status: 'disabled', message: 'YouTube またはサムネイル自動適用が無効です' }
+    const renderedTitle = renderTitleTemplate(profile.youtube.titleTemplate, { game: profile.displayName, part: profile.state.nextPartNumber, now: preparedAt })
     const accessToken = await this.youtubeAccessToken(config)
     const headers = { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' }
     let broadcast: YouTubeBroadcast | undefined
@@ -206,7 +204,7 @@ export class PlatformServices {
       insert.search = new URLSearchParams({ part: 'snippet,status,contentDetails' }).toString()
       broadcast = await apiJson<YouTubeBroadcast>(insert.toString(), {
         method: 'POST', headers,
-        body: JSON.stringify({ snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, scheduledStartTime: new Date(Date.now() + 60_000).toISOString() }, status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: false }, contentDetails: { enableAutoStart: true, enableAutoStop: true, monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 }, latencyPreference: 'low' } }),
+        body: JSON.stringify({ snippet: { title: renderedTitle, description: profile.youtube.description, scheduledStartTime: new Date(Date.now() + 60_000).toISOString() }, status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: false }, contentDetails: { enableAutoStart: true, enableAutoStop: true, monitorStream: { enableMonitorStream: false, broadcastStreamDelayMs: 0 }, latencyPreference: 'low' } }),
       })
       const latest = await this.store.getConfig()
       await this.store.saveConfig({ ...latest, youtube: { ...latest.youtube, broadcastId: broadcast.id } })
@@ -215,7 +213,7 @@ export class PlatformServices {
       update.search = new URLSearchParams({ part: 'snippet,status' }).toString()
       const updateBody: Record<string, unknown> = {
         id: broadcast.id,
-        snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, scheduledStartTime: broadcast.snippet.scheduledStartTime },
+        snippet: { title: renderedTitle, description: profile.youtube.description, scheduledStartTime: broadcast.snippet.scheduledStartTime },
         status: { privacyStatus: profile.youtube.privacy, selfDeclaredMadeForKids: Boolean(broadcast.status.selfDeclaredMadeForKids) },
       }
       await apiJson(update.toString(), {
@@ -226,7 +224,7 @@ export class PlatformServices {
     }
     const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
     videoUrl.search = new URLSearchParams({ part: 'snippet' }).toString()
-    await apiJson(videoUrl.toString(), { method: 'PUT', headers, body: JSON.stringify({ id: broadcast.id, snippet: { title: title(profile.youtube.titleTemplate, profile), description: profile.youtube.description, categoryId: profile.youtube.categoryId } }) })
+    await apiJson(videoUrl.toString(), { method: 'PUT', headers, body: JSON.stringify({ id: broadcast.id, snippet: { title: renderedTitle, description: profile.youtube.description, categoryId: profile.youtube.categoryId } }) })
     let streamId = typeof broadcast.contentDetails.boundStreamId === 'string' ? broadcast.contentDetails.boundStreamId : ''
     let stream: YouTubeStream | undefined
     if (!streamId) {
@@ -267,7 +265,7 @@ export class PlatformServices {
     return this.applyYouTubeThumbnail(accessToken, broadcast.id, profile)
   }
 
-  private async prepareTwitch(config: AppConfig, profile: GameProfile): Promise<void> {
+  private async prepareTwitch(config: AppConfig, profile: GameProfile, preparedAt: Date): Promise<void> {
     if (!config.features.twitch || !profile.twitch.enabled) return
     const token = await this.twitchAccessToken(config)
     if (!config.twitch.clientId || !config.twitch.broadcasterId || !token) throw new Error('Twitch OAuth が未設定です')
@@ -278,7 +276,7 @@ export class PlatformServices {
       gameId = categories.data[0]?.id
     }
     const response = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${encodeURIComponent(config.twitch.broadcasterId)}`, {
-      method: 'PATCH', headers, body: JSON.stringify({ title: title(profile.twitch.titleTemplate, profile), game_id: gameId, tags: profile.twitch.tags.slice(0, 10) }),
+      method: 'PATCH', headers, body: JSON.stringify({ title: renderTitleTemplate(profile.twitch.titleTemplate, { game: profile.displayName, part: profile.state.nextPartNumber, now: preparedAt }), game_id: gameId, tags: profile.twitch.tags.slice(0, 10) }),
     })
     if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
   }
@@ -315,9 +313,10 @@ export class PlatformServices {
   }
 
   async prepare(config: AppConfig, profile: GameProfile): Promise<Preparation[]> {
+    const preparedAt = new Date()
     const results = await Promise.all(([
-      ['youtube', () => this.prepareYouTube(config, profile)],
-      ['twitch', () => this.prepareTwitch(config, profile)],
+      ['youtube', () => this.prepareYouTube(config, profile, preparedAt)],
+      ['twitch', () => this.prepareTwitch(config, profile, preparedAt)],
     ] as const).map(async ([service, operation]) => {
       try {
         const result = await operation()

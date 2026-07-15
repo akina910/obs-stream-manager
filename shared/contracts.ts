@@ -79,7 +79,8 @@ export const GameProfileSchema = z.object({
     thumbnailApplyStatus: ThumbnailApplyStatusSchema.default('not_registered'),
     thumbnailLastAppliedAt: z.string().datetime().nullable().default(null),
     thumbnailLastError: z.string().optional(),
-  }).default({ lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null }),
+    nextPartNumber: z.number().int().min(1).max(9999).default(1),
+  }).default({ lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null, nextPartNumber: 1 }),
 })
 
 export type GameProfile = z.infer<typeof GameProfileSchema>

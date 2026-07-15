@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
-  AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleStop, Copy, Gamepad2,
+  AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleHelp, CircleStop, Copy, Gamepad2,
   Image as ImageIcon, LoaderCircle, LockKeyhole, MessageSquareText, Play, Plus, RefreshCw,
   Search, Settings, Star, Trash2, Upload, X,
 } from 'lucide-react'
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
 import { createGameProfile } from '../shared/profile-factory'
+import { renderTitleTemplate, TITLE_TEMPLATE_VARIABLES } from '../shared/title-template'
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider, type SteamSyncResult } from './api'
 import { createTranslator, I18nProvider, useI18n, type TranslationValues, type Translator, type UiLanguage } from './i18n'
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
@@ -264,6 +265,35 @@ function AccordionSection({ title, summary, open, onToggle, children }: { title:
   return <section className="editor-section"><button type="button" className="editor-section-toggle" aria-expanded={open} onClick={onToggle}><ChevronRight size={13} /><strong>{title}</strong><span>{summary}</span></button>{open && <div className="editor-section-body">{children}</div>}</section>
 }
 
+function TitleTemplateField({ value, game, part, onChange }: { value: string; game: string; part: number; onChange: (value: string) => void }) {
+  const { t } = useI18n()
+  const inputId = useId()
+  const renderedTitle = renderTitleTemplate(value, { game, part }) || t('（空のタイトル）')
+  const descriptions: Record<(typeof TITLE_TEMPLATE_VARIABLES)[number], string> = {
+    '{game}': t('選択中のゲーム名'),
+    '{part}': t('次回の配信回番号。配信開始に成功すると自動で1増えます'),
+    '{date}': t('ゲーム適用時の日付（YYYY-MM-DD）'),
+    '{time}': t('ゲーム適用時の時刻（HH:mm）'),
+    '{datetime}': t('ゲーム適用時の日付と時刻'),
+  }
+  return <div className="template-field">
+    <div className="field-label-with-help">
+      <label htmlFor={inputId}>{t('タイトルテンプレート')}</label>
+      <details className="template-help">
+        <summary aria-label={t('タイトルテンプレートの変数ヘルプ')}><CircleHelp size={14} /></summary>
+        <div className="template-help-popover">
+          <strong>{t('使用できる変数')}</strong>
+          {TITLE_TEMPLATE_VARIABLES.map((variable) => <div key={variable}><code>{variable}</code><span>{descriptions[variable]}</span></div>)}
+          <p>{t('「|」など、変数以外の文字はそのままタイトルに残ります。')}</p>
+          <p>{t('例: {game} | Part {part} | {date}')}</p>
+        </div>
+      </details>
+    </div>
+    <input id={inputId} value={value} onChange={(event) => onChange(event.target.value)} />
+    <span className="template-preview">{t('実際の配信タイトル: {title}', { title: renderedTitle })}</span>
+  </div>
+}
+
 function RangeField({ label, value, disabled, onChange }: { label: string; value: number; disabled: boolean; onChange: (value: number) => void }) {
   return <label>{label}<div className="range-control"><input type="range" min="-30" max="6" step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} /><span>{value > 0 ? '+' : ''}{value} dB</span></div></label>
 }
@@ -316,6 +346,7 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
               <label>{t('表示名')}<input value={draft.displayName} onChange={(event) => patch('displayName', event.target.value)} /></label>
               <div className="field-grid"><label>{t('分類')}<select value={draft.platformGroup} onChange={(event) => patch('platformGroup', event.target.value as PlatformGroup)}><option value="pc">PC</option><option value="switch">Switch</option><option value="exception">{t('例外')}</option></select></label><label>Steam App ID<NumericInput disabled={locked} allowEmpty value={draft.library.steamAppId} onValueChange={(value) => patch('library', { ...draft.library, steamAppId: value })} /></label></div>
               <label>{t('インストール先')}<input value={draft.library.installDirectory ?? ''} onChange={(event) => patch('library', { ...draft.library, installDirectory: event.target.value || undefined, installed: Boolean(event.target.value) })} /></label>
+              <label>{t('次回のPart番号')}<NumericInput disabled={locked} value={draft.state.nextPartNumber} onValueChange={(value) => value !== undefined && patch('state', { ...draft.state, nextPartNumber: Math.max(1, Math.min(9999, Math.trunc(value))) })} /><span className="field-hint">{t('配信開始に成功したときだけ自動で1増えます')}</span></label>
               <div className="toggle-grid"><Toggle disabled={locked} checked={draft.favorite} label={t('お気に入り')} onChange={(value) => patch('favorite', value)} /><Toggle disabled={locked} checked={draft.library.gamePass} label="Game Pass / Xbox" onChange={(value) => patch('library', { ...draft.library, gamePass: value })} /><Toggle disabled={locked} checked={draft.library.installed} label={t('ローカル導入済み')} onChange={(value) => patch('library', { ...draft.library, installed: value })} /><Toggle disabled={locked} checked={draft.hidden} label={t('一覧から非表示')} onChange={(value) => patch('hidden', value)} /></div>
             </fieldset>
           </AccordionSection>
@@ -329,10 +360,10 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
             </fieldset>
           </AccordionSection>
           <AccordionSection title="YouTube" summary={`${t(draft.youtube.enabled ? '有効' : '無効')} · ${t(draft.youtube.privacy === 'public' ? '公開' : draft.youtube.privacy === 'unlisted' ? '限定公開' : '非公開')}`} open={openSections.has('youtube')} onToggle={() => toggleSection('youtube')}>
-            <fieldset disabled={locked}><Toggle disabled={locked} checked={draft.youtube.enabled} label={t('このゲームで有効')} onChange={(value) => patch('youtube', { ...draft.youtube, enabled: value })} /><label>{t('タイトルテンプレート')}<input value={draft.youtube.titleTemplate} onChange={(event) => patch('youtube', { ...draft.youtube, titleTemplate: event.target.value })} /></label><label>{t('説明文')}<textarea rows={3} value={draft.youtube.description} onChange={(event) => patch('youtube', { ...draft.youtube, description: event.target.value })} /></label><div className="field-grid"><label>{t('公開範囲')}<select value={draft.youtube.privacy} onChange={(event) => patch('youtube', { ...draft.youtube, privacy: event.target.value as GameProfile['youtube']['privacy'] })}><option value="public">{t('公開')}</option><option value="unlisted">{t('限定公開')}</option><option value="private">{t('非公開')}</option></select></label><label>{t('カテゴリID')}<input value={draft.youtube.categoryId} onChange={(event) => patch('youtube', { ...draft.youtube, categoryId: event.target.value })} /></label></div></fieldset>
+            <fieldset disabled={locked}><Toggle disabled={locked} checked={draft.youtube.enabled} label={t('このゲームで有効')} onChange={(value) => patch('youtube', { ...draft.youtube, enabled: value })} /><TitleTemplateField value={draft.youtube.titleTemplate} game={draft.displayName} part={draft.state.nextPartNumber} onChange={(value) => patch('youtube', { ...draft.youtube, titleTemplate: value })} /><label>{t('説明文')}<textarea rows={3} value={draft.youtube.description} onChange={(event) => patch('youtube', { ...draft.youtube, description: event.target.value })} /></label><div className="field-grid"><label>{t('公開範囲')}<select value={draft.youtube.privacy} onChange={(event) => patch('youtube', { ...draft.youtube, privacy: event.target.value as GameProfile['youtube']['privacy'] })}><option value="public">{t('公開')}</option><option value="unlisted">{t('限定公開')}</option><option value="private">{t('非公開')}</option></select></label><label>{t('カテゴリID')}<input value={draft.youtube.categoryId} onChange={(event) => patch('youtube', { ...draft.youtube, categoryId: event.target.value })} /></label></div></fieldset>
           </AccordionSection>
           <AccordionSection title="Twitch" summary={`${t(draft.twitch.enabled ? '有効' : '無効')} · ${draft.twitch.categoryName || t('カテゴリ未設定')}`} open={openSections.has('twitch')} onToggle={() => toggleSection('twitch')}>
-            <fieldset disabled={locked}><Toggle disabled={locked} checked={draft.twitch.enabled} label={t('このゲームで有効')} onChange={(value) => patch('twitch', { ...draft.twitch, enabled: value })} /><label>{t('タイトルテンプレート')}<input value={draft.twitch.titleTemplate} onChange={(event) => patch('twitch', { ...draft.twitch, titleTemplate: event.target.value })} /></label><div className="field-grid"><label>{t('カテゴリ')}<input value={draft.twitch.categoryName} onChange={(event) => patch('twitch', { ...draft.twitch, categoryName: event.target.value })} /></label><label>{t('タグ（カンマ区切り）')}<input value={draft.twitch.tags.join(', ')} onChange={(event) => patch('twitch', { ...draft.twitch, tags: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></label></div></fieldset>
+            <fieldset disabled={locked}><Toggle disabled={locked} checked={draft.twitch.enabled} label={t('このゲームで有効')} onChange={(value) => patch('twitch', { ...draft.twitch, enabled: value })} /><TitleTemplateField value={draft.twitch.titleTemplate} game={draft.displayName} part={draft.state.nextPartNumber} onChange={(value) => patch('twitch', { ...draft.twitch, titleTemplate: value })} /><div className="field-grid"><label>{t('カテゴリ')}<input value={draft.twitch.categoryName} onChange={(event) => patch('twitch', { ...draft.twitch, categoryName: event.target.value })} /></label><label>{t('タグ（カンマ区切り）')}<input value={draft.twitch.tags.join(', ')} onChange={(event) => patch('twitch', { ...draft.twitch, tags: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></label></div></fieldset>
           </AccordionSection>
           <AccordionSection title={t('音声')} summary={`${t('ゲーム')} ${draft.audio.gameDb > 0 ? '+' : ''}${draft.audio.gameDb} dB`} open={openSections.has('audio')} onToggle={() => toggleSection('audio')}>
             <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /></fieldset>
@@ -503,7 +534,7 @@ function FirstRunSetup({ config, status, oauthStatus, steamScan, onSaveObs, onCo
   </div>
 }
 
-function ControlPanel({ status, selected, busy, onStart, onStop, onReplay, onEdit }: { status: RuntimeStatus; selected: GameProfile | null; busy: boolean; onStart: () => void; onStop: () => void; onReplay: () => void; onEdit: () => void }) {
+function ControlPanel({ status, selected, busy, onChooseGame, onStart, onStop, onReplay, onEdit }: { status: RuntimeStatus; selected: GameProfile | null; busy: boolean; onChooseGame: () => void; onStart: () => void; onStop: () => void; onReplay: () => void; onEdit: () => void }) {
   const { t } = useI18n()
   const externalActive = status.platforms.youtube.state === 'live' || status.platforms.twitch.state === 'live' || status.platforms.youtube.state === 'stopping' || status.platforms.twitch.state === 'stopping'
   const showStop = status.streaming || externalActive
@@ -512,7 +543,7 @@ function ControlPanel({ status, selected, busy, onStart, onStop, onReplay, onEdi
   const reason = !status.obsConnected ? t('OBSへ接続すると配信を開始できます') : !selected ? t('配信前にゲームを選択してください') : status.busy || busy ? t('処理が完了するまでお待ちください') : null
   return <aside className="control-panel" aria-label={t('配信操作')}>
     {restartDetected && <div className="control-warning"><AlertTriangle size={14} /><span>{t('アプリ再起動後の配信を検出しました。現在の配信を安全に終了できます。')}</span></div>}
-    <div className={`selection-summary ${selected ? 'has-selection' : ''}`}>{selected ? <><ProfileArtwork profile={selected} size="small" /><div className="selection-summary-copy"><span className="selection-label"><Check size={11} strokeWidth={3} />{t('現在選択中')}</span><strong>{selected.displayName}</strong><span>{status.captureMethod ? t(captureLabels[status.captureMethod]) : t('未判定')} · {thumbnailStatusLabel(selected, t)}</span></div><b><Check size={12} strokeWidth={3} />{t('配信対象')}</b></> : <><div className="empty-tile"><Plus size={15} /></div><div className="selection-summary-copy"><strong className="muted">{t('ゲームを選択')}</strong><span>{t('配信前にプロファイル適用が必要です')}</span></div></>}</div>
+    {selected ? <div className="selection-summary has-selection"><ProfileArtwork profile={selected} size="small" /><div className="selection-summary-copy"><span className="selection-label"><Check size={11} strokeWidth={3} />{t('現在選択中')}</span><strong>{selected.displayName}</strong><span>{status.captureMethod ? t(captureLabels[status.captureMethod]) : t('未判定')} · {thumbnailStatusLabel(selected, t)}</span></div><b><Check size={12} strokeWidth={3} />{t('配信対象')}</b></div> : <button type="button" className="selection-summary empty-selection-action" onClick={onChooseGame}><div className="empty-tile"><Plus size={15} /></div><div className="selection-summary-copy"><strong>{t('配信するゲームを選んでください')}</strong><span>{t('ゲーム一覧でカードを押すと配信設定が適用されます')}</span></div><b>{t('ゲーム一覧へ')}<ChevronRight size={12} /></b></button>}
     {!restartDetected && selected && !selected.state.thumbnailFilename && !showStop && <button className="thumbnail-register-link" onClick={onEdit}><ImageIcon size={14} />{t('初回サムネイルを登録')}</button>}
     {status.warning && <div className="control-warning"><AlertTriangle size={14} /><span>{t(status.warning)}</span></div>}
     <div className="control-actions">{showStop ? <button className="stop-button" disabled={busy || status.busy} onClick={onStop}>{busy ? <LoaderCircle className="spin" size={15} /> : <CircleStop size={15} />}{t('配信終了')}</button> : <button className="start-button" disabled={disabled} onClick={onStart}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} fill="currentColor" />}{t('配信開始')}</button>}<button className="clip-button" disabled={!status.replayBuffer || busy} onClick={onReplay}><ArrowDownToLine size={14} />{t('クリップ保存')}</button></div>
@@ -533,6 +564,7 @@ export default function App() {
   const [setupOpen, setSetupOpen] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
   const [loading, setLoading] = useState(true)
+  const wasStreaming = useRef(false)
   const [actionBusy, setActionBusy] = useState(false)
   const [comments, setComments] = useState<ChatMessage[]>([])
   const [steamScan, setSteamScan] = useState<SteamSyncResult | null>(null)
@@ -595,6 +627,11 @@ export default function App() {
     return () => { active = false }
   }, [loadOAuthStatus])
   useEffect(() => { const timer = window.setInterval(() => void api.status().then(setStatus).catch(() => undefined), 2_000); return () => window.clearInterval(timer) }, [])
+  useEffect(() => {
+    const streaming = Boolean(status?.streaming)
+    if (wasStreaming.current && !streaming) void api.profiles().then(setProfiles).catch(() => undefined)
+    wasStreaming.current = streaming
+  }, [status?.streaming])
   useEffect(() => { const load = () => void loadOAuthStatus().catch(() => undefined); const visible = () => { if (document.visibilityState === 'visible') load() }; window.addEventListener('focus', load); document.addEventListener('visibilitychange', visible); return () => { window.removeEventListener('focus', load); document.removeEventListener('visibilitychange', visible) } }, [loadOAuthStatus])
   useEffect(() => { const timer = window.setInterval(() => void loadOAuthStatus().catch(() => undefined), oauthPollingInterval); return () => window.clearInterval(timer) }, [loadOAuthStatus, oauthPollingInterval])
   useEffect(() => { if (!status?.streaming) return; const load = () => void api.comments().then(setComments).catch(() => undefined); load(); const timer = window.setInterval(load, 3_000); return () => window.clearInterval(timer) }, [status?.streaming])
@@ -630,6 +667,19 @@ export default function App() {
   })
   const stop = () => void run(async () => { const result = await api.stop(); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信を終了しました' }) })
   const replay = () => void run(async () => { await api.replay(); setToast({ kind: 'success', text: 'クリップを保存しました' }) })
+  const chooseGame = () => {
+    const visibleProfiles = profiles.filter((profile) => !profile.hidden)
+    const currentGroup = tab === 'settings' ? 'pc' : tab
+    const targetGroup = visibleProfiles.some((profile) => profile.platformGroup === currentGroup) ? currentGroup : visibleProfiles[0]?.platformGroup ?? currentGroup
+    setTab(targetGroup)
+    setSearch('')
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const firstCard = document.querySelector<HTMLElement>('.game-card')
+      if (!firstCard) { setAdding(true); return }
+      firstCard.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      firstCard.focus({ preventScroll: true })
+    }))
+  }
 
   const connectOAuth = async (provider: OAuthProvider) => {
     const configured = Boolean(oauthStatus?.[provider].appConfigured)
@@ -750,7 +800,7 @@ export default function App() {
       <section className="library-section"><div className="section-title"><h2>{t(platformTitles[tab])}</h2><span>{filtered.length} {t('件')}</span></div><div className="game-list">{filtered.map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => selectGame(profile)} onEdit={() => setEditing(profile)} onFavorite={() => toggleFavorite(profile)} />)}{filtered.length === 0 && <div className="empty"><Gamepad2 size={24} /><strong>{t('ゲームがありません')}</strong><button onClick={() => setAdding(true)}>{t('ゲームを追加')}</button></div>}</div></section>
       <section className="comments-section"><div className="section-title"><h2>{t('統合コメント')}</h2><span className={status.streaming ? 'active-text' : ''}>{t(status.streaming ? '配信中・自動更新' : '配信開始後に表示されます')}</span></div>{status.streaming && comments.length ? <div className="comment-list">{comments.slice(-30).map((comment) => <div className={`comment-row ${comment.mention ? 'mention' : ''}`} key={comment.id}><ServiceIcon service={comment.service} /><div><div><strong>{comment.author}</strong>{comment.moderator && <b>MOD</b>}<time>{new Date(comment.publishedAt).toLocaleTimeString(language === 'en' ? 'en-US' : 'ja-JP', { hour: '2-digit', minute: '2-digit' })}</time></div><p>{comment.body}</p></div></div>)}</div> : <div className="comment-empty"><MessageSquareText size={20} /><span>{t('YouTube / Twitch の実際のコメントをここに表示します')}</span></div>}</section>
     </main>}
-    <ControlPanel status={status} selected={selected} busy={actionBusy} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
+    <ControlPanel status={status} selected={selected} busy={actionBusy} onChooseGame={chooseGame} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
     {setupOpen && <FirstRunSetup config={config} status={status} oauthStatus={oauthStatus} steamScan={steamScan} onSaveObs={saveSetupObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onLanguageChange={changeLanguage} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}
     {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} readOnly={activeOperation} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(t('{game}を削除しますか？', { game: editing.displayName }))) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} />}
     {adding && <AddGameModal initialGroup={tab === 'settings' ? 'pc' : tab} onClose={() => setAdding(false)} onCreate={(profile) => { setAdding(false); setEditing(profile) }} />}

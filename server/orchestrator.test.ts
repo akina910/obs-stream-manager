@@ -65,6 +65,40 @@ describe('StreamOrchestrator operation exclusion', () => {
 })
 
 describe('StreamOrchestrator stream startup rollback', () => {
+  it('advances a persisted Part number only after startup succeeds', async () => {
+    const config = structuredClone(defaultConfig)
+    let profile = structuredClone(starterProfiles[0])
+    profile.youtube.titleTemplate = '{game} | Part {part}'
+    const store = {
+      getProfile: vi.fn(async () => profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => { profile = value; return value }),
+    } as unknown as DataStore
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue([]),
+      start: vi.fn().mockResolvedValue([]),
+      isStreaming: vi.fn().mockResolvedValue(true),
+      ownsCurrentStream: vi.fn().mockReturnValue(true),
+    } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      startYouTubeBroadcast: vi.fn().mockResolvedValue(undefined),
+      startComments: vi.fn().mockResolvedValue(undefined),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await orchestrator.select(profile.id, 'window')
+    expect(profile.state.nextPartNumber).toBe(1)
+    await expect(orchestrator.start()).resolves.toEqual([])
+    expect(profile.state.nextPartNumber).toBe(2)
+    expect(store.saveProfile).toHaveBeenCalledTimes(2)
+  })
+
   it('stops OBS and closes any partial YouTube lifecycle when publication fails', async () => {
     const config = structuredClone(defaultConfig)
     const profile = structuredClone(starterProfiles[0])
