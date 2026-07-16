@@ -22,6 +22,8 @@ describe('UI translations', () => {
     const legacyConfig: Partial<typeof defaultConfig> = structuredClone(defaultConfig)
     delete legacyConfig.ui
     expect(AppConfigSchema.parse(legacyConfig).ui.language).toBe('ja')
-    expect(AppConfigSchema.parse({ ...defaultConfig, ui: { language: 'en' } }).ui.language).toBe('en')
+    const parsed = AppConfigSchema.parse({ ...defaultConfig, ui: { language: 'en' } })
+    expect(parsed.ui.language).toBe('en')
+    expect(parsed.ui.lastSelectedGameId).toBeUndefined()
   })
 })

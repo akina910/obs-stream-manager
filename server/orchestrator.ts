@@ -61,6 +61,33 @@ export class StreamOrchestrator {
     this.partAdvancedForCurrentStream = true
   }
 
+  private async persistSelectedGame(gameId: string | null): Promise<void> {
+    const latest = await this.store.getConfig()
+    if (latest.ui.lastSelectedGameId === gameId) return
+    await this.store.saveConfig({ ...latest, ui: { ...latest.ui, lastSelectedGameId: gameId } })
+  }
+
+  async restoreSelection(): Promise<void> {
+    const config = await this.store.getConfig()
+    let gameId = config.ui.lastSelectedGameId
+    if (gameId === undefined) {
+      const latest = (await this.store.listProfiles())
+        .filter((profile) => profile.state.lastUsedAt && profile.state.lastCaptureMethod)
+        .sort((a, b) => (b.state.lastUsedAt ?? '').localeCompare(a.state.lastUsedAt ?? ''))[0]
+      gameId = latest?.id ?? null
+      await this.persistSelectedGame(gameId)
+    }
+    if (!gameId) return
+    const profile = await this.store.getProfile(gameId)
+    if (!profile?.state.lastCaptureMethod) {
+      await this.persistSelectedGame(null)
+      return
+    }
+    this.selected = profile
+    this.method = profile.state.lastCaptureMethod
+    this.platforms.invalidateLiveStatus()
+  }
+
   async select(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
     return this.exclusive(async () => {
       const profile = await this.store.getProfile(gameId)
@@ -106,6 +133,7 @@ export class StreamOrchestrator {
       })
       this.selected = updated
       this.method = detection.method
+      await this.persistSelectedGame(updated.id)
       const warnings = [...detection.warnings, ...obsWarnings, ...thumbnailWarning, ...this.serviceFailures]
       this.warning = warnings[0] ?? null
       this.platforms.invalidateLiveStatus()
@@ -339,18 +367,20 @@ export class StreamOrchestrator {
     })
   }
 
-  invalidateProfile(gameId: string): void {
+  async invalidateProfile(gameId: string): Promise<void> {
     if (this.selected?.id !== gameId) return
     this.selected = null
     this.method = null
     this.serviceFailures = []
     this.warning = 'ゲーム設定を変更しました。配信前にゲームを選び直してください'
+    await this.persistSelectedGame(null)
   }
 
-  resetSelection(message = '設定が変更されました。配信前にゲームを選び直してください'): void {
+  async resetSelection(message = '設定が変更されました。配信前にゲームを選び直してください'): Promise<void> {
     this.selected = null
     this.method = null
     this.serviceFailures = []
     this.warning = message
+    await this.persistSelectedGame(null)
   }
 }

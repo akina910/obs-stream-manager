@@ -25,7 +25,11 @@ export class ObsController {
   private readonly streamStateListeners = new Set<(active: boolean) => void>()
   private started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
 
-  constructor(private readonly secrets: SecretStore, private readonly streamStartTimeoutMs = 8_000) {
+  constructor(
+    private readonly secrets: SecretStore,
+    private readonly streamStartTimeoutMs = 8_000,
+    private readonly streamStopTimeoutMs = streamStartTimeoutMs,
+  ) {
     this.obs.on('ConnectionClosed', () => {
       this.connected = false
       this.resetTransientOutputOwnership()
@@ -277,14 +281,9 @@ export class ObsController {
 
   async finishObsTriggeredStream(config: AppConfig): Promise<string[]> {
     await this.connect(config)
-    const warnings: string[] = []
-    await this.stopTwitchSecondary().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!message.toLowerCase().includes('no vendor was found')) warnings.push(`Twitch副出力を停止できませんでした: ${message}`)
-    })
-    this.started.twitch = false
-    await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    return warnings
+    // OBS本体の「配信停止」もアプリの「配信終了」と同じ終了操作として扱う。
+    // 配信開始時に連動して起動した録画・リプレイバッファーなどを残さない。
+    return this.stopOutputs()
   }
 
   private async restorePreviousStreamService(): Promise<void> {
@@ -337,10 +336,28 @@ export class ObsController {
   }
 
   private async waitForStreamInactive(): Promise<boolean> {
-    const deadline = Date.now() + this.streamStartTimeoutMs
+    const deadline = Date.now() + this.streamStopTimeoutMs
     do {
       const status = await this.obs.call('GetStreamStatus')
       if (!status.outputActive) return true
+      await wait(250)
+    } while (Date.now() < deadline)
+    return false
+  }
+
+  private async waitForRecordInactive(): Promise<boolean> {
+    const deadline = Date.now() + this.streamStopTimeoutMs
+    do {
+      if (!(await this.obs.call('GetRecordStatus')).outputActive) return true
+      await wait(250)
+    } while (Date.now() < deadline)
+    return false
+  }
+
+  private async waitForReplayInactive(): Promise<boolean> {
+    const deadline = Date.now() + this.streamStopTimeoutMs
+    do {
+      if (!(await this.getReplayBufferStatus()).outputActive) return true
       await wait(250)
     } while (Date.now() < deadline)
     return false
@@ -553,19 +570,41 @@ export class ObsController {
       const message = error instanceof Error ? error.message : String(error)
       if (!message.toLowerCase().includes('no vendor was found')) warnings.push(`Twitch副出力を停止できませんでした: ${message}`)
     })
-    if (replay.outputActive) await this.obs.call('StopReplayBuffer').catch((error) => warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    if (record.outputActive) await this.obs.call('StopRecord').catch((error) => warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    const outputStopChecks: Promise<void>[] = []
+    if (replay.outputActive) {
+      try {
+        await this.obs.call('StopReplayBuffer')
+        outputStopChecks.push(this.waitForReplayInactive().then((stopped) => {
+          if (!stopped) warnings.push('リプレイバッファの停止を確認できませんでした')
+        }))
+      } catch (error) {
+        warnings.push(`リプレイバッファを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (record.outputActive) {
+      try {
+        await this.obs.call('StopRecord')
+        outputStopChecks.push(this.waitForRecordInactive().then((stopped) => {
+          if (!stopped) warnings.push('通常録画の停止を確認できませんでした')
+        }))
+      } catch (error) {
+        warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     let streamStopped = !stream.outputActive
     if (stream.outputActive) {
       try {
         await this.obs.call('StopStream')
-        streamStopped = await this.waitForStreamInactive()
-        if (!streamStopped) warnings.push('OBS配信出力の停止を確認できませんでした')
+        outputStopChecks.push(this.waitForStreamInactive().then((stopped) => {
+          streamStopped = stopped
+          if (!stopped) warnings.push('OBS配信出力の停止を確認できませんでした')
+        }))
       } catch (error) {
         warnings.push(`配信を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
-        streamStopped = await this.waitForStreamInactive().catch(() => false)
+        outputStopChecks.push(this.waitForStreamInactive().then((stopped) => { streamStopped = stopped }).catch(() => { streamStopped = false }))
       }
     }
+    await Promise.all(outputStopChecks)
     if (streamStopped) {
       await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     }

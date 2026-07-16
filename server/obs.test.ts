@@ -320,6 +320,8 @@ describe('ObsController recording fallbacks', () => {
   it('globally stops active OBS and plugin outputs after the controller state has been reset', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
     let streaming = true
+    let recording = true
+    let replayBuffer = true
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
@@ -327,8 +329,11 @@ describe('ObsController recording fallbacks', () => {
       call: vi.fn(async (request: string, data?: unknown) => {
         calls.push({ request, data })
         if (request === 'GetStreamStatus') return { outputActive: streaming }
-        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: true }
+        if (request === 'GetRecordStatus') return { outputActive: recording }
+        if (request === 'GetReplayBufferStatus') return { outputActive: replayBuffer }
         if (request === 'StopStream') { streaming = false; return {} }
+        if (request === 'StopRecord') { recording = false; return {} }
+        if (request === 'StopReplayBuffer') { replayBuffer = false; return {} }
         if (request === 'CallVendorRequest') return { responseData: { success: true } }
         return {}
       }),
@@ -351,6 +356,36 @@ describe('ObsController recording fallbacks', () => {
       request: 'CallVendorRequest',
       data: { vendorName: 'aitum-vertical-canvas', requestType: 'stop_recording', requestData: {} },
     })
+  })
+
+  it('waits for delayed OBS output shutdown instead of reporting a false stop failure', async () => {
+    let stopping = false
+    let statusChecksAfterStop = 0
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetStreamStatus') {
+          if (!stopping) return { outputActive: true }
+          statusChecksAfterStop += 1
+          return { outputActive: statusChecksAfterStop < 4 }
+        }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'StopStream') { stopping = true; return {} }
+        if (request === 'CallVendorRequest') return { responseData: { success: true } }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets(), 50, 1_500)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    config.obs.endDelaySeconds = 0
+    config.features.sourceRecord = false
+    config.features.verticalRecording = false
+
+    await expect(controller.stop(config, null)).resolves.toEqual([])
+    expect(statusChecksAfterStop).toBeGreaterThanOrEqual(4)
   })
 
   it('treats an empty Source Record stop as idempotent and falls back to the Aitum stop hotkey', async () => {
@@ -580,6 +615,36 @@ describe('ObsController recording fallbacks', () => {
     await expect(controller.finishObsTriggeredStream(config)).resolves.toEqual([])
     expect(setService).toHaveBeenCalledTimes(2)
     expect(service).toEqual(previous)
+  })
+
+  it('stops recording and replay buffer when OBS itself stops streaming', async () => {
+    let recording = true
+    let replayBuffer = true
+    const calls: string[] = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        calls.push(request)
+        if (request === 'GetStreamStatus') return { outputActive: false }
+        if (request === 'GetRecordStatus') return { outputActive: recording }
+        if (request === 'GetReplayBufferStatus') return { outputActive: replayBuffer }
+        if (request === 'StopRecord') { recording = false; return {} }
+        if (request === 'StopReplayBuffer') { replayBuffer = false; return {} }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: false } }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets(), 50, 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await expect(controller.finishObsTriggeredStream(structuredClone(defaultConfig))).resolves.toEqual([])
+
+    expect(calls).toContain('StopRecord')
+    expect(calls).toContain('StopReplayBuffer')
+    expect(recording).toBe(false)
+    expect(replayBuffer).toBe(false)
   })
 
   it('does not report an old plugin without an API handshake as ready', async () => {

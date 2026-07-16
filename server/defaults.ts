@@ -3,7 +3,7 @@ import { createGameProfile } from '../shared/profile-factory.js'
 
 export const defaultConfig: AppConfig = {
   setup: { completed: false },
-  ui: { language: 'ja' },
+  ui: { language: 'ja', lastSelectedGameId: null },
   obs: { url: 'ws://127.0.0.1:4455', passwordStored: false, startDelaySeconds: 5, endDelaySeconds: 5 },
   sources: {
     microphone: 'MIC', pcGame: 'GAME_PC', geforceNow: 'GAME_GFN', switchGame: 'GAME_SWITCH', discord: 'DISCORD', bgm: 'BGM',

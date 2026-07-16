@@ -56,6 +56,7 @@ describe('StreamOrchestrator operation exclusion', () => {
       getProfile: vi.fn().mockResolvedValue(profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       status: vi.fn().mockResolvedValue({
@@ -170,6 +171,55 @@ describe('StreamOrchestrator operation exclusion', () => {
   })
 })
 
+describe('StreamOrchestrator selection recovery', () => {
+  it('migrates and restores the most recently applied game after an app restart', async () => {
+    let config = structuredClone(defaultConfig)
+    delete config.ui.lastSelectedGameId
+    const older = structuredClone(starterProfiles[1])
+    older.state.lastUsedAt = '2026-07-16T10:00:00.000Z'
+    older.state.lastCaptureMethod = 'window'
+    const latest = structuredClone(starterProfiles[0])
+    latest.state.lastUsedAt = '2026-07-16T18:01:39.722Z'
+    latest.state.lastCaptureMethod = 'local'
+    const store = {
+      getConfig: vi.fn(async () => config),
+      saveConfig: vi.fn(async (value) => { config = value as typeof config; return config }),
+      listProfiles: vi.fn().mockResolvedValue([older, latest]),
+      getProfile: vi.fn(async (id: string) => id === latest.id ? latest : null),
+    } as unknown as DataStore
+    const obs = {
+      status: vi.fn(async (_config: unknown, selectedGameId: string | null, captureMethod: string | null) => ({
+        obsConnected: true,
+        streaming: false,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId,
+        captureMethod,
+        currentScene: latest.obs.sceneName,
+        warning: null,
+        busy: false,
+      })),
+    } as unknown as ObsController
+    const platforms = {
+      invalidateLiveStatus: vi.fn(),
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+      }),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+
+    await orchestrator.restoreSelection()
+
+    await expect(orchestrator.getStatus()).resolves.toMatchObject({ selectedGameId: latest.id, captureMethod: 'local' })
+    expect(store.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ ui: expect.objectContaining({ lastSelectedGameId: latest.id }) }))
+    expect(platforms.invalidateLiveStatus).toHaveBeenCalledOnce()
+  })
+})
+
 describe('StreamOrchestrator stream startup rollback', () => {
   it('advances a persisted Part number only after startup succeeds', async () => {
     const config = structuredClone(defaultConfig)
@@ -179,6 +229,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       getProfile: vi.fn(async () => profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => { profile = value; return value }),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
@@ -213,6 +264,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       getProfile: vi.fn().mockResolvedValue(profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
@@ -259,6 +311,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       getProfile: vi.fn().mockResolvedValue(profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
@@ -298,6 +351,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       getProfile: vi.fn().mockResolvedValue(profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
@@ -335,6 +389,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       getProfile: vi.fn().mockResolvedValue(profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
@@ -379,6 +434,7 @@ describe('StreamOrchestrator OBS-triggered external sync', () => {
       getProfile: vi.fn().mockResolvedValue(profile),
       getConfig: vi.fn().mockResolvedValue(config),
       saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),

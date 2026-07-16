@@ -26,9 +26,10 @@ await store.initialize()
 const secrets = new SecretStore()
 await provisionDistributorOAuth(store, secrets)
 const logger = new AppLogger(dataDir)
-const obs = new ObsController(secrets)
+const obs = new ObsController(secrets, 8_000, 45_000)
 const platforms = new PlatformServices(secrets, store)
 const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger)
+await orchestrator.restoreSelection()
 obs.onStreamStateChanged((active) => orchestrator.handleObsStreamStateChanged(active))
 const listenPort = Number(process.env.PORT ?? 4317)
 const callbackOrigin = `http://127.0.0.1:${listenPort}`
@@ -99,13 +100,13 @@ app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
   await orchestrator.assertNotStreaming()
   const profile = await store.saveProfile(GameProfileSchema.parse(request.body))
-  orchestrator.invalidateProfile(profile.id)
+  await orchestrator.invalidateProfile(profile.id)
   return profile
 })
 app.delete<{ Params: { id: string } }>('/api/profiles/:id', async (request, reply) => {
   await orchestrator.assertNotStreaming()
   if (!(await store.removeProfile(request.params.id))) return reply.status(404).send({ error: 'Profile not found' })
-  orchestrator.invalidateProfile(request.params.id)
+  await orchestrator.invalidateProfile(request.params.id)
   return { ok: true }
 })
 
@@ -116,7 +117,7 @@ app.post<{ Params: { id: string }; Body: { mime: string; data: string; filename?
   if (!request.body?.data || !request.body?.mime) throw Object.assign(new Error('画像がありません'), { statusCode: 400 })
   const originalName = typeof request.body.filename === 'string' ? path.basename(request.body.filename).trim().slice(0, 255) || undefined : undefined
   const saved = await store.saveThumbnail(profile, Buffer.from(request.body.data, 'base64'), request.body.mime, originalName)
-  orchestrator.invalidateProfile(profile.id)
+  await orchestrator.invalidateProfile(profile.id)
   await logger.write('thumbnail.saved', { gameId: profile.id, filename: saved.state.thumbnailFilename })
   return saved
 })
@@ -126,7 +127,7 @@ app.delete<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (req
   const profile = await store.getProfile(request.params.id)
   if (!profile) return reply.status(404).send({ error: 'Profile not found' })
   const saved = await store.removeThumbnail(profile)
-  orchestrator.invalidateProfile(profile.id)
+  await orchestrator.invalidateProfile(profile.id)
   await logger.write('thumbnail.removed', { gameId: profile.id })
   return saved
 })
@@ -196,7 +197,7 @@ app.put<{ Body: { config: unknown; secrets?: Partial<Record<SecretName, string>>
   }
   const config = await store.saveConfig(next)
   await obs.disconnect()
-  orchestrator.resetSelection()
+  await orchestrator.resetSelection()
   await logger.write('config.updated')
   return config
 })
@@ -249,7 +250,7 @@ app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
   const importedConfig = await store.getConfig()
   await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
   await obs.disconnect()
-  orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
+  await orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
   return { ok: true }
 })
 
