@@ -45,7 +45,7 @@
 
 初回起動時はセットアップダイアログが開き、表示言語、OBSドックURL、OBS WebSocket、YouTube／Twitch認証、ゲーム検出を順番に確認できます。完了状態は保存され、次回起動時には自動で閉じます。設定画面からいつでも開き直せます。
 
-Steamは任意です。Steamが見つかった場合だけインストール済みゲームを自動追加します。Steamがない場合も、Game Pass、GeForce NOW、Switch、単体EXEのゲームを手動追加できます。ARKやDiabloなどの固定ゲームを初期状態へ勝手に追加しません。
+Steamは任意です。Steamクライアントにログイン済みなら、ローカルへインストールしていない所有ゲームも含めて自動追加します。SteamIDやSteam APIキーの入力は不要です。未インストールのゲームはGeForce NOW用として登録され、ローカル導入済みかクラウド利用かを一覧で判別できます。Steamがない場合も、Game Pass、GeForce NOW、Switch、単体EXEのゲームを手動追加できます。ARKやDiabloなどの固定ゲームを初期状態へ勝手に追加しません。
 
 ## 最初の接続と配信
 
@@ -78,7 +78,7 @@ Aitum Multistreamは不要です。Source RecordやAitum Verticalが無い場合
 ## 主な機能
 
 - PC／Nintendo Switch／例外ゲームのプロファイル管理
-- Steamインストール済みゲームの自動検出と一覧追加
+- Steam所有ゲーム（未インストールを含む）の自動検出と一覧追加
 - 選択ゲームと適用中プロファイルの明示
 - OBSシーン、キャプチャ、音量、録画、リプレイの連動
 - YouTube配信枠、タイトル、説明、公開範囲、ゲーム別サムネイルの自動適用
@@ -92,13 +92,13 @@ Aitum Multistreamは不要です。Source RecordやAitum Verticalが無い場合
 
 個人設定、ゲームプロファイル、サムネイル、説明文、ログ、バックアップは `%APPDATA%\obs-stream-manager` に保存されます。アプリを更新してもこのフォルダーは維持されます。
 
-OAuthトークン、配信キー、OBSパスワード、Steam APIキーなどの秘密情報は通常設定やバックアップへ入れず、Windows資格情報マネージャーの `obs-stream-manager` サービスへ保存します。
+OAuthトークン、配信キー、OBSパスワードなどの秘密情報は通常設定やバックアップへ入れず、Windows資格情報マネージャーの `obs-stream-manager` サービスへ保存します。
 
 アンインストールはWindowsの「設定」→「アプリ」→「インストールされているアプリ」から行います。再インストール時に設定を引き継げるよう、アンインストールだけでは個人データを削除しません。完全に削除する場合は、アンインストール後に `%APPDATA%\obs-stream-manager` とWindows資格情報マネージャー内の `obs-stream-manager` 項目を利用者自身で削除してください。
 
 ## Issue / Pull Request
 
-IssueとPull Requestを歓迎します。バグ報告にはWindows、OBS、本アプリのバージョン、再現手順、秘密を除いたログを添えてください。アクセストークン、更新トークン、認証コード、Client Secret、配信キー、OBSパスワード、Steam APIキーをIssueやスクリーンショットへ貼らないでください。
+IssueとPull Requestを歓迎します。バグ報告にはWindows、OBS、本アプリのバージョン、再現手順、秘密を除いたログを添えてください。アクセストークン、更新トークン、認証コード、Client Secret、配信キー、OBSパスワードをIssueやスクリーンショットへ貼らないでください。
 
 ## 開発者向け
 

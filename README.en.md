@@ -45,7 +45,7 @@ Closing the desktop window does not stop the OBS dock server. The app remains in
 
 On first launch, a setup dialog guides you through the display language, OBS dock URL, OBS WebSocket connection, YouTube/Twitch authorization, and game detection. Completion is saved, so the dialog stays closed on later launches. You can reopen it from Settings at any time.
 
-Steam is optional. Installed Steam games are added automatically only when Steam is detected. Without Steam, you can manually add Game Pass, GeForce NOW, Nintendo Switch, and standalone executable games. The app does not add fixed starter games such as ARK or Diablo.
+Steam is optional. When the Steam client is signed in, the app automatically adds owned games including games that are not installed locally. No Steam ID or Steam Web API key is required. Uninstalled games are configured for GeForce NOW, and the library clearly distinguishes local installs from cloud games. Without Steam, you can manually add Game Pass, GeForce NOW, Nintendo Switch, and standalone executable games. The app does not add fixed starter games such as ARK or Diablo.
 
 ## Connect and start a stream
 
@@ -78,7 +78,7 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 ## Main features
 
 - Profiles for PC, Nintendo Switch, and exception games
-- Automatic discovery and library insertion of installed Steam games
+- Automatic discovery and library insertion of owned Steam games, including uninstalled games
 - Clear indication of the selected game and currently applied profile
 - OBS scene, capture, audio, recording, and replay-buffer control
 - Automatic YouTube broadcast, title, description, privacy, and per-game thumbnail setup
@@ -92,13 +92,13 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 
 Personal settings, game profiles, thumbnails, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder.
 
-Secrets such as OAuth tokens, stream keys, the OBS password, and the Steam API key are excluded from normal settings and backups. They are stored under the `obs-stream-manager` service in Windows Credential Manager.
+Secrets such as OAuth tokens, stream keys, and the OBS password are excluded from normal settings and backups. They are stored under the `obs-stream-manager` service in Windows Credential Manager.
 
 Uninstall the app from **Windows Settings → Apps → Installed apps**. Uninstalling does not delete personal data, so a later installation can reuse it. To remove everything, uninstall the app and then manually delete `%APPDATA%\obs-stream-manager` and the `obs-stream-manager` entries from Windows Credential Manager.
 
 ## Issues and pull requests
 
-Issues and pull requests are welcome. Bug reports should include the Windows, OBS, and app versions, reproduction steps, and logs with secrets removed. Never paste access tokens, refresh tokens, authorization codes, client secrets, stream keys, OBS passwords, or Steam API keys into an Issue or screenshot.
+Issues and pull requests are welcome. Bug reports should include the Windows, OBS, and app versions, reproduction steps, and logs with secrets removed. Never paste access tokens, refresh tokens, authorization codes, client secrets, stream keys, or OBS passwords into an Issue or screenshot.
 
 ## Development
 

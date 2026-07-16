@@ -194,9 +194,17 @@ export class DataStore {
       const base = match ?? createPcProfile(`steam_${game.appId}`, game.name)
       const local = installedById.get(game.appId)
       const coverUrl = base.coverUrl ?? `https://cdn.cloudflare.steamstatic.com/steam/apps/${game.appId}/header.jpg`
+      const replaceFallbackName = Boolean(match) && base.displayName === `Steam App ${game.appId}` && base.displayName !== game.name
+      const displayName = replaceFallbackName ? game.name : base.displayName
+      const capture = !match && !local
+        ? { ...base.capture, preferred: 'geforce_now' as const, geforceNowEnabled: true }
+        : base.capture
       const next = {
         ...base,
+        displayName,
         coverUrl,
+        capture,
+        twitch: replaceFallbackName ? { ...base.twitch, categoryName: game.name } : base.twitch,
         library: {
           ...base.library,
           steamAppId: game.appId,
@@ -205,7 +213,9 @@ export class DataStore {
         },
       }
       const changed = !match
+        || base.displayName !== displayName
         || base.coverUrl !== coverUrl
+        || base.capture !== capture
         || base.library.steamAppId !== game.appId
         || base.library.installed !== Boolean(local)
         || base.library.installDirectory !== local?.installDir

@@ -202,33 +202,32 @@ app.put<{ Body: { config: unknown; secrets?: Partial<Record<SecretName, string>>
   return config
 })
 
-async function syncSteamProfiles(includeOwned: boolean, trigger: 'automatic' | 'manual') {
+async function scanSteamAccount() {
   const config = await store.getConfig()
-  const installed = await platforms.steamInstalledGames(config)
-  let owned: Array<{ appId: number; name: string; playtimeMinutes: number }> = []
-  const warnings = [...installed.warnings]
-  if (includeOwned && (config.steam.steamId64 || config.steam.apiKeyStored)) {
-    try { owned = await platforms.steamOwnedGames(config) } catch (error) {
-      warnings.push(`Steam Web API: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  const result = await store.syncSteamLibrary(owned, installed.games)
+  const knownGames = (await store.listProfiles()).flatMap((profile) => profile.library.steamAppId === undefined
+    ? []
+    : [{ appId: profile.library.steamAppId, name: profile.displayName }])
+  return platforms.steamAccountLibrary(config, knownGames)
+}
+
+async function syncSteamProfiles(trigger: 'automatic' | 'manual') {
+  const steam = await scanSteamAccount()
+  const result = await store.syncSteamLibrary(steam.ownedGames, steam.games)
   await logger.write('steam.synced', {
     trigger,
-    owned: owned.length,
-    installed: installed.games.length,
-    libraries: installed.libraries,
+    owned: steam.ownedGames.length,
+    installed: steam.games.length,
+    libraries: steam.libraries,
     created: result.created,
     updated: result.updated,
-    warnings,
+    warnings: steam.warnings,
   })
-  return { ...result, owned: owned.length, installed: installed.games.length, libraries: installed.libraries, warnings }
+  return { ...result, owned: steam.ownedGames.length, installed: steam.games.length, libraries: steam.libraries, warnings: steam.warnings }
 }
 
 app.get('/api/steam/sync', async () => {
-  const config = await store.getConfig()
-  const [owned, installed] = await Promise.all([platforms.steamOwnedGames(config).catch(() => []), platforms.steamInstalledGames(config)])
-  return { owned, installed: installed.games, libraries: installed.libraries, warnings: installed.warnings }
+  const steam = await scanSteamAccount()
+  return { owned: steam.ownedGames, installed: steam.games, libraries: steam.libraries, warnings: steam.warnings }
 })
 app.post('/api/steam/scan', async () => {
   try { await orchestrator.assertNotStreaming() } catch (error) {
@@ -236,11 +235,11 @@ app.post('/api/steam/scan', async () => {
     if (statusCode !== 409) throw error
     return { profiles: await store.listProfiles(), owned: 0, installed: 0, created: 0, updated: 0, libraries: [], warnings: [], skipped: true }
   }
-  return syncSteamProfiles(false, 'automatic')
+  return syncSteamProfiles('automatic')
 })
 app.post('/api/steam/sync', async () => {
   await orchestrator.assertNotStreaming()
-  return syncSteamProfiles(true, 'manual')
+  return syncSteamProfiles('manual')
 })
 app.post('/api/backup/export', async () => store.exportBackup())
 app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
