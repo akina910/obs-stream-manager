@@ -4,7 +4,7 @@ import sharp from 'sharp'
 import type { AppConfig, ChatMessage, GameProfile, PlatformRuntimeStatus, PlatformRuntimeStatuses } from '../shared/contracts.js'
 import { renderTitleTemplate } from '../shared/title-template.js'
 import { SecretStore } from './secrets.js'
-import { scanSteamLibraries, type SteamLibraryScan } from './steam-library.js'
+import { scanSteamAccountLibrary, scanSteamLibraries, type SteamAccountLibraryScan, type SteamLibraryScan, type SteamOwnedGame } from './steam-library.js'
 import type { DataStore } from './storage.js'
 
 export type ThumbnailPreparation = {
@@ -499,17 +499,12 @@ export class PlatformServices {
     this.invalidateLiveStatus()
   }
 
-  async steamOwnedGames(config: AppConfig): Promise<Array<{ appId: number; name: string; playtimeMinutes: number }>> {
-    const key = this.secrets.get('steam-api-key')
-    if (!key || !config.steam.steamId64) throw new Error('Steam API キーと SteamID64 を設定してください')
-    const url = new URL('https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/')
-    url.search = new URLSearchParams({ key, steamid: config.steam.steamId64, include_appinfo: 'true', include_played_free_games: 'true' }).toString()
-    const result = await apiJson<{ response: { games?: Array<{ appid: number; name: string; playtime_forever: number }> } }>(url.toString(), {})
-    return (result.response.games ?? []).map((game) => ({ appId: game.appid, name: game.name, playtimeMinutes: game.playtime_forever }))
-  }
-
   async steamInstalledGames(config: AppConfig): Promise<SteamLibraryScan> {
     return scanSteamLibraries(config.steam.installPath)
+  }
+
+  async steamAccountLibrary(config: AppConfig, knownGames: SteamOwnedGame[]): Promise<SteamAccountLibraryScan> {
+    return scanSteamAccountLibrary(config.steam.installPath, { knownGames, storeLanguage: config.ui.language === 'en' ? 'english' : 'japanese' })
   }
 
   private addComment(message: ChatMessage): void {

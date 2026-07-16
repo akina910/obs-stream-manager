@@ -199,6 +199,31 @@ describe('DataStore', () => {
     expect(result.profiles.find((profile) => profile.library.steamAppId === 1234)?.library).toMatchObject({ installed: true, installDirectory: 'D:\\SteamLibrary\\steamapps\\common\\New Steam Game' })
   })
 
+  it('defaults uninstalled Steam games to GeForce NOW without changing existing choices', async () => {
+    const store = await createStore()
+    const first = await store.syncSteamLibrary([{ appId: 8888, name: 'Cloud Game' }], [])
+    const cloudGame = first.profiles.find((profile) => profile.library.steamAppId === 8888)!
+    expect(cloudGame.capture).toMatchObject({ preferred: 'geforce_now', geforceNowEnabled: true })
+    await store.saveProfile({ ...cloudGame, capture: { ...cloudGame.capture, preferred: 'display', allowDisplayFallback: true } })
+
+    const second = await store.syncSteamLibrary([{ appId: 8888, name: 'Cloud Game' }], [])
+
+    expect(second.profiles.find((profile) => profile.library.steamAppId === 8888)?.capture).toMatchObject({ preferred: 'display', allowDisplayFallback: true })
+  })
+
+  it('replaces a temporary App ID name when Steam metadata becomes available', async () => {
+    const store = await createStore()
+    await store.syncSteamLibrary([{ appId: 9998, name: 'Steam App 9998' }], [])
+
+    const result = await store.syncSteamLibrary([{ appId: 9998, name: 'Resolved Game' }], [])
+
+    expect(result.updated).toBe(1)
+    expect(result.profiles.find((profile) => profile.library.steamAppId === 9998)).toMatchObject({
+      displayName: 'Resolved Game',
+      twitch: { categoryName: 'Resolved Game' },
+    })
+  })
+
   it('keeps automatic Steam scans idempotent and clears removed installs', async () => {
     const store = await createStore()
     const installed = [{ appId: 1234, name: 'Auto-detected Game', installDir: 'D:\\SteamLibrary\\steamapps\\common\\Auto-detected Game' }]

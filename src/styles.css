@@ -170,6 +170,7 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .game-meta { display: flex; gap: 6px; flex-wrap: wrap; }
 .game-meta > span { padding: 2px 7px; display: flex; align-items: center; gap: 4px; border: 1px solid var(--border-mid); border-radius: 5px; color: var(--muted); background: var(--surface-3); font-size: 11px; white-space: nowrap; }
 .game-meta .tone-live { color: var(--live); }
+.game-meta .tone-cloud { color: #8fb2ff; }
 .game-meta .tone-pending { color: var(--pending); }
 .game-meta .tone-error { color: var(--error); }
 .game-actions { flex: none; display: flex; flex-direction: column; gap: 6px; }
