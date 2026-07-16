@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSPrope
 import {
   AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleHelp, CircleStop, Copy, Gamepad2,
   Image as ImageIcon, LoaderCircle, LockKeyhole, Play, Plus, RefreshCw,
-  Search, Settings, Star, Trash2, Upload, X,
+  Search, Settings, Star, Trash2, Upload, Users, X,
 } from 'lucide-react'
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
 import { createGameProfile } from '../shared/profile-factory'
@@ -138,12 +138,14 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
       </div>
       {deliveryWarning && <div className={`runtime-status-warning ${!status.streaming && status.platforms.youtube.state === 'live' || !status.streaming && status.platforms.twitch.state === 'live' ? 'danger' : ''}`} role="alert"><AlertTriangle size={14} /><span>{t(deliveryWarning)}</span></div>}
       <div className="platform-grid">
-        {platformOutputs.map((output) => (
-          <div className={`platform-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}`} title={output.detail ? t(output.detail) : undefined}>
+        {platformOutputs.map((output) => {
+          const viewerCount = output.key === 'youtube' || output.key === 'twitch' ? status.platforms[output.key].viewerCount : undefined
+          return <div className={`platform-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}`} title={output.detail ? t(output.detail) : undefined}>
             <div><ServiceIcon service={output.key === 'youtube' ? 'youtube' : output.key === 'twitch' ? 'twitch' : 'obs'} /><span>{t(output.label)}</span></div>
             <strong><StatusDot tone={output.tone} pulse={output.active} />{t(output.state)}</strong>
+            {(output.key === 'youtube' || output.key === 'twitch') && output.active && <span className={`viewer-count ${viewerCount == null ? 'unknown' : ''}`}><Users size={11} />{viewerCount == null ? t('視聴者数取得待ち') : t('同時視聴 {count}', { count: viewerCount })}</span>}
           </div>
-        ))}
+        })}
       </div>
       <div className="recording-status">
         <button className="recording-toggle" aria-expanded={recordingsOpen} onClick={() => setRecordingsOpen((current) => !current)}><ChevronRight size={12} /><span>{t('録画系ステータス')}</span><b>{activeRecordings}/{recordingOutputs.length} {t('稼働')}</b></button>
@@ -846,13 +848,13 @@ export default function App() {
     <DesktopLaunchNotice />
     <nav className="tabs">{groups.map(({ id, label }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{t(label)}</button>)}</nav>
     <RuntimeStatusBar status={status} />
+    <CommentsSection comments={comments} language={language} streaming={status.streaming} t={t} />
     {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} status={status} oauthStatus={oauthStatus} oauthProgress={oauthProgress} steamScan={steamScan} onOAuthConnect={connectOAuth} onTwitchOutputTest={async () => { setToast({ kind: 'warning', text: 'Twitchへ非公開の映像テストを15秒間送信しています' }); const result = await api.testTwitchOutput(); setToast({ kind: result.skippedFrames === 0 ? 'success' : 'warning', text: 'Twitch映像テスト成功: {seconds}秒・{megabytes}MB送信・欠落{skipped}フレーム', values: { seconds: Math.round(result.durationMs / 1000), megabytes: (result.bytesSent / 1_000_000).toFixed(1), skipped: result.skippedFrames } }); await refresh() }} onReconnect={async () => { await refresh(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { await saveAppConfig(next, secrets); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamScan={scanSteam} onSteamSync={async () => { const result = await api.steamSync(); if (result.created || result.updated) setProfiles(result.profiles); setSteamScan(result); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: 'Steam同期: 新規{created}件・更新{updated}件{warning}', values: { created: result.created, updated: result.updated, warning: result.warnings[0] ? ` / ${result.warnings[0]}` : '' } }) }} onOpenSetup={() => setSetupOpen(true)} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>{t('OAuth接続状態を取得できません。OBS操作は利用できます。')}</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />{t('状態を再確認')}</button></main>) : <main className="library-view">
       <div className="search-row"><label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('ゲームを検索')} />{search && <button aria-label={t('検索をクリア')} onClick={() => setSearch('')}><X size={14} /></button>}</label><button className="add-button" disabled={activeOperation} onClick={() => setAdding(true)}><Plus size={14} />{t('追加')}</button></div>
       {selected && <SelectedGameBanner profile={selected} status={status} />}
       {tab === 'switch' && <p className="tab-note">{t('Switchはゲーム名を自動判定しません。配信するゲームを手動で選択してください。')}</p>}{tab === 'exception' && <p className="tab-note">{t('通常のライブラリ連携が難しいゲームを扱います。')}</p>}
       {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>{t('お気に入り')}</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => <button key={profile.id} className={selected?.id === profile.id ? 'selected' : ''} aria-current={selected?.id === profile.id ? 'true' : undefined} disabled={actionBusy} onClick={() => selectGame(profile)}><ProfileArtwork profile={profile} size="favorite" /><strong>{profile.displayName}</strong>{selected?.id === profile.id && <span className="favorite-selected-label"><Check size={10} strokeWidth={3} />{t('選択中')}</span>}</button>)}</div></section>}
       <section className="library-section"><div className="section-title"><h2>{t(platformTitles[tab])}</h2><span>{filtered.length} {t('件')}</span></div><div className="game-list">{filtered.map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => selectGame(profile)} onEdit={() => setEditing(profile)} onFavorite={() => toggleFavorite(profile)} />)}{filtered.length === 0 && <div className="empty"><Gamepad2 size={24} /><strong>{t('ゲームがありません')}</strong><button onClick={() => setAdding(true)}>{t('ゲームを追加')}</button></div>}</div></section>
-      <CommentsSection comments={comments} language={language} streaming={status.streaming} t={t} />
     </main>}
     <ControlPanel status={status} selected={selected} busy={actionBusy} onChooseGame={chooseGame} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
     {setupOpen && <FirstRunSetup config={config} status={status} oauthStatus={oauthStatus} steamScan={steamScan} onSaveObs={saveSetupObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onLanguageChange={changeLanguage} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}

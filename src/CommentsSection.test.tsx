@@ -1,9 +1,10 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ChatMessage } from '../shared/contracts'
+import type { Translator } from './i18n'
 import { CommentsSection } from './CommentsSection'
 
-const translate = (source: string) => source
+const translate: Translator = (source, values = {}) => Object.entries(values).reduce((text, [key, value]) => text.replaceAll(`{${key}}`, String(value)), source)
 
 const comments: ChatMessage[] = [
   {
@@ -32,12 +33,17 @@ describe('CommentsSection', () => {
 
     expect(html).toContain('data-service="youtube"')
     expect(html).toContain('data-service="twitch"')
+    expect(html).toContain('ライブコメント')
+    expect(html).toContain('2件')
+    expect(html).toContain('comment-service youtube')
+    expect(html).toContain('comment-service twitch')
     expect(html).toContain('YouTube視聴者')
     expect(html).toContain('YouTubeからのコメント')
     expect(html).toContain('Twitchモデレーター')
     expect(html).toContain('@配信者 Twitchからのコメント')
     expect(html).toContain('comment-row mention')
     expect(html).toContain('MOD')
+    expect(html.indexOf('Twitchモデレーター')).toBeLessThan(html.indexOf('YouTube視聴者'))
   })
 
   it('does not show retained comments while streaming is stopped', () => {

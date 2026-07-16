@@ -645,17 +645,18 @@ describe('PlatformServices external live status', () => {
       if (url.hostname === 'www.googleapis.com' && url.pathname.endsWith('/liveBroadcasts')) {
         return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus: 'live' }, contentDetails: { boundStreamId: 'stream-id' } }] })
       }
-      if (url.hostname === 'api.twitch.tv' && url.pathname === '/helix/streams') return json({ data: [{ id: 'stream-id', type: 'live' }] })
+      if (url.hostname === 'www.googleapis.com' && url.pathname.endsWith('/videos')) return json({ items: [{ liveStreamingDetails: { concurrentViewers: '12' } }] })
+      if (url.hostname === 'api.twitch.tv' && url.pathname === '/helix/streams') return json({ data: [{ id: 'stream-id', type: 'live', viewer_count: 7 }] })
       throw new Error(`Unexpected request: ${url}`)
     })
     const platforms = new PlatformServices(secretStore, {} as DataStore)
 
     await expect(platforms.getLiveStatus(configured, profile)).resolves.toMatchObject({
-      youtube: { state: 'live', detail: 'YouTubeで公開配信中' },
-      twitch: { state: 'live', detail: 'Twitchで公開配信中' },
+      youtube: { state: 'live', detail: 'YouTubeで公開配信中', viewerCount: 12 },
+      twitch: { state: 'live', detail: 'Twitchで公開配信中', viewerCount: 7 },
     })
     await platforms.getLiveStatus(configured, profile)
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
   it('does not let an invalidated in-flight status request repopulate the cache', async () => {

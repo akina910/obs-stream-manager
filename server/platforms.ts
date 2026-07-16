@@ -33,6 +33,11 @@ type YouTubeLifecyclePolling = {
   transitionTimeoutMs?: number
 }
 
+function parseViewerCount(value: unknown): number | null {
+  const count = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
+  return Number.isSafeInteger(count) && count >= 0 ? count : null
+}
+
 const defaultYouTubeLifecyclePolling = {
   pollIntervalMs: 1000,
   broadcastLookupTimeoutMs: 10_000,
@@ -96,7 +101,16 @@ export class PlatformServices {
       const broadcast = result.items[0]
       if (!broadcast) return { state: 'unprepared', detail: '準備済みの配信枠が見つかりません', checkedAt }
       const lifeCycle = String(broadcast.status.lifeCycleStatus ?? '')
-      if (lifeCycle === 'live') return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt }
+      if (lifeCycle === 'live') {
+        let viewerCount: number | null = null
+        try {
+          const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
+          videoUrl.search = new URLSearchParams({ part: 'liveStreamingDetails', id: broadcast.id }).toString()
+          const video = await apiJson<{ items: Array<{ liveStreamingDetails?: { concurrentViewers?: string } }> }>(videoUrl.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
+          viewerCount = parseViewerCount(video.items[0]?.liveStreamingDetails?.concurrentViewers)
+        } catch { /* A hidden/unavailable view count must not downgrade a confirmed live broadcast. */ }
+        return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt, viewerCount }
+      }
       if (lifeCycle === 'liveStarting') return { state: 'starting', detail: 'YouTubeで公開開始処理中', checkedAt }
       if (lifeCycle === 'testing' || lifeCycle === 'testStarting') return { state: 'starting', detail: 'YouTubeテスト配信中（視聴者には未公開）', checkedAt }
       if (lifeCycle === 'ready') return { state: 'ready', detail: 'YouTube公開開始待ち', checkedAt }
@@ -115,12 +129,12 @@ export class PlatformServices {
     try {
       const token = await this.twitchAccessToken(config)
       const url = `https://api.twitch.tv/helix/streams?user_id=${encodeURIComponent(config.twitch.broadcasterId)}`
-      const result = await apiJson<{ data: Array<{ id: string; type: string }> }>(url, {
+      const result = await apiJson<{ data: Array<{ id: string; type: string; viewer_count?: number }> }>(url, {
         headers: { authorization: `Bearer ${token}`, 'client-id': config.twitch.clientId },
       })
-      const live = result.data.some((stream) => stream.type === 'live')
+      const live = result.data.find((stream) => stream.type === 'live')
       return live
-        ? { state: 'live', detail: 'Twitchで公開配信中', checkedAt }
+        ? { state: 'live', detail: 'Twitchで公開配信中', checkedAt, viewerCount: parseViewerCount(live.viewer_count) }
         : { state: 'offline', detail: 'Twitchはオフライン', checkedAt }
     } catch (error) {
       return { state: 'error', detail: `Twitch状態の確認に失敗: ${error instanceof Error ? error.message : String(error)}`, checkedAt }
