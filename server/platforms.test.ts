@@ -65,6 +65,49 @@ describe('PlatformServices Twitch token management', () => {
     expect(refreshBody.has('client_secret')).toBe(false)
     expect(secrets.get('twitch-refresh-token')).toBe('refresh-two')
     expect(secrets.get('twitch-access-token')).toBe('access-two')
+    expect(secrets.get('twitch-oauth-health')).toBe('')
+  })
+
+  it('marks an invalid Twitch refresh token for reconnection', async () => {
+    const secrets = new Map([
+      ['twitch-refresh-token', 'expired-refresh'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ message: 'Invalid refresh token' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const configured = structuredClone(defaultConfig)
+    configured.twitch.clientId = 'client-id'
+    const accessToken = (platforms as unknown as { twitchAccessToken: (value: typeof configured) => Promise<string> }).twitchAccessToken.bind(platforms)
+
+    await expect(accessToken(configured)).rejects.toThrow('Invalid refresh token')
+    expect(secrets.get('twitch-oauth-health')).toBe('reconnect_required')
+  })
+
+  it('does not turn a temporary Twitch outage into a reconnect requirement', async () => {
+    const secrets = new Map([
+      ['twitch-refresh-token', 'valid-refresh'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ message: 'temporarily unavailable' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const configured = structuredClone(defaultConfig)
+    configured.twitch.clientId = 'client-id'
+    const accessToken = (platforms as unknown as { twitchAccessToken: (value: typeof configured) => Promise<string> }).twitchAccessToken.bind(platforms)
+
+    await expect(accessToken(configured)).rejects.toThrow('temporarily unavailable')
+    expect(secrets.has('twitch-oauth-health')).toBe(false)
   })
 })
 

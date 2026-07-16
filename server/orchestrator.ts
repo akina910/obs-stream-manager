@@ -323,7 +323,19 @@ export class StreamOrchestrator {
       if (status.streaming || externalActive) {
         throw Object.assign(new Error('配信中はTwitch出力テストを実行できません。配信を停止してから再実行してください'), { statusCode: 409 })
       }
-      return this.obs.testTwitchIngest(await this.store.getConfig())
+      const config = await this.store.getConfig()
+      try {
+        return await this.obs.testTwitchIngest(config)
+      } finally {
+        const active = await this.obs.isStreaming(config).catch(() => null)
+        if (active === null) {
+          this.obsStreamStateRevision += 1
+          this.observedObsStreaming = null
+          this.pendingObsStreamState = null
+        } else {
+          this.markManagedObsState(active)
+        }
+      }
     })
   }
 

@@ -29,6 +29,7 @@ describe('StreamOrchestrator operation exclusion', () => {
         busy: true,
       }),
       testTwitchIngest,
+      isStreaming: vi.fn().mockResolvedValue(false),
     } as unknown as ObsController
     const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
     const platforms = {
@@ -46,6 +47,72 @@ describe('StreamOrchestrator operation exclusion', () => {
 
     releaseTest()
     await expect(pendingTest).resolves.toBeUndefined()
+  })
+
+  it('does not treat Twitch bandwidth-test events as a real broadcast lifecycle', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({
+        obsConnected: true,
+        streaming: false,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId: profile.id,
+        captureMethod: 'window',
+        currentScene: profile.obs.sceneName,
+        warning: null,
+        busy: true,
+      }),
+      applyProfile: vi.fn().mockResolvedValue([]),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
+      isStreaming: vi.fn().mockResolvedValue(false),
+      testTwitchIngest: vi.fn(),
+      startSecondaryTwitchForObsStream: vi.fn(),
+      finishObsTriggeredStream: vi.fn().mockResolvedValue([]),
+    } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'ready', detail: 'YouTube公開開始待ち', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'Twitchはオフライン', checkedAt: new Date().toISOString() },
+      }),
+      startYouTubeBroadcast: vi.fn(),
+      completeYouTubeBroadcast: vi.fn(),
+      startComments: vi.fn(),
+      stopComments: vi.fn(),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+    vi.mocked(obs.testTwitchIngest).mockImplementation(async () => {
+      orchestrator.handleObsStreamStateChanged(true)
+      orchestrator.handleObsStreamStateChanged(false)
+      return { ok: true, durationMs: 1, bytesSent: 1, totalFrames: 1, skippedFrames: 0, congestion: 0 }
+    })
+
+    await orchestrator.select(profile.id, 'window')
+    await expect(orchestrator.testTwitchOutput()).resolves.toMatchObject({ ok: true })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(obs.startSecondaryTwitchForObsStream).not.toHaveBeenCalled()
+    expect(obs.finishObsTriggeredStream).not.toHaveBeenCalled()
+    expect(platforms.startYouTubeBroadcast).not.toHaveBeenCalled()
+    expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+    expect(platforms.startComments).not.toHaveBeenCalled()
+    expect(platforms.stopComments).not.toHaveBeenCalled()
+    expect(logger.write).not.toHaveBeenCalledWith('stream.obs_started', expect.anything())
+    expect(logger.write).not.toHaveBeenCalledWith('stream.obs_stopped', expect.anything())
   })
 
   it('rejects scene changes while a replay save is still running', async () => {

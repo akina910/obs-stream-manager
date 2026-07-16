@@ -89,6 +89,7 @@ export class OAuthManager {
     const youtubeReconnectRequired = this.secrets.get('youtube-oauth-health') === 'reconnect_required'
     const twitchAccessTokenStored = Boolean(this.secrets.get('twitch-access-token'))
     const twitchRefreshTokenStored = Boolean(this.secrets.get('twitch-refresh-token'))
+    const twitchReconnectRequired = this.secrets.get('twitch-oauth-health') === 'reconnect_required'
     const twitchStreamKeyStored = Boolean(this.secrets.get('twitch-stream-key'))
     const twitchStreamServerStored = Boolean(this.secrets.get('twitch-stream-server'))
 
@@ -108,7 +109,7 @@ export class OAuthManager {
     const twitchAppConfigured = Boolean(config.twitch.clientId)
     const twitchAuthorizing = this.twitchDevices.size > 0
     const twitchBroadcasterStored = Boolean(config.twitch.broadcasterId)
-    const twitchAccountLinked = twitchAccessTokenStored && twitchRefreshTokenStored && twitchBroadcasterStored
+    const twitchAccountLinked = twitchAccessTokenStored && twitchRefreshTokenStored && twitchBroadcasterStored && !twitchReconnectRequired
       && twitchStreamKeyStored && twitchStreamServerStored
     const twitchMetadataMismatch = config.twitch.accessTokenStored !== twitchAccessTokenStored
       || config.twitch.refreshTokenStored !== twitchRefreshTokenStored
@@ -133,7 +134,9 @@ export class OAuthManager {
           : youtubeStage === 'ready'
             ? 'OAuthアプリ準備済みです。Google認証を開始できます'
             : 'この配布パッケージにYouTube接続機能が含まれていません。更新版を再インストールしてください'
-    const twitchDetail = twitchStage === 'connected'
+    const twitchDetail = twitchReconnectRequired
+      ? '保存済みのTwitch認証を更新できません。Twitchを再接続してください'
+      : twitchStage === 'connected'
       ? 'Twitch認証情報・配信者ID・配信キーをWindows資格情報へ保存済みです'
       : twitchStage === 'authorizing'
         ? 'Twitchのデバイス認証完了を待っています'
@@ -320,6 +323,7 @@ export class OAuthManager {
     }
     const config = await this.store.getConfig()
     clearTwitchStreamSecrets(this.secrets)
+    this.secrets.set('twitch-oauth-health', '')
     this.secrets.set('twitch-access-token', token.access_token)
     this.secrets.set('twitch-refresh-token', token.refresh_token)
     this.secrets.set('twitch-stream-key', streamKey)

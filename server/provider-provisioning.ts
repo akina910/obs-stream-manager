@@ -88,6 +88,7 @@ export async function provisionProviderOAuth(
     secrets.set('twitch-client-secret', '')
     secrets.set('twitch-access-token', '')
     secrets.set('twitch-refresh-token', '')
+    secrets.set('twitch-oauth-health', '')
     clearTwitchStreamSecrets(secrets)
   }
 

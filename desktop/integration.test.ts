@@ -8,6 +8,7 @@ import {
   hasDesktopArgument,
   parseDesktopPreferences,
   quitApplicationArgument,
+  shouldShowWindowForSecondInstance,
   supportsWindowsLoginStart,
   windowsAppId,
 } from './integration.js'
@@ -23,6 +24,9 @@ describe('desktop integration lifecycle', () => {
     expect(hasDesktopArgument(['app.exe', backgroundLaunchArgument], backgroundLaunchArgument)).toBe(true)
     expect(hasDesktopArgument(['app.exe', quitApplicationArgument], quitApplicationArgument)).toBe(true)
     expect(hasDesktopArgument(['app.exe'], backgroundLaunchArgument)).toBe(false)
+    expect(shouldShowWindowForSecondInstance(['app.exe'])).toBe(true)
+    expect(shouldShowWindowForSecondInstance(['app.exe', backgroundLaunchArgument])).toBe(false)
+    expect(shouldShowWindowForSecondInstance(['app.exe', quitApplicationArgument])).toBe(false)
   })
 
   it('enables Windows login start only for installed packaged builds', () => {

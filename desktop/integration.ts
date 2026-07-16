@@ -19,6 +19,10 @@ export function hasDesktopArgument(args: string[], argument: string): boolean {
   return args.includes(argument)
 }
 
+export function shouldShowWindowForSecondInstance(args: string[]): boolean {
+  return !hasDesktopArgument(args, quitApplicationArgument) && !hasDesktopArgument(args, backgroundLaunchArgument)
+}
+
 export function supportsWindowsLoginStart(isPackaged: boolean, portableExecutableFile: string | undefined, installedMarkerExists: boolean): boolean {
   return isPackaged && !portableExecutableFile && installedMarkerExists
 }

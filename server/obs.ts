@@ -26,7 +26,10 @@ export class ObsController {
   private started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
 
   constructor(private readonly secrets: SecretStore, private readonly streamStartTimeoutMs = 8_000) {
-    this.obs.on('ConnectionClosed', () => { this.connected = false })
+    this.obs.on('ConnectionClosed', () => {
+      this.connected = false
+      this.resetTransientOutputOwnership()
+    })
     this.obs.on('StreamStateChanged', ({ outputActive }) => {
       for (const listener of this.streamStateListeners) listener(outputActive)
     })
@@ -45,8 +48,16 @@ export class ObsController {
   }
 
   async disconnect(): Promise<void> {
-    if (this.connected) await this.obs.disconnect()
-    this.connected = false
+    try {
+      if (this.connected) await this.obs.disconnect()
+    } finally {
+      this.connected = false
+      this.resetTransientOutputOwnership()
+    }
+  }
+
+  private resetTransientOutputOwnership(): void {
+    this.started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
   }
 
   private captureSource(profile: GameProfile, method: CaptureMethod): string {
@@ -653,7 +664,8 @@ export class ObsController {
       return { obsConnected: true, streaming: stream.outputActive, streamElapsedMs: stream.outputDuration, recording: record.outputActive, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy, twitchOutputPluginReady: twitchOutputPlugin.state === 'ready', twitchOutputPlugin }
     } catch {
       this.connected = false
-      return { obsConnected: false, streaming: false, recording: false, replayBuffer: false, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: null, warning, busy, twitchOutputPluginReady: false, twitchOutputPlugin: { state: 'missing', detail: 'OBS未接続のため副出力プラグインを確認できません', outputActive: false } }
+      this.resetTransientOutputOwnership()
+      return { obsConnected: false, streaming: false, recording: false, replayBuffer: false, sourceRecord: false, verticalRecording: false, selectedGameId, captureMethod, currentScene: null, warning, busy, twitchOutputPluginReady: false, twitchOutputPlugin: { state: 'missing', detail: 'OBS未接続のため副出力プラグインを確認できません', outputActive: false } }
     }
   }
 }

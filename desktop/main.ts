@@ -9,6 +9,7 @@ import {
   DesktopPreferenceStore,
   hasDesktopArgument,
   quitApplicationArgument,
+  shouldShowWindowForSecondInstance,
   supportsWindowsLoginStart,
   windowsAppId,
   type DesktopIntegrationSettings,
@@ -228,7 +229,7 @@ if (!app.requestSingleInstanceLock()) {
       requestApplicationQuit()
       return
     }
-    showMainWindow()
+    if (shouldShowWindowForSecondInstance(argv)) showMainWindow()
   })
 
   ipcMain.handle('desktop:open-external', async (_event, url: unknown) => {

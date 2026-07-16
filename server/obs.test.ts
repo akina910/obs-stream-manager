@@ -602,4 +602,54 @@ describe('ObsController recording fallbacks', () => {
     expect(status.twitchOutputPluginReady).toBe(false)
     expect(status.twitchOutputPlugin?.state).toBe('incompatible')
   })
+
+  it('clears transient plugin-recording states when OBS is disconnected', async () => {
+    const fake = {
+      connect: vi.fn().mockRejectedValue(new Error('OBS is not running')),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    ;(controller as unknown as { started: Record<string, unknown> }).started = {
+      stream: true,
+      twitch: true,
+      record: true,
+      replay: true,
+      sourceRecord: true,
+      vertical: true,
+      sourceRecordSource: 'Game Capture',
+    }
+
+    const status = await controller.status(structuredClone(defaultConfig), null, null, false, null)
+
+    expect(status).toMatchObject({ obsConnected: false, sourceRecord: false, verticalRecording: false })
+    expect((controller as unknown as { started: { sourceRecord: boolean; vertical: boolean } }).started).toMatchObject({ sourceRecord: false, vertical: false })
+  })
+
+  it('clears transient output ownership even when websocket disconnect reports an error', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockRejectedValue(new Error('socket already closed')),
+      on: vi.fn(),
+      call: vi.fn(),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    await controller.connect(structuredClone(defaultConfig))
+    ;(controller as unknown as { started: Record<string, unknown> }).started = {
+      stream: true,
+      twitch: true,
+      record: true,
+      replay: true,
+      sourceRecord: true,
+      vertical: true,
+      sourceRecordSource: 'Game Capture',
+    }
+
+    await expect(controller.disconnect()).rejects.toThrow('socket already closed')
+    expect((controller as unknown as { started: { stream: boolean; sourceRecord: boolean; vertical: boolean } }).started)
+      .toMatchObject({ stream: false, sourceRecord: false, vertical: false })
+  })
 })

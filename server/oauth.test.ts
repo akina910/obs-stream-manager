@@ -71,6 +71,31 @@ describe('OAuthManager one-button authorization', () => {
     })
   })
 
+  it('does not report Twitch as connected after a token refresh requires reconnection', async () => {
+    const test = harness()
+    const configured = structuredClone(defaultConfig)
+    configured.twitch.clientId = 'twitch-public-client'
+    configured.twitch.accessTokenStored = true
+    configured.twitch.refreshTokenStored = true
+    configured.twitch.broadcasterId = 'broadcaster-id'
+    test.setConfig(configured)
+    test.secretValues.set('twitch-access-token', 'twitch-access')
+    test.secretValues.set('twitch-refresh-token', 'twitch-refresh')
+    test.secretValues.set('twitch-stream-key', 'twitch-stream-key')
+    test.secretValues.set('twitch-stream-server', 'rtmp://twitch.example/app')
+    test.secretValues.set('twitch-oauth-health', 'reconnect_required')
+
+    await expect(test.oauth.status()).resolves.toMatchObject({
+      twitch: {
+        stage: 'partial',
+        accessTokenStored: true,
+        refreshTokenStored: true,
+        accountLinked: false,
+        detail: expect.stringContaining('再接続'),
+      },
+    })
+  })
+
   it('uses the OS secret store as connection truth and exposes incomplete Twitch state', async () => {
     const test = harness()
     const configured = structuredClone(defaultConfig)
@@ -164,6 +189,7 @@ describe('OAuthManager one-button authorization', () => {
     const configured = structuredClone(defaultConfig)
     configured.twitch.clientId = 'twitch-public-client'
     test.setConfig(configured)
+    test.secretValues.set('twitch-oauth-health', 'reconnect_required')
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({
         device_code: 'device-code',
@@ -195,6 +221,7 @@ describe('OAuthManager one-button authorization', () => {
     expect(test.secretValues.get('twitch-refresh-token')).toBe('twitch-refresh')
     expect(test.secretValues.get('twitch-stream-key')).toBe('twitch-stream-key')
     expect(test.secretValues.get('twitch-stream-server')).toBe('rtmp://ingest.global-contribute.live-video.net/app')
+    expect(test.secretValues.has('twitch-oauth-health')).toBe(false)
     expect(test.config().twitch).toMatchObject({
       broadcasterId: 'broadcaster-id',
       accessTokenStored: true,

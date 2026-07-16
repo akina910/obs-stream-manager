@@ -314,10 +314,14 @@ export class PlatformServices {
         if (clientSecret) body.set('client_secret', clientSecret)
         const response = await fetch('https://id.twitch.tv/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
         const token = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; message?: string }
-        if (!response.ok || !token.access_token) throw new Error(token.message ?? 'Twitch token refresh failed')
+        if (!response.ok || !token.access_token) {
+          if (response.status === 400 || response.status === 401) this.secrets.set('twitch-oauth-health', 'reconnect_required')
+          throw new Error(token.message ?? 'Twitch token refresh failed')
+        }
         const nextRefreshToken = token.refresh_token ?? refreshToken
         this.secrets.set('twitch-access-token', token.access_token)
         if (token.refresh_token) this.secrets.set('twitch-refresh-token', token.refresh_token)
+        this.secrets.set('twitch-oauth-health', '')
         const nextCredentialKey = crypto.createHash('sha256').update(`${config.twitch.clientId}\0${nextRefreshToken}`).digest('hex')
         this.twitchToken = { value: token.access_token, expiresAt: refreshStartedAt + (token.expires_in ?? 3600) * 1000, credentialKey: nextCredentialKey }
         return token.access_token
