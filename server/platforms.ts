@@ -507,13 +507,15 @@ export class PlatformServices {
     return [...this.comments.values()].sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))
   }
 
-  private async pollYouTubeComments(config: AppConfig): Promise<number> {
+  private async pollYouTubeComments(config: AppConfig, generation: number): Promise<number> {
     if (!config.features.youtube || !config.youtube.clientId || !config.youtube.refreshTokenStored) return 5000
     const token = await this.youtubeAccessToken(config)
+    if (this.commentsGeneration !== generation) return 5000
     const headers = { authorization: `Bearer ${token}` }
     const broadcastsUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
     broadcastsUrl.search = new URLSearchParams({ part: 'snippet', mine: 'true', broadcastStatus: 'active', maxResults: '1' }).toString()
     const broadcasts = await apiJson<{ items: Array<{ snippet: { liveChatId?: string } }> }>(broadcastsUrl.toString(), { headers })
+    if (this.commentsGeneration !== generation) return 5000
     const liveChatId = broadcasts.items[0]?.snippet.liveChatId
     if (!liveChatId) return 5000
     if (this.youtubeChatId !== liveChatId) {
@@ -523,6 +525,7 @@ export class PlatformServices {
     const messagesUrl = new URL('https://www.googleapis.com/youtube/v3/liveChat/messages')
     messagesUrl.search = new URLSearchParams({ part: 'id,snippet,authorDetails', liveChatId, maxResults: '200', ...(this.youtubePageToken ? { pageToken: this.youtubePageToken } : {}) }).toString()
     const messages = await apiJson<{ nextPageToken?: string; pollingIntervalMillis?: number; items: Array<{ id: string; snippet: { displayMessage: string; publishedAt: string }; authorDetails: { displayName: string; isChatModerator?: boolean } }> }>(messagesUrl.toString(), { headers })
+    if (this.commentsGeneration !== generation) return 5000
     this.youtubePageToken = messages.nextPageToken
     for (const item of messages.items) this.addComment({ id: `youtube:${item.id}`, service: 'youtube', author: item.authorDetails.displayName, body: item.snippet.displayMessage, publishedAt: item.snippet.publishedAt, moderator: Boolean(item.authorDetails.isChatModerator), mention: item.snippet.displayMessage.includes('@') })
     return Math.max(messages.pollingIntervalMillis ?? 5000, 1000)
@@ -549,6 +552,7 @@ export class PlatformServices {
     this.twitchSocket = socket
     socket.addEventListener('open', () => socket.send(`CAP REQ :twitch.tv/tags twitch.tv/commands\r\nPASS oauth:${token}\r\nNICK ${login}\r\nJOIN #${login}\r\n`))
     socket.addEventListener('message', (event) => {
+      if (this.commentsGeneration !== generation || this.twitchSocket !== socket) return
       const payload = String(event.data)
       if (payload.startsWith('PING')) { socket.send(payload.replace('PING', 'PONG')); return }
       for (const line of payload.split('\r\n')) {
@@ -567,10 +571,11 @@ export class PlatformServices {
 
   async startComments(config: AppConfig): Promise<void> {
     await this.stopComments()
+    this.comments.clear()
     const generation = ++this.commentsGeneration
     await this.connectTwitchComments(config, generation).catch(() => this.scheduleTwitchReconnect(config, generation))
     const poll = async () => {
-      const delay = await this.pollYouTubeComments(config).catch(() => 5000)
+      const delay = await this.pollYouTubeComments(config, generation).catch(() => 5000)
       if (this.commentsGeneration === generation) this.youtubeTimer = setTimeout(poll, delay)
     }
     void poll()

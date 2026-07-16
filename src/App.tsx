@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   AlertTriangle, ArrowDownToLine, Check, ChevronRight, CircleHelp, CircleStop, Copy, Gamepad2,
-  Image as ImageIcon, LoaderCircle, LockKeyhole, MessageSquareText, Play, Plus, RefreshCw,
+  Image as ImageIcon, LoaderCircle, LockKeyhole, Play, Plus, RefreshCw,
   Search, Settings, Star, Trash2, Upload, X,
 } from 'lucide-react'
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
@@ -11,6 +11,8 @@ import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAu
 import { createTranslator, I18nProvider, useI18n, type TranslationValues, type Translator, type UiLanguage } from './i18n'
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
 import { getBroadcastStatus, getExternalDeliveryWarning, getRuntimeOutputs, type RuntimeOutputStatus } from './runtime-status'
+import { CommentsSection } from './CommentsSection'
+import { ServiceIcon } from './ServiceIcon'
 
 type Tab = PlatformGroup | 'settings'
 type Toast = { kind: 'success' | 'error' | 'warning'; text: string; values?: TranslationValues }
@@ -99,12 +101,6 @@ function DesktopIntegrationControl({ setup = false }: { setup?: boolean }) {
       }}
     />
   </div>
-}
-
-function ServiceIcon({ service }: { service: 'obs' | 'youtube' | 'twitch' }) {
-  if (service === 'youtube') return <svg className="service-icon youtube" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.6 7.2a2.7 2.7 0 0 0-1.9-1.9C18 4.8 12 4.8 12 4.8s-6 0-7.7.5a2.7 2.7 0 0 0-1.9 1.9A28 28 0 0 0 2 12a28 28 0 0 0 .4 4.8 2.7 2.7 0 0 0 1.9 1.9c1.7.5 7.7.5 7.7.5s6 0 7.7-.5a2.7 2.7 0 0 0 1.9-1.9A28 28 0 0 0 22 12a28 28 0 0 0-.4-4.8Z" /><path className="service-icon-cut" d="m10 15.5 5-3.5-5-3.5Z" /></svg>
-  if (service === 'twitch') return <svg className="service-icon twitch" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h17v12l-5 5h-4l-3 3v-3H4Zm3 3v10h4v2l2-2h4l2-2V6Z" /><path className="service-icon-cut" d="M10 8h2v5h-2Zm5 0h2v5h-2Z" /></svg>
-  return <svg className="service-icon obs" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2" /><circle cx="12" cy="12" r="2.5" /></svg>
 }
 
 function StatusDot({ tone = 'inactive', pulse = false }: { tone?: RuntimeOutputStatus['tone'] | 'live' | 'danger'; pulse?: boolean }) {
@@ -679,7 +675,17 @@ export default function App() {
   useEffect(() => { if (!status?.selectedGameId) selectedServiceResults.current = [] }, [status?.selectedGameId])
   useEffect(() => { const load = () => void loadOAuthStatus().catch(() => undefined); const visible = () => { if (document.visibilityState === 'visible') load() }; window.addEventListener('focus', load); document.addEventListener('visibilitychange', visible); return () => { window.removeEventListener('focus', load); document.removeEventListener('visibilitychange', visible) } }, [loadOAuthStatus])
   useEffect(() => { const timer = window.setInterval(() => void loadOAuthStatus().catch(() => undefined), oauthPollingInterval); return () => window.clearInterval(timer) }, [loadOAuthStatus, oauthPollingInterval])
-  useEffect(() => { if (!status?.streaming) return; const load = () => void api.comments().then(setComments).catch(() => undefined); load(); const timer = window.setInterval(load, 3_000); return () => window.clearInterval(timer) }, [status?.streaming])
+  useEffect(() => {
+    if (!status?.streaming) {
+      const clearTimer = window.setTimeout(() => setComments([]), 0)
+      return () => window.clearTimeout(clearTimer)
+    }
+    let active = true
+    const load = () => void api.comments().then((next) => { if (active) setComments(next) }).catch(() => undefined)
+    load()
+    const timer = window.setInterval(load, 3_000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [status?.streaming])
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(null), 5_000); return () => window.clearTimeout(timer) }, [toast])
   useEffect(() => {
     const authenticated = (event: MessageEvent) => {
@@ -846,7 +852,7 @@ export default function App() {
       {tab === 'switch' && <p className="tab-note">{t('Switchはゲーム名を自動判定しません。配信するゲームを手動で選択してください。')}</p>}{tab === 'exception' && <p className="tab-note">{t('通常のライブラリ連携が難しいゲームを扱います。')}</p>}
       {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>{t('お気に入り')}</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => <button key={profile.id} className={selected?.id === profile.id ? 'selected' : ''} aria-current={selected?.id === profile.id ? 'true' : undefined} disabled={actionBusy} onClick={() => selectGame(profile)}><ProfileArtwork profile={profile} size="favorite" /><strong>{profile.displayName}</strong>{selected?.id === profile.id && <span className="favorite-selected-label"><Check size={10} strokeWidth={3} />{t('選択中')}</span>}</button>)}</div></section>}
       <section className="library-section"><div className="section-title"><h2>{t(platformTitles[tab])}</h2><span>{filtered.length} {t('件')}</span></div><div className="game-list">{filtered.map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => selectGame(profile)} onEdit={() => setEditing(profile)} onFavorite={() => toggleFavorite(profile)} />)}{filtered.length === 0 && <div className="empty"><Gamepad2 size={24} /><strong>{t('ゲームがありません')}</strong><button onClick={() => setAdding(true)}>{t('ゲームを追加')}</button></div>}</div></section>
-      <section className="comments-section"><div className="section-title"><h2>{t('統合コメント')}</h2><span className={status.streaming ? 'active-text' : ''}>{t(status.streaming ? '配信中・自動更新' : '配信開始後に表示されます')}</span></div>{status.streaming && comments.length ? <div className="comment-list">{comments.slice(-30).map((comment) => <div className={`comment-row ${comment.mention ? 'mention' : ''}`} key={comment.id}><ServiceIcon service={comment.service} /><div><div><strong>{comment.author}</strong>{comment.moderator && <b>MOD</b>}<time>{new Date(comment.publishedAt).toLocaleTimeString(language === 'en' ? 'en-US' : 'ja-JP', { hour: '2-digit', minute: '2-digit' })}</time></div><p>{comment.body}</p></div></div>)}</div> : <div className="comment-empty"><MessageSquareText size={20} /><span>{t('YouTube / Twitch の実際のコメントをここに表示します')}</span></div>}</section>
+      <CommentsSection comments={comments} language={language} streaming={status.streaming} t={t} />
     </main>}
     <ControlPanel status={status} selected={selected} busy={actionBusy} onChooseGame={chooseGame} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
     {setupOpen && <FirstRunSetup config={config} status={status} oauthStatus={oauthStatus} steamScan={steamScan} onSaveObs={saveSetupObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onLanguageChange={changeLanguage} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}

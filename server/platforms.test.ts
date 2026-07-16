@@ -13,7 +13,182 @@ const directories: string[] = []
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
+})
+
+describe('PlatformServices integrated comments', () => {
+  it('polls and deduplicates YouTube comments with author, moderator and mention state', async () => {
+    const values = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => values.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { values.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = true
+    configured.features.twitch = false
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.refreshTokenStored = true
+    const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveBroadcasts')) return json({ items: [{ snippet: { liveChatId: 'live-chat-id' } }] })
+      if (url.pathname.endsWith('/liveChat/messages')) return json({
+        nextPageToken: 'next-page',
+        pollingIntervalMillis: 60_000,
+        items: [
+          { id: 'message-one', snippet: { displayMessage: '通常コメント', publishedAt: '2026-07-17T01:00:00.000Z' }, authorDetails: { displayName: '視聴者' } },
+          { id: 'message-one', snippet: { displayMessage: '通常コメント', publishedAt: '2026-07-17T01:00:00.000Z' }, authorDetails: { displayName: '視聴者' } },
+          { id: 'message-two', snippet: { displayMessage: '@配信者 確認コメント', publishedAt: '2026-07-17T01:01:00.000Z' }, authorDetails: { displayName: 'モデレーター', isChatModerator: true } },
+        ],
+      })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+
+    await platforms.startComments(configured)
+    await vi.waitFor(() => expect(platforms.getComments()).toHaveLength(2))
+
+    expect(platforms.getComments()).toEqual([
+      expect.objectContaining({ id: 'youtube:message-one', service: 'youtube', author: '視聴者', body: '通常コメント', moderator: false, mention: false }),
+      expect.objectContaining({ id: 'youtube:message-two', service: 'youtube', author: 'モデレーター', body: '@配信者 確認コメント', moderator: true, mention: true }),
+    ])
+    await platforms.stopComments()
+  })
+
+  it('ignores a YouTube response that completes after the comment session stops', async () => {
+    const values = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => values.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { values.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = true
+    configured.features.twitch = false
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.refreshTokenStored = true
+    const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
+    let releaseBroadcast!: () => void
+    const broadcastBlocked = new Promise<void>((resolve) => { releaseBroadcast = resolve })
+    let broadcastRequested = false
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveBroadcasts')) {
+        broadcastRequested = true
+        await broadcastBlocked
+        return json({ items: [{ snippet: { liveChatId: 'old-live-chat-id' } }] })
+      }
+      if (url.pathname.endsWith('/liveChat/messages')) return json({ items: [{ id: 'late', snippet: { displayMessage: '遅延コメント', publishedAt: '2026-07-17T01:00:00.000Z' }, authorDetails: { displayName: '古い視聴者' } }] })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const internals = platforms as unknown as { commentsGeneration: number; pollYouTubeComments: (config: typeof configured, generation: number) => Promise<number> }
+
+    const polling = internals.pollYouTubeComments(configured, internals.commentsGeneration)
+    await vi.waitFor(() => expect(broadcastRequested).toBe(true))
+    await platforms.stopComments()
+    releaseBroadcast()
+    await polling
+
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/liveChat/messages'))).toHaveLength(0)
+    expect(platforms.getComments()).toEqual([])
+  })
+
+  it('receives and deduplicates Twitch IRC comments with author, moderator and channel mention state', async () => {
+    type Listener = (event: { data?: string }) => void
+    class FakeWebSocket {
+      static latest: FakeWebSocket | null = null
+      readonly sent: string[] = []
+      private readonly listeners = new Map<string, Listener[]>()
+
+      constructor() { FakeWebSocket.latest = this }
+      addEventListener(type: string, listener: Listener): void { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]) }
+      send(value: string): void { this.sent.push(value) }
+      close(): void { this.emit('close', {}) }
+      emit(type: string, event: { data?: string }): void { for (const listener of this.listeners.get(type) ?? []) listener(event) }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const secretStore = {
+      get: vi.fn((name: string) => name === 'twitch-access-token' ? 'twitch-access' : null),
+      set: vi.fn(),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = false
+    configured.features.twitch = true
+    configured.twitch.clientId = 'twitch-client-id'
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ login: 'streamer' }] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+
+    await platforms.startComments(configured)
+    const socket = FakeWebSocket.latest
+    expect(socket).not.toBeNull()
+    socket?.emit('open', {})
+    const ircMessage = '@id=message-one;display-name=Viewer\\sName;mod=1 :viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #streamer :Hello @Streamer\r\n'
+    socket?.emit('message', { data: ircMessage })
+    socket?.emit('message', { data: ircMessage })
+
+    expect(socket?.sent.join('')).toContain('JOIN #streamer')
+    expect(platforms.getComments()).toEqual([
+      expect.objectContaining({ id: 'twitch:message-one', service: 'twitch', author: 'Viewer Name', body: 'Hello @Streamer', moderator: true, mention: true }),
+    ])
+    await platforms.stopComments()
+  })
+
+  it('ignores Twitch messages delivered by a socket from a stopped session', async () => {
+    type Listener = (event: { data?: string }) => void
+    class FakeWebSocket {
+      static sockets: FakeWebSocket[] = []
+      private readonly listeners = new Map<string, Listener[]>()
+
+      constructor() { FakeWebSocket.sockets.push(this) }
+      addEventListener(type: string, listener: Listener): void { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]) }
+      send(): void {}
+      close(): void { this.emit('close', {}) }
+      emit(type: string, event: { data?: string }): void { for (const listener of this.listeners.get(type) ?? []) listener(event) }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const secretStore = {
+      get: vi.fn((name: string) => name === 'twitch-access-token' ? 'twitch-access' : null),
+      set: vi.fn(),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = false
+    configured.features.twitch = true
+    configured.twitch.clientId = 'twitch-client-id'
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ login: 'streamer' }] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+
+    await platforms.startComments(configured)
+    const stoppedSocket = FakeWebSocket.sockets[0]
+    await platforms.stopComments()
+    await platforms.startComments(configured)
+    stoppedSocket?.emit('message', { data: '@id=old;display-name=OldViewer;mod=0 :old!old@old.tmi.twitch.tv PRIVMSG #streamer :前回コメント\r\n' })
+
+    expect(platforms.getComments()).toEqual([])
+    await platforms.stopComments()
+  })
+
+  it('clears comments before a new stream comment session starts', async () => {
+    const configured = structuredClone(defaultConfig)
+    configured.features.youtube = false
+    configured.features.twitch = false
+    const platforms = new PlatformServices({ get: vi.fn(), set: vi.fn() } as unknown as SecretStore, {} as DataStore)
+    const addComment = (platforms as unknown as { addComment: (message: { id: string; service: 'youtube'; author: string; body: string; publishedAt: string; moderator: boolean; mention: boolean }) => void }).addComment.bind(platforms)
+    addComment({ id: 'youtube:old', service: 'youtube', author: '前回の視聴者', body: '前回のコメント', publishedAt: '2026-07-17T00:00:00.000Z', moderator: false, mention: false })
+
+    await platforms.startComments(configured)
+
+    expect(platforms.getComments()).toEqual([])
+    await platforms.stopComments()
+  })
 })
 
 describe('PlatformServices thumbnail preparation', () => {
