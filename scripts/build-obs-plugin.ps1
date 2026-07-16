@@ -10,15 +10,32 @@ $websocketLicenseSha256 = '90b664a6fbc82b38595cbb39606268bef0b2eb9b76b0e9e03826b
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $workspace = [IO.Path]::GetFullPath((Join-Path $tempRoot "obs-stream-manager-plugin-$([guid]::NewGuid().ToString('N'))"))
 $source = Join-Path $PSScriptRoot '..\native\obs-stream-manager-output'
+$pluginSource = Join-Path $source 'src\plugin-main.c'
 $originalCi = $env:CI
 $appVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
 
 try {
   git clone --quiet https://github.com/obsproject/obs-plugintemplate.git $workspace
   git -C $workspace checkout --quiet $templateCommit
+
+  $requiredSdkDirectory = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include\10.0.22621.0'
+  if (-not (Test-Path -LiteralPath $requiredSdkDirectory)) {
+    $presetsFile = Join-Path $workspace 'CMakePresets.json'
+    $presets = [IO.File]::ReadAllText($presetsFile) | ConvertFrom-Json
+    $windowsPreset = $presets.configurePresets | Where-Object { $_.name -eq 'windows-x64' } | Select-Object -First 1
+    if (-not $windowsPreset -or $windowsPreset.architecture -ne 'x64,version=10.0.22621') {
+      throw 'OBS plugin template Windows SDK preset was not found'
+    }
+    $windowsPreset.architecture = 'x64'
+    [IO.File]::WriteAllText($presetsFile, ($presets | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
+    Write-Host 'Windows SDK 10.0.22621 is unavailable; using the newest installed Windows SDK.'
+  }
+
   Copy-Item (Join-Path $source 'CMakeLists.txt') (Join-Path $workspace 'CMakeLists.txt') -Force
   Copy-Item (Join-Path $source 'buildspec.json') (Join-Path $workspace 'buildspec.json') -Force
-  Copy-Item (Join-Path $source 'src\plugin-main.c') (Join-Path $workspace 'src\plugin-main.c') -Force
+  $workspacePluginSource = Join-Path $workspace 'src\plugin-main.c'
+  Copy-Item $pluginSource $workspacePluginSource -Force
+  $pluginSourceSha256 = (Get-FileHash $workspacePluginSource -Algorithm SHA256).Hash.ToLowerInvariant()
 
   $header = Join-Path $workspace 'src\obs-websocket-api.h'
   Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/obsproject/obs-websocket/$websocketCommit/lib/obs-websocket-api.h" -OutFile $header
@@ -32,6 +49,11 @@ try {
 
   $dll = Get-ChildItem $workspace -Recurse -Filter 'obs-stream-manager-output.dll' -File | Select-Object -First 1
   if (-not $dll) { throw 'Built OBS plugin DLL was not found' }
+  $dllText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll.FullName))
+  foreach ($requiredMarker in @('pluginVersion', 'apiVersion')) {
+    if (-not $dllText.Contains($requiredMarker)) { throw "Built OBS plugin DLL is missing required marker: $requiredMarker" }
+  }
+  $dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
   $binaryDirectory = Join-Path $OutputDirectory 'bin\64bit'
   $localeDirectory = Join-Path $OutputDirectory 'data\locale'
   New-Item -ItemType Directory -Force -Path $binaryDirectory, $localeDirectory | Out-Null
@@ -42,7 +64,15 @@ try {
   if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne $websocketLicenseSha256) {
     throw 'obs-websocket license checksum mismatch'
   }
-  Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'version.json') (@{ version = $appVersion; obsMinimumVersion = '31.1.1' } | ConvertTo-Json -Compress)
+  $versionFile = Join-Path $OutputDirectory 'version.json'
+  $temporaryVersionFile = "$versionFile.tmp-$([guid]::NewGuid().ToString('N'))"
+  [IO.File]::WriteAllText($temporaryVersionFile, (@{
+    version = $appVersion
+    obsMinimumVersion = '31.1.1'
+    sourceSha256 = $pluginSourceSha256
+    dllSha256 = $dllSha256
+  } | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temporaryVersionFile -Destination $versionFile -Force
 } finally {
   $env:CI = $originalCi
   $workspaceParent = [IO.Path]::GetFullPath((Split-Path -Parent $workspace))

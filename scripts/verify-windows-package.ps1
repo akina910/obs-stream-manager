@@ -80,6 +80,15 @@ try {
   $obsPluginVersion = Get-Content -LiteralPath $obsPluginVersionFile -Raw | ConvertFrom-Json
   $expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
   Assert-True ($obsPluginVersion.version -eq $expectedVersion) "Unexpected OBS output plugin version: $($obsPluginVersion.version), expected $expectedVersion"
+  $obsPluginSource = Join-Path $PSScriptRoot '..\native\obs-stream-manager-output\src\plugin-main.c'
+  $expectedPluginSourceSha256 = (Get-FileHash -LiteralPath $obsPluginSource -Algorithm SHA256).Hash
+  Assert-True (-not [string]::IsNullOrWhiteSpace([string]$obsPluginVersion.sourceSha256)) 'Bundled OBS output plugin source hash is missing'
+  Assert-True ($obsPluginVersion.sourceSha256 -eq $expectedPluginSourceSha256) 'Bundled OBS output plugin was built from stale native source'
+  $results.obsPluginSourceVerified = $true
+  $expectedPluginDllSha256 = (Get-FileHash -LiteralPath $obsPlugin -Algorithm SHA256).Hash
+  Assert-True (-not [string]::IsNullOrWhiteSpace([string]$obsPluginVersion.dllSha256)) 'Bundled OBS output plugin DLL hash is missing'
+  Assert-True ($obsPluginVersion.dllSha256 -eq $expectedPluginDllSha256) 'Bundled OBS output plugin DLL does not match its build manifest'
+  $results.obsPluginBinaryVerified = $true
 
   Add-Type -AssemblyName System.Drawing
   $appIcon = [Drawing.Icon]::ExtractAssociatedIcon($exe)
