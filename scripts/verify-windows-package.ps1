@@ -80,6 +80,14 @@ try {
   $obsPluginVersion = Get-Content -LiteralPath $obsPluginVersionFile -Raw | ConvertFrom-Json
   $expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
   Assert-True ($obsPluginVersion.version -eq $expectedVersion) "Unexpected OBS output plugin version: $($obsPluginVersion.version), expected $expectedVersion"
+  $appUpdateConfig = Join-Path $runtime 'resources\app-update.yml'
+  Assert-True ([bool](Test-Path -LiteralPath $appUpdateConfig)) 'Packaged update provider configuration is missing'
+  $appUpdateText = Get-Content -LiteralPath $appUpdateConfig -Raw
+  Assert-True ($appUpdateText -match '(?m)^provider:\s*github\s*$') 'Update provider must be GitHub'
+  Assert-True ($appUpdateText -match '(?m)^owner:\s*akina910\s*$') 'Unexpected update provider owner'
+  Assert-True ($appUpdateText -match '(?m)^repo:\s*obs-stream-manager\s*$') 'Unexpected update provider repository'
+  Assert-True ($appUpdateText -notmatch '(?i)token|authorization|password|secret') 'Update provider configuration contains forbidden authentication material'
+  $results.updateProviderFixed = $true
   $obsPluginSource = Join-Path $PSScriptRoot '..\native\obs-stream-manager-output\src\plugin-main.c'
   $expectedPluginSourceSha256 = (Get-FileHash -LiteralPath $obsPluginSource -Algorithm SHA256).Hash
   Assert-True (-not [string]::IsNullOrWhiteSpace([string]$obsPluginVersion.sourceSha256)) 'Bundled OBS output plugin source hash is missing'
