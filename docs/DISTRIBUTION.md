@@ -56,7 +56,9 @@ npm run dist:win
 npm run verify:package
 ```
 
-この検証はNode.jsをPATHから外した状態、新規データ領域、loopback限定待受、二重起動防止、終了時プロセス停止、設定復元、秘密情報を含まないバックアップ、同梱OBSプラグインの存在を確認します。
+この検証はNode.jsをPATHから外した状態、新規データ領域、loopback限定待受、二重起動防止、終了時プロセス停止、設定復元、秘密情報を含まないバックアップ、同梱OBSプラグインの存在、固定されたGitHub更新先を確認します。
+
+配布用OAuth資格情報を持たない開発PCで、OAuth以外のローカル検証だけを行う場合は `scripts/verify-windows-package.ps1` に `-AllowMissingProviderOAuth` を指定できます。このスイッチはローカル診断専用です。GitHub Actionsと配布合否判定では使用せず、配布物にYouTube/Twitchのプロバイダー設定が同梱されていることを必須とします。
 
 ## GitHub Actions
 
@@ -66,8 +68,36 @@ npm run verify:package
 - Repository secret `YOUTUBE_CLIENT_SECRET`: Google Desktop appクライアント資格情報
 - Repository variable `TWITCH_CLIENT_ID`: Twitch公開Client ID
 
-ワークフローは検証済み成果物をActions artifactとして保存しますが、タグ作成やGitHub Release公開は行いません。
+`Windows distribution` ワークフローは検証済み成果物をActions artifactとして保存しますが、タグ作成やGitHub Release公開は行いません。ブランチや公開前候補の検証にはこちらを使います。
 
 Releaseへ添付する前に、署名、ウイルス対策ソフトでの確認、クリーンなWindows 11環境でのインストール、実アカウントOAuth、YouTube非公開配信、Twitchテスト配信を実施してください。認証表示だけではライブ配信検証の代用になりません。
 
 ワークフローはOBS Stream Manager Outputプラグインもビルドして配布物へ同梱します。新規環境ではアプリを一度起動してプラグインを自動配置し、OBS再起動後にTwitchの非公開帯域テストとYouTube／Twitch同時配信を確認してください。配信キーは通常設定や成果物へ書き出されません。
+
+## 手動アップデート対応Release
+
+アプリ内更新はelectron-builderがGitHub Releaseへ添付する `latest.yml`、NSISインストーラー、blockmapを使用します。更新先は `akina910/obs-stream-manager` に固定され、画面から任意URLを指定できません。起動時の自動確認、ダウンロード、終了時の自動適用は無効です。
+
+ローカル確認用の `npm run dist:win` は公開を行わず、`--publish never` で成果物とローカル検証用メタデータだけを生成します。`.github/workflows/windows-release.yml` は検証済みの `latest.yml`、インストーラー、blockmapなどを実Releaseへアップロードします。
+
+Releaseを作る手順:
+
+1. `package.json` と `package-lock.json` のバージョンを一致させ、変更を検証して既定ブランチへ反映します。
+2. 実アカウントOAuth、YouTube非公開配信、Twitchテスト配信、OBS停止後のクリーン終了を確認します。
+3. Release公開の明示的な承認を得ます。承認前にタグを作成・pushしてはいけません。
+4. バージョンと一致するタグ（例: `v0.2.4`）を作成し、GitHubへpushします。
+5. `Windows release` ワークフローがドラフトReleaseを作成し、型検査、Lint、自動テスト、秘密情報検査、ビルド、展開済みZIP検証を実行します。
+6. ワークフローはインストーラー、Portable EXE、ZIP、`latest.yml`、blockmap、`SHA256SUMS.txt` が揃ったことを確認した後だけドラフトを公開します。途中で失敗した場合は公開しません。
+
+再現コマンド:
+
+```powershell
+npm ci
+npm run check
+npm run dist:win
+npm run release:checksums
+```
+
+`npm run dist:win:publish` はGitHub ActionsのタグRelease用です。ローカルから安易に実行しないでください。`GH_TOKEN`、OAuthプロバイダー資格情報、生成された `build/provider-oauth.json` をログ、Issue、Release説明、リポジトリへ保存してはいけません。
+
+初回の更新対応版は従来どおりインストーラーを手動で導入する必要があります。その後、より新しい公開Releaseが存在する場合にアプリ内更新を実機確認できます。同じバージョンしか公開されていない状態や公開Releaseがない状態を、更新成功のライブ確認として扱ってはいけません。

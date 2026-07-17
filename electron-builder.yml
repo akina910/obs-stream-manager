@@ -3,6 +3,11 @@ productName: OBS Stream Manager
 copyright: Copyright 2026 OBS Stream Manager contributors
 directories:
   output: release
+publish:
+  - provider: github
+    owner: akina910
+    repo: obs-stream-manager
+    releaseType: draft
 files:
   - dist/**/*
   - package.json

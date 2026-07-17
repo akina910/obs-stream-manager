@@ -18,7 +18,7 @@ A Windows application that brings game selection, OBS controls, and YouTube/Twit
 
 ### Installer
 
-Run `OBS Stream Manager-Setup-*-x64.exe` and follow the prompts to install for the current Windows user. It creates Start menu and desktop shortcuts. This is the recommended option for normal use. After the first launch, silent startup at Windows sign-in is enabled by default so the OBS dock is ready immediately. You can disable it from Settings or the notification-area menu.
+Run `OBS Stream Manager-Setup-*-x64.exe` and follow the prompts to install for the current Windows user. It creates Start menu and desktop shortcuts. This is the recommended option for normal use. After the first launch, silent startup at Windows sign-in is enabled by default so the OBS dock is ready immediately. You can disable it from Settings or the notification-area menu. Once public Releases begin, installed builds can download an update from Settings and restart into it.
 
 ### Portable EXE
 
@@ -91,6 +91,14 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 ## Data, updates, and uninstalling
 
 Personal settings, game profiles, thumbnails, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder.
+
+### Manual updates
+
+The app never checks, downloads, or restarts for an update automatically at startup. It checks GitHub Releases only after you choose **Check for updates** in Settings or the notification-area menu.
+
+In the installed edition, choose **Check for updates**, **Download update**, then **Restart and update**. The final step is blocked while a stream, recording, replay buffer, YouTube/Twitch live broadcast, or broadcast transition is active. Game profiles, thumbnails, settings, and OAuth connections remain in place after the update.
+
+Portable EXE and ZIP builds do not overwrite themselves while running. When an update is available, the app opens the fixed GitHub Releases page so you can replace the Portable copy. Use the installer edition for the simplest in-app update flow.
 
 Secrets such as OAuth tokens, stream keys, and the OBS password are excluded from normal settings and backups. They are stored under the `obs-stream-manager` service in Windows Credential Manager.
 

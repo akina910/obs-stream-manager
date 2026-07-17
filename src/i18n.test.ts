@@ -18,6 +18,26 @@ describe('UI translations', () => {
     }
   })
 
+  it('contains complete beginner-facing manual update copy', () => {
+    for (const key of [
+      'アプリの更新',
+      '更新を確認',
+      '更新をダウンロード',
+      '再起動して更新',
+      'ダウンロードページを開く',
+      '現在のバージョン',
+      '利用できるバージョン',
+      '変更内容',
+      '公開済みの更新はまだありません',
+      '配信を終了してから更新してください',
+      '録画を停止してから更新してください',
+      'リプレイバッファを停止してから更新してください',
+      'YouTubeとTwitchの配信を終了してから更新してください',
+    ]) {
+      expect(englishTranslations[key]).toBeTruthy()
+    }
+  })
+
   it('defaults legacy configs to Japanese and accepts persisted English', () => {
     const legacyConfig: Partial<typeof defaultConfig> = structuredClone(defaultConfig)
     delete legacyConfig.ui

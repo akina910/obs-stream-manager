@@ -1,0 +1,86 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-verify-publish:
+    runs-on: windows-2022
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID: ${{ vars.YOUTUBE_CLIENT_ID }}
+      OBS_STREAM_MANAGER_YOUTUBE_CLIENT_TYPE: desktop
+      OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      OBS_STREAM_MANAGER_TWITCH_CLIENT_ID: ${{ vars.TWITCH_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Validate tag and provider credentials
+        shell: powershell
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $expectedTag = "v$($package.version)"
+          if ('${{ github.ref_name }}' -ne $expectedTag) { throw "Tag must be $expectedTag for package version $($package.version)" }
+          git fetch origin main:refs/remotes/origin/main --no-tags
+          $mainCommit = git rev-parse origin/main
+          if ($env:GITHUB_SHA -ne $mainCommit) { throw "Release tag must point to current origin/main ($mainCommit), not $env:GITHUB_SHA" }
+          if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID)) { throw 'Repository variable YOUTUBE_CLIENT_ID is required' }
+          if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET)) { throw 'Repository secret YOUTUBE_CLIENT_SECRET is required' }
+          if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID)) { throw 'Repository variable TWITCH_CLIENT_ID is required' }
+      - run: npm ci
+      - run: npm run check
+      - name: Create or validate draft release
+        shell: powershell
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $existing = gh release view $tag --json isDraft 2>$null | ConvertFrom-Json
+          if ($existing) {
+            if (-not $existing.isDraft) { throw "Release $tag is already public; refusing to replace it" }
+          } else {
+            gh release create $tag --draft --verify-tag --generate-notes --title "OBS Stream Manager $tag"
+          }
+      - name: Build and upload release artifacts
+        run: npm run dist:win:publish
+      - name: Verify extracted ZIP package
+        shell: powershell
+        run: |
+          $archives = @(Get-ChildItem release -Filter '*-win.zip' -File)
+          if ($archives.Count -ne 1) { throw "Expected exactly one Windows ZIP package, found $($archives.Count)" }
+          & .\scripts\verify-windows-package.ps1 -PackageArchive $archives[0].FullName
+      - name: Generate and upload checksums
+        shell: powershell
+        run: |
+          npm run release:checksums
+          gh release upload '${{ github.ref_name }}' release/SHA256SUMS.txt --clobber
+      - name: Require complete draft assets
+        shell: powershell
+        run: |
+          $assets = @(gh release view '${{ github.ref_name }}' --json assets --jq '.assets[].name')
+          $requiredPatterns = @(
+            '*-Setup-*.exe',
+            '*-Portable-*.exe',
+            '*-win.zip',
+            'latest.yml',
+            '*.blockmap',
+            'SHA256SUMS.txt'
+          )
+          foreach ($pattern in $requiredPatterns) {
+            if (-not ($assets | Where-Object { $_ -like $pattern })) { throw "Release asset missing: $pattern" }
+          }
+      - name: Publish verified release
+        shell: powershell
+        run: gh release edit '${{ github.ref_name }}' --draft=false --latest

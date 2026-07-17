@@ -3,7 +3,10 @@ import { appendFile, copyFile, mkdir, readFile, rename, rm } from 'node:fs/promi
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import electronUpdater from 'electron-updater'
+import { RuntimeStatusSchema } from '../shared/contracts.js'
 import { redactSensitiveText } from '../shared/redaction.js'
+import type { DesktopUpdateState, UpdateBlockReason } from '../shared/update-contracts.js'
 import {
   backgroundLaunchArgument,
   DesktopPreferenceStore,
@@ -15,6 +18,7 @@ import {
   type DesktopIntegrationSettings,
 } from './integration.js'
 import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
+import { createElectronUpdateAdapter, getUpdateBlockReason, ManualUpdateService } from './updater.js'
 
 type ServerModule = {
   startServer: () => Promise<{ url: string }>
@@ -22,6 +26,7 @@ type ServerModule = {
 }
 
 const dockUrl = 'http://127.0.0.1:4317'
+const releasesUrl = 'https://github.com/akina910/obs-stream-manager/releases/latest'
 const serverStartTimeoutMs = 10_000
 const allowedExternalHosts = new Set([
   'accounts.google.com',
@@ -35,6 +40,7 @@ let tray: Tray | null = null
 let serverModule: ServerModule | null = null
 let preferences: DesktopPreferenceStore | null = null
 let integrationSettings: DesktopIntegrationSettings = { startWithWindows: false, supported: false }
+let updateService: ManualUpdateService | null = null
 let quitRequested = false
 let shutdownStarted = false
 let shutdownComplete = false
@@ -50,6 +56,45 @@ async function markLifecycle(stage: string): Promise<void> {
 function safeError(error: unknown): string {
   const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
   return redactSensitiveText(raw).slice(0, 4_000)
+}
+
+function broadcastUpdateState(state: Readonly<DesktopUpdateState>): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('desktop:update-state', state)
+}
+
+async function getInstallBlocker(): Promise<UpdateBlockReason | null> {
+  try {
+    const response = await fetch(`${dockUrl}/api/status`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(3_000),
+    })
+    if (!response.ok) return 'status-unavailable'
+    return getUpdateBlockReason(RuntimeStatusSchema.parse(await response.json()))
+  } catch {
+    return 'status-unavailable'
+  }
+}
+
+function requireUpdateService(): ManualUpdateService {
+  if (!updateService) throw new Error('The update service is not ready yet')
+  return updateService
+}
+
+async function openReleasePage(): Promise<void> {
+  await shell.openExternal(releasesUrl)
+}
+
+async function checkForUpdatesFromTray(): Promise<void> {
+  showMainWindow()
+  const state = await requireUpdateService().check()
+  if (state.phase === 'available' && tray) {
+    tray.displayBalloon({
+      title: 'OBS Stream Manager',
+      content: `更新 ${state.availableVersion ?? ''} を利用できます / Update available`,
+      iconType: 'info',
+    })
+  }
 }
 
 async function writeStartupError(error: unknown): Promise<string> {
@@ -156,6 +201,11 @@ function rebuildTrayMenu(): void {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'OBS Stream Manager を開く / Open', click: showMainWindow },
     { label: 'ドックURLをコピー / Copy dock URL', click: () => clipboard.writeText(dockUrl) },
+    {
+      label: '更新を確認 / Check for updates',
+      enabled: updateService !== null,
+      click: () => { void checkForUpdatesFromTray().catch((error) => void writeStartupError(error)) },
+    },
     { type: 'separator' },
     {
       label: 'Windowsログイン時に準備 / Start with Windows',
@@ -242,6 +292,11 @@ if (!app.requestSingleInstanceLock()) {
     if (typeof value !== 'boolean') throw new Error('自動起動設定が不正です')
     return setStartWithWindows(value)
   })
+  ipcMain.handle('desktop:get-update-state', () => requireUpdateService().getState())
+  ipcMain.handle('desktop:check-for-updates', () => requireUpdateService().check())
+  ipcMain.handle('desktop:download-update', () => requireUpdateService().download())
+  ipcMain.handle('desktop:install-update', () => requireUpdateService().install())
+  ipcMain.handle('desktop:open-release-page', openReleasePage)
   ipcMain.handle('desktop:quit', requestApplicationQuit)
 
   app.on('before-quit', (event) => {
@@ -254,6 +309,8 @@ if (!app.requestSingleInstanceLock()) {
       .catch(async (error) => { await writeStartupError(error) })
       .finally(() => {
         shutdownComplete = true
+        updateService?.dispose()
+        updateService = null
         tray?.destroy()
         tray = null
         app.quit()
@@ -290,6 +347,15 @@ if (!app.requestSingleInstanceLock()) {
       await markLifecycle('server-module-loaded').catch(() => undefined)
       await withStartupListenTimeout(serverModule.startServer(), serverStartTimeoutMs)
       await markLifecycle('server-listening').catch(() => undefined)
+      const portableBuild = Boolean(process.env.PORTABLE_EXECUTABLE_FILE)
+      updateService = new ManualUpdateService(createElectronUpdateAdapter(electronUpdater.autoUpdater), {
+        currentVersion: app.getVersion(),
+        packaged: app.isPackaged,
+        portable: portableBuild,
+        installSupported: app.isPackaged && process.platform === 'win32' && installedMarkerExists && !portableBuild,
+        getInstallBlocker,
+        onStateChange: broadcastUpdateState,
+      })
       createTray()
       if (!hasDesktopArgument(process.argv, backgroundLaunchArgument)) {
         mainWindow = createWindow()

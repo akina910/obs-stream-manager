@@ -1,6 +1,7 @@
 param(
   [string]$PackageDirectory = '',
-  [string]$PackageArchive = ''
+  [string]$PackageArchive = '',
+  [switch]$AllowMissingProviderOAuth
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +81,14 @@ try {
   $obsPluginVersion = Get-Content -LiteralPath $obsPluginVersionFile -Raw | ConvertFrom-Json
   $expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
   Assert-True ($obsPluginVersion.version -eq $expectedVersion) "Unexpected OBS output plugin version: $($obsPluginVersion.version), expected $expectedVersion"
+  $appUpdateConfig = Join-Path $runtime 'resources\app-update.yml'
+  Assert-True ([bool](Test-Path -LiteralPath $appUpdateConfig)) 'Packaged update provider configuration is missing'
+  $appUpdateText = Get-Content -LiteralPath $appUpdateConfig -Raw
+  Assert-True ($appUpdateText -match '(?m)^provider:\s*github\s*$') 'Update provider must be GitHub'
+  Assert-True ($appUpdateText -match '(?m)^owner:\s*akina910\s*$') 'Unexpected update provider owner'
+  Assert-True ($appUpdateText -match '(?m)^repo:\s*obs-stream-manager\s*$') 'Unexpected update provider repository'
+  Assert-True ($appUpdateText -notmatch '(?i)token|authorization|password|secret') 'Update provider configuration contains forbidden authentication material'
+  $results.updateProviderFixed = $true
   $obsPluginSource = Join-Path $PSScriptRoot '..\native\obs-stream-manager-output\src\plugin-main.c'
   $expectedPluginSourceSha256 = (Get-FileHash -LiteralPath $obsPluginSource -Algorithm SHA256).Hash
   Assert-True (-not [string]::IsNullOrWhiteSpace([string]$obsPluginVersion.sourceSha256)) 'Bundled OBS output plugin source hash is missing'
@@ -157,7 +166,12 @@ try {
 
   $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
   $oauthStatus = Invoke-RestMethod "http://127.0.0.1:$port/api/oauth/status" -TimeoutSec 10
-  $results.providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
+  $providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
+  if ($AllowMissingProviderOAuth) {
+    $results.providerOAuthCheckSkipped = $true
+  } else {
+    $results.providerOAuthProvisioned = $providerOAuthProvisioned
+  }
   $bootstrap.config.obs.startDelaySeconds = 7
   $bootstrap.config.ui.language = 'en'
   $saveBody = @{ config = $bootstrap.config; secrets = @{ 'obs-password' = $secretMarker } } | ConvertTo-Json -Depth 30
