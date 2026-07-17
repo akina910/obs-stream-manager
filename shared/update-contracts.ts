@@ -23,3 +23,17 @@ export type DesktopUpdateState = {
   portable: boolean
   installSupported: boolean
 }
+
+const activeExternalStates = new Set(['starting', 'live', 'stopping'])
+
+export function getUpdateBlockReason(status: RuntimeStatus): UpdateBlockReason | null {
+  if (status.streaming) return 'streaming'
+  if (status.recording) return 'recording'
+  if (status.replayBuffer) return 'replay-buffer'
+  if (status.busy) return 'busy'
+  if (activeExternalStates.has(status.platforms.youtube.state) || activeExternalStates.has(status.platforms.twitch.state)) {
+    return 'external-live'
+  }
+  return null
+}
+import type { RuntimeStatus } from './contracts.js'

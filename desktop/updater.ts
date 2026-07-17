@@ -1,6 +1,7 @@
-import type { RuntimeStatus } from '../shared/contracts.js'
 import { redactSensitiveText } from '../shared/redaction.js'
-import type { DesktopUpdateState, UpdateBlockReason } from '../shared/update-contracts.js'
+import { getUpdateBlockReason, type DesktopUpdateState, type UpdateBlockReason } from '../shared/update-contracts.js'
+
+export { getUpdateBlockReason } from '../shared/update-contracts.js'
 
 type ReleaseNote = { version?: string; note?: string | null }
 
@@ -37,8 +38,6 @@ export type ManualUpdateServiceOptions = {
   getInstallBlocker: () => Promise<UpdateBlockReason | null>
   onStateChange?: (state: Readonly<DesktopUpdateState>) => void
 }
-
-const activeExternalStates = new Set(['starting', 'live', 'stopping'])
 
 function objectValue(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
@@ -97,17 +96,6 @@ export function createElectronUpdateAdapter(updater: ElectronUpdaterLike): Manua
       updater.quitAndInstall(true, true)
     },
   }
-}
-
-export function getUpdateBlockReason(status: RuntimeStatus): UpdateBlockReason | null {
-  if (status.streaming) return 'streaming'
-  if (status.recording) return 'recording'
-  if (status.replayBuffer) return 'replay-buffer'
-  if (status.busy) return 'busy'
-  if (activeExternalStates.has(status.platforms.youtube.state) || activeExternalStates.has(status.platforms.twitch.state)) {
-    return 'external-live'
-  }
-  return null
 }
 
 function normalizeReleaseNotes(value: ManualUpdateEvent & { type: 'available' }): string | undefined {
