@@ -1,4 +1,5 @@
 import type { RuntimeStatus } from '../shared/contracts.js'
+import { redactSensitiveText } from '../shared/redaction.js'
 import type { DesktopUpdateState, UpdateBlockReason } from '../shared/update-contracts.js'
 
 type ReleaseNote = { version?: string; note?: string | null }
@@ -18,15 +19,85 @@ export interface ManualUpdateAdapter {
   install(): void
 }
 
+export interface ElectronUpdaterLike {
+  autoDownload: boolean
+  autoInstallOnAppQuit: boolean
+  on(eventName: string, listener: (...arguments_: unknown[]) => void): unknown
+  removeListener(eventName: string, listener: (...arguments_: unknown[]) => void): unknown
+  checkForUpdates(): Promise<unknown>
+  downloadUpdate(): Promise<unknown>
+  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void
+}
+
 export type ManualUpdateServiceOptions = {
   currentVersion: string
   packaged: boolean
   portable: boolean
+  installSupported?: boolean
   getInstallBlocker: () => Promise<UpdateBlockReason | null>
   onStateChange?: (state: Readonly<DesktopUpdateState>) => void
 }
 
 const activeExternalStates = new Set(['starting', 'live', 'stopping'])
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+}
+
+function releaseNotesValue(value: unknown): string | ReleaseNote[] | null | undefined {
+  if (typeof value === 'string' || value === null || value === undefined) return value
+  if (!Array.isArray(value)) return undefined
+  return value.map((entry) => {
+    const note = objectValue(entry)
+    return {
+      version: typeof note.version === 'string' ? note.version : undefined,
+      note: typeof note.note === 'string' || note.note === null ? note.note : undefined,
+    }
+  })
+}
+
+export function createElectronUpdateAdapter(updater: ElectronUpdaterLike): ManualUpdateAdapter {
+  return {
+    configureManual() {
+      updater.autoDownload = false
+      updater.autoInstallOnAppQuit = false
+    },
+    subscribe(listener) {
+      const handlers: Array<[string, (...arguments_: unknown[]) => void]> = [
+        ['update-available', (value) => {
+          const info = objectValue(value)
+          if (typeof info.version !== 'string') return
+          listener({
+            type: 'available',
+            version: info.version,
+            releaseName: typeof info.releaseName === 'string' ? info.releaseName : undefined,
+            releaseNotes: releaseNotesValue(info.releaseNotes),
+          })
+        }],
+        ['update-not-available', () => listener({ type: 'not-available' })],
+        ['download-progress', (value) => {
+          const progress = objectValue(value)
+          if (typeof progress.percent === 'number') listener({ type: 'progress', percent: progress.percent })
+        }],
+        ['update-downloaded', () => listener({ type: 'downloaded' })],
+        ['error', (value) => listener({ type: 'error', message: value instanceof Error ? value.message : String(value) })],
+      ]
+      for (const [eventName, handler] of handlers) updater.on(eventName, handler)
+      return () => {
+        for (const [eventName, handler] of handlers) updater.removeListener(eventName, handler)
+      }
+    },
+    async check() {
+      await updater.checkForUpdates()
+    },
+    async download() {
+      await updater.downloadUpdate()
+    },
+    install() {
+      updater.quitAndInstall(true, true)
+    },
+  }
+}
 
 export function getUpdateBlockReason(status: RuntimeStatus): UpdateBlockReason | null {
   if (status.streaming) return 'streaming'
@@ -53,7 +124,7 @@ function normalizeReleaseNotes(value: ManualUpdateEvent & { type: 'available' })
 
 function safeUpdateError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  return message.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 1_000) || 'Unknown update error'
+  return redactSensitiveText(message).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 1_000) || 'Unknown update error'
 }
 
 export class ManualUpdateService {
@@ -65,7 +136,7 @@ export class ManualUpdateService {
     private readonly adapter: ManualUpdateAdapter,
     private readonly options: ManualUpdateServiceOptions,
   ) {
-    const installSupported = options.packaged && !options.portable
+    const installSupported = options.installSupported ?? (options.packaged && !options.portable)
     this.state = {
       phase: options.packaged ? 'idle' : 'unsupported',
       currentVersion: options.currentVersion,
@@ -171,7 +242,7 @@ export class ManualUpdateService {
       phase,
       currentVersion: this.options.currentVersion,
       portable: this.options.portable,
-      installSupported: this.options.packaged && !this.options.portable,
+      installSupported: this.options.installSupported ?? (this.options.packaged && !this.options.portable),
       ...details,
     }
     this.notify()

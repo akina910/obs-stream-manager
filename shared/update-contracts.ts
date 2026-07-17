@@ -9,7 +9,7 @@ export type DesktopUpdatePhase =
   | 'error'
   | 'unsupported'
 
-export type UpdateBlockReason = 'streaming' | 'recording' | 'replay-buffer' | 'busy' | 'external-live'
+export type UpdateBlockReason = 'streaming' | 'recording' | 'replay-buffer' | 'busy' | 'external-live' | 'status-unavailable'
 
 export type DesktopUpdateState = {
   phase: DesktopUpdatePhase

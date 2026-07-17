@@ -1,7 +1,8 @@
+import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import type { RuntimeStatus } from '../shared/contracts.js'
 import type { ManualUpdateEvent } from './updater.js'
-import { getUpdateBlockReason, ManualUpdateService, type ManualUpdateAdapter } from './updater.js'
+import { createElectronUpdateAdapter, getUpdateBlockReason, ManualUpdateService, type ManualUpdateAdapter } from './updater.js'
 
 class FakeUpdateAdapter implements ManualUpdateAdapter {
   configured = 0
@@ -40,6 +41,27 @@ class FakeUpdateAdapter implements ManualUpdateAdapter {
   }
 }
 
+class FakeElectronUpdater extends EventEmitter {
+  autoDownload = true
+  autoInstallOnAppQuit = true
+  checks = 0
+  downloads = 0
+  installArguments: [boolean | undefined, boolean | undefined] | null = null
+
+  async checkForUpdates(): Promise<void> {
+    this.checks += 1
+  }
+
+  async downloadUpdate(): Promise<string[]> {
+    this.downloads += 1
+    return []
+  }
+
+  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void {
+    this.installArguments = [isSilent, isForceRunAfter]
+  }
+}
+
 const stoppedStatus: RuntimeStatus = {
   obsConnected: true,
   streaming: false,
@@ -71,6 +93,41 @@ function service(adapter = new FakeUpdateAdapter(), options: { packaged?: boolea
 }
 
 describe('manual desktop updater', () => {
+  it('adapts electron-updater to explicit-only operations and cleans up listeners', async () => {
+    const electronUpdater = new FakeElectronUpdater()
+    const adapter = createElectronUpdateAdapter(electronUpdater)
+    const events: ManualUpdateEvent[] = []
+    adapter.configureManual()
+    const unsubscribe = adapter.subscribe((event) => events.push(event))
+
+    expect(electronUpdater.autoDownload).toBe(false)
+    expect(electronUpdater.autoInstallOnAppQuit).toBe(false)
+    electronUpdater.emit('update-available', { version: '0.2.4', releaseName: 'Release', releaseNotes: 'Notes' })
+    electronUpdater.emit('update-not-available', { version: '0.2.3' })
+    electronUpdater.emit('download-progress', { percent: 43.2 })
+    electronUpdater.emit('update-downloaded', { version: '0.2.4' })
+    electronUpdater.emit('error', new Error('safe failure'))
+    expect(events).toEqual([
+      { type: 'available', version: '0.2.4', releaseName: 'Release', releaseNotes: 'Notes' },
+      { type: 'not-available' },
+      { type: 'progress', percent: 43.2 },
+      { type: 'downloaded' },
+      { type: 'error', message: 'safe failure' },
+    ])
+
+    await adapter.check()
+    await adapter.download()
+    adapter.install()
+    expect(electronUpdater.checks).toBe(1)
+    expect(electronUpdater.downloads).toBe(1)
+    expect(electronUpdater.installArguments).toEqual([true, true])
+
+    unsubscribe()
+    for (const name of ['update-available', 'update-not-available', 'download-progress', 'update-downloaded', 'error']) {
+      expect(electronUpdater.listenerCount(name)).toBe(0)
+    }
+  })
+
   it('configures manual operation without checking or downloading at startup', () => {
     const { adapter, updater } = service()
 
