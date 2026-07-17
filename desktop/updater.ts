@@ -123,7 +123,7 @@ function safeUpdateError(error: unknown): string {
 
 function updateErrorKind(error: unknown): 'no-release' | 'failed' {
   const message = error instanceof Error ? error.message : String(error)
-  return /(?:\b404\b|latest\.yml.*(?:not found|does not exist)|no published versions)/i.test(message)
+  return /(?:latest\.yml[\s\S]*(?:not found|does not exist)|no published versions|unable to find latest version on github[\s\S]*ensure a production release exists[\s\S]*httperror:\s*(?:404|406)\b)/i.test(message)
     ? 'no-release'
     : 'failed'
 }
