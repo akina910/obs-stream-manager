@@ -35,6 +35,9 @@ jobs:
           $package = Get-Content package.json -Raw | ConvertFrom-Json
           $expectedTag = "v$($package.version)"
           if ('${{ github.ref_name }}' -ne $expectedTag) { throw "Tag must be $expectedTag for package version $($package.version)" }
+          git fetch origin main:refs/remotes/origin/main --no-tags
+          $mainCommit = git rev-parse origin/main
+          if ($env:GITHUB_SHA -ne $mainCommit) { throw "Release tag must point to current origin/main ($mainCommit), not $env:GITHUB_SHA" }
           if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_YOUTUBE_CLIENT_ID)) { throw 'Repository variable YOUTUBE_CLIENT_ID is required' }
           if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_YOUTUBE_CLIENT_SECRET)) { throw 'Repository secret YOUTUBE_CLIENT_SECRET is required' }
           if ([string]::IsNullOrWhiteSpace($env:OBS_STREAM_MANAGER_TWITCH_CLIENT_ID)) { throw 'Repository variable TWITCH_CLIENT_ID is required' }

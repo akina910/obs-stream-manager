@@ -25,6 +25,7 @@ export const englishTranslations: Record<string, string> = {
   '更新を開始しています': 'Starting the update',
   'この開発版では更新機能を利用できません': 'Updates are unavailable in this development build',
   '更新を確認できませんでした': 'Could not check for updates',
+  '公開済みの更新はまだありません': 'No public update is available yet',
   'エラー詳細': 'Error details',
   'ダウンロード {percent}%': 'Downloading {percent}%',
   'インストーラー版ではアプリ内で更新できます。Portable版はダウンロードページから最新版を取得してください。': 'The installed edition can update in the app. For Portable, get the latest version from the download page.',

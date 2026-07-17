@@ -19,6 +19,7 @@ export type DesktopUpdateState = {
   releaseNotes?: string
   progressPercent?: number
   errorMessage?: string
+  errorKind?: 'no-release' | 'failed'
   blockReason?: UpdateBlockReason
   portable: boolean
   installSupported: boolean
@@ -28,9 +29,10 @@ const activeExternalStates = new Set(['starting', 'live', 'stopping'])
 
 export function getUpdateBlockReason(status: RuntimeStatus): UpdateBlockReason | null {
   if (status.streaming) return 'streaming'
-  if (status.recording) return 'recording'
+  if (status.recording || status.sourceRecord || status.verticalRecording) return 'recording'
   if (status.replayBuffer) return 'replay-buffer'
   if (status.busy) return 'busy'
+  if (status.twitchOutputPlugin?.outputActive) return 'external-live'
   if (activeExternalStates.has(status.platforms.youtube.state) || activeExternalStates.has(status.platforms.twitch.state)) {
     return 'external-live'
   }

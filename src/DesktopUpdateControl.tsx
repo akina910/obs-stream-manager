@@ -96,7 +96,7 @@ export function DesktopUpdateControl({ status }: { status: RuntimeStatus }) {
   return <section className="settings-card update-card" aria-live="polite">
     <div className="card-title-row">
       <h2>{t('アプリの更新')}</h2>
-      {state && <span className={`connection-label update-${phase}`}>{t(phaseMessages[phase])}</span>}
+      {state && <span className={`connection-label update-${phase}`}>{t(state.errorKind === 'no-release' ? '公開済みの更新はまだありません' : phaseMessages[phase])}</span>}
     </div>
     <p>{t('更新は自動で開始されません。確認、ダウンロード、再起動はこの画面から行います。')}</p>
     {state && <div className="update-version-grid">

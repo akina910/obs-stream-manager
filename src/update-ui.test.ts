@@ -54,6 +54,10 @@ describe('desktop update UI actions', () => {
       .toEqual({ action: 'install', disabled: true, blockReason: 'streaming' })
     expect(getDesktopUpdateAction(state('downloaded'), { ...stoppedStatus, recording: true }))
       .toEqual({ action: 'install', disabled: true, blockReason: 'recording' })
+    expect(getDesktopUpdateAction(state('downloaded'), { ...stoppedStatus, sourceRecord: true }))
+      .toEqual({ action: 'install', disabled: true, blockReason: 'recording' })
+    expect(getDesktopUpdateAction(state('downloaded'), { ...stoppedStatus, verticalRecording: true }))
+      .toEqual({ action: 'install', disabled: true, blockReason: 'recording' })
     expect(getDesktopUpdateAction(state('downloaded'), { ...stoppedStatus, replayBuffer: true }))
       .toEqual({ action: 'install', disabled: true, blockReason: 'replay-buffer' })
     expect(getDesktopUpdateAction(state('downloaded'), { ...stoppedStatus, busy: true }))
@@ -61,6 +65,10 @@ describe('desktop update UI actions', () => {
     expect(getDesktopUpdateAction(state('downloaded'), {
       ...stoppedStatus,
       platforms: { ...stoppedStatus.platforms, youtube: { ...stoppedStatus.platforms.youtube, state: 'live' } },
+    })).toEqual({ action: 'install', disabled: true, blockReason: 'external-live' })
+    expect(getDesktopUpdateAction(state('downloaded'), {
+      ...stoppedStatus,
+      twitchOutputPlugin: { state: 'ready', detail: '', outputActive: true },
     })).toEqual({ action: 'install', disabled: true, blockReason: 'external-live' })
   })
 })

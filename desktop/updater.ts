@@ -1,5 +1,5 @@
 import { redactSensitiveText } from '../shared/redaction.js'
-import { getUpdateBlockReason, type DesktopUpdateState, type UpdateBlockReason } from '../shared/update-contracts.js'
+import type { DesktopUpdateState, UpdateBlockReason } from '../shared/update-contracts.js'
 
 export { getUpdateBlockReason } from '../shared/update-contracts.js'
 
@@ -112,7 +112,20 @@ function normalizeReleaseNotes(value: ManualUpdateEvent & { type: 'available' })
 
 function safeUpdateError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  return redactSensitiveText(message).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 1_000) || 'Unknown update error'
+  const printable = [...redactSensitiveText(message)]
+    .map((character) => {
+      const code = character.charCodeAt(0)
+      return code < 32 || code === 127 ? ' ' : character
+    })
+    .join('')
+  return printable.trim().slice(0, 1_000) || 'Unknown update error'
+}
+
+function updateErrorKind(error: unknown): 'no-release' | 'failed' {
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:\b404\b|latest\.yml.*(?:not found|does not exist)|no published versions)/i.test(message)
+    ? 'no-release'
+    : 'failed'
 }
 
 export class ManualUpdateService {
@@ -151,7 +164,7 @@ export class ManualUpdateService {
         await this.adapter.check()
         if (this.state.phase === 'checking') this.replaceState({ phase: 'up-to-date' })
       } catch (error) {
-        this.replaceState({ phase: 'error', errorMessage: safeUpdateError(error) })
+        this.replaceState({ phase: 'error', errorMessage: safeUpdateError(error), errorKind: updateErrorKind(error) })
       }
     })
   }
@@ -163,7 +176,7 @@ export class ManualUpdateService {
       try {
         await this.adapter.download()
       } catch (error) {
-        this.patchState({ phase: 'error', errorMessage: safeUpdateError(error) })
+        this.patchState({ phase: 'error', errorMessage: safeUpdateError(error), errorKind: updateErrorKind(error) })
       }
     })
   }
@@ -180,7 +193,7 @@ export class ManualUpdateService {
         this.patchState({ phase: 'installing', blockReason: undefined, errorMessage: undefined })
         this.adapter.install()
       } catch (error) {
-        this.patchState({ phase: 'error', errorMessage: safeUpdateError(error) })
+        this.patchState({ phase: 'error', errorMessage: safeUpdateError(error), errorKind: updateErrorKind(error) })
       }
     })
   }
@@ -219,7 +232,7 @@ export class ManualUpdateService {
         this.patchState({ phase: 'downloaded', progressPercent: 100, errorMessage: undefined, blockReason: undefined })
         break
       case 'error':
-        this.patchState({ phase: 'error', errorMessage: safeUpdateError(event.message) })
+        this.patchState({ phase: 'error', errorMessage: safeUpdateError(event.message), errorKind: updateErrorKind(event.message) })
         break
     }
   }

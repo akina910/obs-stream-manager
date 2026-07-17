@@ -1,6 +1,7 @@
 param(
   [string]$PackageDirectory = '',
-  [string]$PackageArchive = ''
+  [string]$PackageArchive = '',
+  [switch]$AllowMissingProviderOAuth
 )
 
 $ErrorActionPreference = 'Stop'
@@ -165,7 +166,12 @@ try {
 
   $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
   $oauthStatus = Invoke-RestMethod "http://127.0.0.1:$port/api/oauth/status" -TimeoutSec 10
-  $results.providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
+  $providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
+  if ($AllowMissingProviderOAuth) {
+    $results.providerOAuthCheckSkipped = $true
+  } else {
+    $results.providerOAuthProvisioned = $providerOAuthProvisioned
+  }
   $bootstrap.config.obs.startDelaySeconds = 7
   $bootstrap.config.ui.language = 'en'
   $saveBody = @{ config = $bootstrap.config; secrets = @{ 'obs-password' = $secretMarker } } | ConvertTo-Json -Depth 30

@@ -167,6 +167,13 @@ describe('manual desktop updater', () => {
     await expect(updater.check()).resolves.toMatchObject({ phase: 'up-to-date' })
   })
 
+  it('labels a missing public release without presenting it as a successful live update check', async () => {
+    const { adapter, updater } = service()
+    adapter.onCheck = () => adapter.emit({ type: 'error', message: 'HttpError: 404 latest.yml not found' })
+
+    await expect(updater.check()).resolves.toMatchObject({ phase: 'error', errorKind: 'no-release' })
+  })
+
   it('reports download progress and reaches the downloaded phase', async () => {
     const { adapter, updater } = service()
     adapter.onCheck = () => adapter.emit({ type: 'available', version: '0.2.4', releaseNotes: 'Changes' })
@@ -201,8 +208,18 @@ describe('manual desktop updater', () => {
   it('blocks every output state that makes replacement unsafe', () => {
     expect(getUpdateBlockReason({ ...stoppedStatus, streaming: true })).toBe('streaming')
     expect(getUpdateBlockReason({ ...stoppedStatus, recording: true })).toBe('recording')
+    expect(getUpdateBlockReason({ ...stoppedStatus, sourceRecord: true })).toBe('recording')
+    expect(getUpdateBlockReason({ ...stoppedStatus, verticalRecording: true })).toBe('recording')
     expect(getUpdateBlockReason({ ...stoppedStatus, replayBuffer: true })).toBe('replay-buffer')
     expect(getUpdateBlockReason({ ...stoppedStatus, busy: true })).toBe('busy')
+    expect(getUpdateBlockReason({
+      ...stoppedStatus,
+      twitchOutputPlugin: {
+        state: 'ready',
+        detail: '',
+        outputActive: true,
+      },
+    })).toBe('external-live')
     expect(getUpdateBlockReason({ ...stoppedStatus, platforms: { ...stoppedStatus.platforms, youtube: { ...stoppedStatus.platforms.youtube, state: 'starting' } } })).toBe('external-live')
     expect(getUpdateBlockReason({ ...stoppedStatus, platforms: { ...stoppedStatus.platforms, twitch: { ...stoppedStatus.platforms.twitch, state: 'live' } } })).toBe('external-live')
     expect(getUpdateBlockReason({ ...stoppedStatus, platforms: { ...stoppedStatus.platforms, twitch: { ...stoppedStatus.platforms.twitch, state: 'stopping' } } })).toBe('external-live')
