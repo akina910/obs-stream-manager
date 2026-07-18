@@ -174,6 +174,42 @@ describe('manual desktop updater', () => {
     await expect(updater.check()).resolves.toMatchObject({ phase: 'error', errorKind: 'no-release' })
   })
 
+  it('recognizes multiline missing channel metadata errors', async () => {
+    const { adapter, updater } = service()
+    adapter.onCheck = () => adapter.emit({ type: 'error', message: 'HttpError: 404 latest.yml\r\nwas not found' })
+
+    await expect(updater.check()).resolves.toMatchObject({ phase: 'error', errorKind: 'no-release' })
+  })
+
+  it('labels GitHub latest-release lookup failures as no public release', async () => {
+    const { adapter, updater } = service()
+    adapter.onCheck = () => adapter.emit({
+      type: 'error',
+      message: 'Cannot parse releases feed: Error: Unable to find latest version on GitHub (https://github.com/akina910/obs-stream-manager/releases/latest), please ensure a production release exists: HttpError: 406',
+    })
+
+    await expect(updater.check()).resolves.toMatchObject({ phase: 'error', errorKind: 'no-release' })
+  })
+
+  it('does not hide GitHub authorization failures as a missing public release', async () => {
+    const { adapter, updater } = service()
+    adapter.onCheck = () => adapter.emit({
+      type: 'error',
+      message: 'Unable to find latest version on GitHub, please ensure a production release exists: HttpError: 403',
+    })
+
+    await expect(updater.check()).resolves.toMatchObject({ phase: 'error', errorKind: 'failed' })
+  })
+
+  it('does not classify a missing installer during download as no public release', async () => {
+    const { adapter, updater } = service()
+    adapter.onCheck = () => adapter.emit({ type: 'available', version: '0.2.5' })
+    adapter.onDownload = () => adapter.emit({ type: 'error', message: 'HttpError: 404 update installer not found' })
+    await updater.check()
+
+    await expect(updater.download()).resolves.toMatchObject({ phase: 'error', errorKind: 'failed' })
+  })
+
   it('reports download progress and reaches the downloaded phase', async () => {
     const { adapter, updater } = service()
     adapter.onCheck = () => adapter.emit({ type: 'available', version: '0.2.4', releaseNotes: 'Changes' })
