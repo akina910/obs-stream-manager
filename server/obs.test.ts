@@ -152,6 +152,9 @@ describe('ObsController recording fallbacks', () => {
             if (vendor.requestType === 'start_twitch') twitchActive = true
             return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: twitchActive } }
           }
+          if (vendor.vendorName === 'aitum-vertical-canvas' && vendor.requestType === 'status') {
+            return { responseData: { success: true, backtrack: true } }
+          }
           return { responseData: { success: true } }
         }
         return {}
@@ -176,9 +179,51 @@ describe('ObsController recording fallbacks', () => {
 
     expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['StartStream', 'StartRecord', 'StartReplayBuffer']))
     expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { vendorName?: string }).vendorName === 'source-record')).toBe(false)
+    const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
+    const startStreamIndex = calls.findIndex(({ request }) => request === 'StartStream')
+    expect(stopBacktrackIndex).toBeGreaterThanOrEqual(0)
+    expect(stopBacktrackIndex).toBeLessThan(startStreamIndex)
     expect(calls.map(({ request }) => request)).not.toContain('TriggerHotkeyByName')
     expect(warnings.join(' ')).toContain('3840×2160')
     expect(warnings.join(' ')).toContain('60 FPS')
+    expect(warnings.join(' ')).toContain('Backtrack')
+  })
+
+  it('detects an empty Aitum Vertical scene before starting a black recording', async () => {
+    const fake = {
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'CallVendorRequest') {
+          expect(data).toMatchObject({ vendorName: 'aitum-vertical-canvas', requestType: 'current_scene' })
+          return { responseData: { success: true, scene: 'Vertical Scene' } }
+        }
+        if (request === 'GetSceneItemList') return { sceneItems: [] }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const result = await (controller as unknown as { verticalSceneReady(): Promise<{ ready: boolean; sceneName: string }> }).verticalSceneReady()
+
+    expect(result).toEqual({ ready: false, sceneName: 'Vertical Scene' })
+  })
+
+  it('warns but does not abort when Aitum Backtrack protection cannot be queried', async () => {
+    const fake = {
+      call: vi.fn(async () => { throw new Error('Unknown vendor request type') }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const warnings: string[] = []
+
+    await expect((controller as unknown as {
+      protectHighResolutionSimulcast(
+        protection: { protected: boolean; width: number; height: number },
+        warnings: string[],
+      ): Promise<void>
+    }).protectHighResolutionSimulcast({ protected: true, width: 3840, height: 2160 }, warnings)).resolves.toBeUndefined()
+
+    expect(warnings.join(' ')).toContain('Backtrackの停止を確認できませんでした')
   })
 
   it('routes isolated recording stems to A1-A5 and the simulcast mix to A6', async () => {

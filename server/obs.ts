@@ -411,15 +411,65 @@ export class ObsController {
     await this.callVendor('obs-stream-manager-output', 'stop_twitch')
   }
 
-  private async callVertical(requestType: 'start_recording' | 'stop_recording'): Promise<void> {
+  private async callVertical(requestType: 'start_recording' | 'stop_recording' | 'stop_backtrack'): Promise<void> {
     try {
       await this.callVendor('aitum-vertical-canvas', requestType)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (!message.toLowerCase().includes('no vendor was found')) throw error
+      const hotkeyNames = {
+        start_recording: 'VerticalCanvasDockStartRecording',
+        stop_recording: 'VerticalCanvasDockStopRecording',
+        stop_backtrack: 'VerticalCanvasDockStopBacktrack',
+      } as const
       await this.obs.call('TriggerHotkeyByName', {
-        hotkeyName: requestType === 'start_recording' ? 'VerticalCanvasDockStartRecording' : 'VerticalCanvasDockStopRecording',
+        hotkeyName: hotkeyNames[requestType],
       })
+    }
+  }
+
+  private async stopVerticalBacktrackIfActive(): Promise<boolean> {
+    try {
+      const status = await this.callVendor('aitum-vertical-canvas', 'status')
+      if (status.backtrack !== true) return false
+      await this.callVertical('stop_backtrack')
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.toLowerCase().includes('no vendor was found')) return false
+      throw error
+    }
+  }
+
+  private async protectHighResolutionSimulcast(
+    protection: { protected: boolean; width: number; height: number },
+    warnings: string[],
+  ): Promise<void> {
+    if (!protection.protected) return
+    try {
+      if (await this.stopVerticalBacktrackIfActive()) {
+        warnings.push(`${protection.width}×${protection.height}の同時配信を60 FPSで維持するため、Aitum Vertical Backtrackを停止しました`)
+      }
+    } catch (error) {
+      warnings.push(`Aitum Vertical Backtrackの停止を確認できませんでした: ${error instanceof Error ? error.message : String(error)}。Aitum VerticalでBacktrackを停止してください`)
+    }
+  }
+
+  private async verticalSceneReady(): Promise<{ ready: boolean; sceneName: string }> {
+    let current: Record<string, unknown> = {}
+    try {
+      current = await this.callVendor('aitum-vertical-canvas', 'current_scene')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!message.toLowerCase().includes('no vendor was found')) throw error
+    }
+    const sceneName = typeof current.scene === 'string' ? current.scene.trim() : 'Vertical Scene'
+    if (!sceneName) return { ready: false, sceneName: 'Vertical Scene' }
+    const scene = await this.obs.call('GetSceneItemList', { sceneName }).catch(() => null)
+    if (!scene || !Array.isArray(scene.sceneItems)) return { ready: true, sceneName }
+    return {
+      sceneName,
+      ready: scene.sceneItems.some((item) => item.sceneItemEnabled !== false),
     }
   }
 
@@ -760,6 +810,8 @@ export class ObsController {
     const startedNow = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false }
     let restoreManagedStreamServiceOnFailure = false
     try {
+      const protection = await this.highResolutionSimulcast(config, profile)
+      await this.protectHighResolutionSimulcast(protection, warnings)
       const stream = await this.obs.call('GetStreamStatus')
       if (!stream.outputActive) await this.configureSeparatedAudioTracks(config, warnings)
       if (!stream.outputActive) {
@@ -788,7 +840,6 @@ export class ObsController {
       // Allocate the primary simulcast encoder before optional recording encoders.
       // Source Record was observed dropping 99.9% of frames when it competed with
       // a 4K60 simulcast and a vertical encoder.
-      const protection = await this.highResolutionSimulcast(config, profile)
       const record = await this.obs.call('GetRecordStatus')
       if (config.features.recording && profile.recording.enabled && !record.outputActive) {
         try { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }
@@ -816,8 +867,13 @@ export class ObsController {
         }
         if (config.features.verticalRecording && profile.recording.verticalRecording) {
           try {
-            await this.callVertical('start_recording')
-            this.started.vertical = true; startedNow.vertical = true
+            const vertical = await this.verticalSceneReady()
+            if (!vertical.ready) {
+              warnings.push(`Aitum Verticalシーン「${vertical.sceneName}」に表示ソースがないため、黒画面になる縦録画は開始しませんでした`)
+            } else {
+              await this.callVertical('start_recording')
+              this.started.vertical = true; startedNow.vertical = true
+            }
           } catch (error) { warnings.push(`Aitum Vertical録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
         }
       }
@@ -884,6 +940,7 @@ export class ObsController {
     // process restarts, so do not rely on the controller's transient `started` flags here.
     await this.stopSourceRecord().catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     await this.callVertical('stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    await this.callVertical('stop_backtrack').catch((error) => warnings.push(`Aitum Vertical Backtrackを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     await this.stopTwitchSecondary().catch((error) => {
       const message = error instanceof Error ? error.message : String(error)
       if (!message.toLowerCase().includes('no vendor was found')) warnings.push(`Twitch副出力を停止できませんでした: ${message}`)
