@@ -11,6 +11,19 @@ export const ThumbnailApplyStatusSchema = z.enum(['not_registered', 'pending', '
 export type ThumbnailApplyStatus = z.infer<typeof ThumbnailApplyStatusSchema>
 
 export const GameIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9_-]*$/)
+export const AudioProfileSchema = z.object({
+  microphoneDb: z.number().min(-100).max(26).default(-3),
+  gameDb: z.number().min(-100).max(26).default(-15),
+  discordDb: z.number().min(-100).max(26).default(-18),
+  bgmDb: z.number().min(-100).max(26).default(-25),
+  duckingDb: z.number().min(-30).max(0).default(-6),
+})
+export type AudioProfile = z.infer<typeof AudioProfileSchema>
+export const AudioCalibrationRequestSchema = z.object({
+  gameId: GameIdSchema,
+  audio: AudioProfileSchema,
+  durationMs: z.number().int().min(9_000).max(30_000).default(15_000),
+})
 export const ObsSceneNameSchema = z.string().trim().min(1).max(256)
 
 const ServiceConfigSchema = z.object({
@@ -59,13 +72,7 @@ export const GameProfileSchema = z.object({
     categoryName: z.string().default(''),
     tags: z.array(z.string()).default(['日本語']),
   }),
-  audio: z.object({
-    microphoneDb: z.number().min(-100).max(26).default(-3),
-    gameDb: z.number().min(-100).max(26).default(-15),
-    discordDb: z.number().min(-100).max(26).default(-18),
-    bgmDb: z.number().min(-100).max(26).default(-25),
-    duckingDb: z.number().min(-30).max(0).default(-6),
-  }),
+  audio: AudioProfileSchema,
   recording: z.object({
     enabled: z.boolean().default(true),
     directory: z.string().default(''),

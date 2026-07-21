@@ -1,4 +1,5 @@
-import type { ApplyResult, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import type { ApplyResult, AudioProfile, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import type { AudioCalibrationResult } from '../shared/audio-calibration.js'
 import { AppLogger } from './logger.js'
 import { CaptureDetector } from './capture.js'
 import { ObsController } from './obs.js'
@@ -374,6 +375,47 @@ export class StreamOrchestrator {
           this.markManagedObsState(active)
         }
       }
+    })
+  }
+
+  async autoAdjustAudio(gameId: string, durationMs = 15_000, audio?: AudioProfile): Promise<AudioCalibrationResult> {
+    return this.exclusive(async () => {
+      if (!this.selected || !this.method || this.selected.id !== gameId) {
+        throw Object.assign(new Error('音声を調整するゲームを先に選択して、OBSへプロファイルを適用してください'), { statusCode: 409 })
+      }
+      const status = await this.getStatus()
+      const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
+      if (status.streaming || status.recording || status.replayBuffer || externalActive) {
+        throw Object.assign(new Error('配信・録画・リプレイ中は音声を自動調整できません。すべて停止してから再実行してください'), { statusCode: 409 })
+      }
+      const config = await this.store.getConfig()
+      const previous = this.selected
+      const calibrationProfile = audio === undefined ? previous : { ...previous, audio }
+      const result = await this.obs.autoAdjustAudio(config, calibrationProfile, this.method, durationMs, (profile) => this.store.saveProfile(profile))
+      const saved = result.profile
+      this.selected = saved
+      this.warning = result.warnings[0] ?? null
+      await this.logger.write('audio.auto_adjusted', {
+        gameId,
+        captureMethod: this.method,
+        durationMs: result.durationMs,
+        readings: result.readings.map(({ role, sourceName, status: readingStatus, previousDb, appliedDb, verifiedDb, verifiedPeakDb }) => ({
+          role,
+          sourceName,
+          status: readingStatus,
+          previousDb,
+          appliedDb,
+          verifiedDb,
+          verifiedPeakDb,
+        })),
+        filters: result.filters.map(({ sourceName, filterName, filterKind, status: filterStatus }) => ({ sourceName, filterName, filterKind, status: filterStatus })),
+        warnings: result.warnings,
+      }).catch((error) => {
+        const warning = `音声自動調整の監査ログを保存できませんでした: ${error instanceof Error ? error.message : String(error)}`
+        result.warnings.push(warning)
+        this.warning ??= warning
+      })
+      return { ...result, profile: saved }
     })
   }
 

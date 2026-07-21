@@ -641,6 +641,42 @@ describe('ObsController recording fallbacks', () => {
     expect(toggles.map(({ filterEnabled }) => filterEnabled)).toEqual([true, false])
   })
 
+  it('reapplies calibrated per-source levels and keeps only the active game audio unmuted', async () => {
+    const volumes: Array<{ inputName: string; inputVolumeDb: number }> = []
+    const mutes: Array<{ inputName: string; inputMuted: boolean }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking' }] }
+        if (request === 'GetRecordStatus') return { outputActive: false }
+        if (request === 'SetInputVolume') volumes.push(data as { inputName: string; inputVolumeDb: number })
+        if (request === 'SetInputMute') mutes.push(data as { inputName: string; inputMuted: boolean })
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const profile = structuredClone(starterProfiles[0])
+    profile.audio = { microphoneDb: 1, gameDb: -11, discordDb: -19, bgmDb: -27, duckingDb: -6 }
+
+    await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
+
+    expect(volumes).toEqual(expect.arrayContaining([
+      { inputName: 'MIC', inputVolumeDb: 1 },
+      { inputName: 'GAME_PC', inputVolumeDb: -11 },
+      { inputName: 'DISCORD', inputVolumeDb: -19 },
+      { inputName: 'BGM', inputVolumeDb: -27 },
+    ]))
+    expect(mutes).toEqual([
+      { inputName: 'GAME_PC', inputMuted: false },
+      { inputName: 'GAME_GFN', inputMuted: true },
+      { inputName: 'GAME_SWITCH', inputMuted: true },
+    ])
+  })
+
   it('warns when no compatible OBS profile parameter can be updated', async () => {
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),

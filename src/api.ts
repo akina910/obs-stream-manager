@@ -1,5 +1,6 @@
 import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
 import type { CommonTemplateConfig, CommonTemplateSettings } from '../shared/common-template'
+import type { AudioCalibrationResult } from '../shared/audio-calibration'
 
 export type { CommonTemplateSettings } from '../shared/common-template'
 
@@ -58,6 +59,7 @@ export const api = {
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
   testTwitchOutput: () => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: '{}' }),
+  autoAdjustAudio: (gameId: string, audio: GameProfile['audio'], durationMs = 15_000) => request<AudioCalibrationResult>('/api/audio/auto-adjust', { method: 'POST', body: JSON.stringify({ gameId, audio, durationMs }) }),
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),
   selectFolder: (initialPath: string) => request<{ path: string | null }>('/api/folders/select', { method: 'POST', body: JSON.stringify({ initialPath }) }),

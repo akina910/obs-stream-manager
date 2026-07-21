@@ -1,6 +1,8 @@
 import OBSWebSocket, { type OBSRequestTypes } from 'obs-websocket-js'
 import type { AppConfig, BgmPlayback, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
 import type { CommonTemplateRender } from './common-template.js'
+import type { AudioCalibrationResult } from '../shared/audio-calibration.js'
+import { AudioCalibrationService } from './audio-calibration.js'
 import { SecretStore } from './secrets.js'
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -32,6 +34,7 @@ export class ObsController {
     private readonly secrets: SecretStore,
     private readonly streamStartTimeoutMs = 8_000,
     private readonly streamStopTimeoutMs = streamStartTimeoutMs,
+    private readonly audioCalibration = new AudioCalibrationService(),
   ) {
     this.obs.on('ConnectionClosed', () => {
       this.connected = false
@@ -40,6 +43,23 @@ export class ObsController {
     this.obs.on('StreamStateChanged', ({ outputActive }) => {
       for (const listener of this.streamStateListeners) listener(outputActive)
     })
+  }
+
+  async autoAdjustAudio(
+    config: AppConfig,
+    profile: GameProfile,
+    method: CaptureMethod,
+    durationMs = 15_000,
+    persistProfile?: (profile: GameProfile) => Promise<GameProfile>,
+  ): Promise<AudioCalibrationResult> {
+    return this.audioCalibration.calibrate(
+      config,
+      this.secrets.get('obs-password') ?? undefined,
+      profile,
+      method,
+      durationMs,
+      persistProfile,
+    )
   }
 
   onStreamStateChanged(listener: (active: boolean) => void): () => void {
