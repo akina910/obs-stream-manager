@@ -1,5 +1,6 @@
 import { AlertTriangle, LoaderCircle, Music2, Pause, Play, SkipBack, Square, Trash2, Upload } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react'
+import { STOCK_BGM_INPUT_NAME } from '../shared/bgm'
 import type { BgmLibraryStatus, BgmTrack } from '../shared/contracts'
 import { api } from './api'
 import { useI18n } from './i18n'
@@ -110,7 +111,7 @@ export function BgmLibrarySection({ obsConnected }: { obsConnected: boolean }) {
   }
 
   return <main className="bgm-view">
-    <header className="bgm-view-header"><h2>{t('BGMストック')}</h2><span>{library?.tracks.length ?? 0}{t('曲')}</span><code>{t('OBSソース')}: BGM Stock</code></header>
+    <header className="bgm-view-header"><h2>{t('BGMストック')}</h2><span>{library?.tracks.length ?? 0}{t('曲')}</span><code>{t('OBSソース')}: {STOCK_BGM_INPUT_NAME}</code></header>
     {!obsConnected && <div className="inline-warning" role="status"><AlertTriangle size={14} /><span>{t('OBS未接続のため再生操作は使えません。曲の追加・選択・削除は行えます。')}</span></div>}
     {error && <div className="inline-warning error" role="alert"><AlertTriangle size={14} /><span>{error}</span></div>}
 

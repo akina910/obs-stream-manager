@@ -145,6 +145,31 @@ describe('AudioCalibrationService', () => {
     expect(fake.disconnect).toHaveBeenCalledOnce()
   })
 
+  it('calibrates the managed BGM Stock source when both legacy and stock BGM inputs exist', async () => {
+    const fake = new FakeAudioObs()
+    fake.volumes.set('BGM Stock', -25)
+    fake.muted.set('BGM Stock', false)
+    let phase = 0
+    const service = new AudioCalibrationService(
+      () => fake as unknown as OBSWebSocket,
+      async () => {
+        fake.emit({
+          MIC: { magnitudeDb: -18, peakDb: -6 },
+          GAME_PC: { magnitudeDb: -24, peakDb: -10 },
+          'BGM Stock': phase === 0 ? { magnitudeDb: -36, peakDb: -18 } : { magnitudeDb: -30, peakDb: -14 },
+        }, 20)
+        phase += 1
+      },
+    )
+
+    const result = await service.calibrate(structuredClone(defaultConfig), undefined, structuredClone(starterProfiles[0]), 'local')
+
+    expect(result.readings.find(({ role }) => role === 'bgm')).toMatchObject({ sourceName: 'BGM Stock', status: 'adjusted', appliedDb: -21, verifiedDb: -30 })
+    expect(result.profile.audio.bgmDb).toBe(-21)
+    expect(fake.calls).toContainEqual({ request: 'SetInputVolume', data: { inputName: 'BGM Stock', inputVolumeDb: -21 } })
+    expect(fake.calls).not.toContainEqual({ request: 'SetInputVolume', data: { inputName: 'BGM', inputVolumeDb: expect.any(Number) } })
+  })
+
   it('does not change OBS when a required source has no signal', async () => {
     const fake = new FakeAudioObs()
     const service = new AudioCalibrationService(

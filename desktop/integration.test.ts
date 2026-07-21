@@ -8,6 +8,8 @@ import {
   hasDesktopArgument,
   parseDesktopPreferences,
   quitApplicationArgument,
+  windowsCompanionRegistrationArguments,
+  windowsCompanionRegistryKey,
   syncWindowsStartupRegistration,
   shouldShowWindowForSecondInstance,
   supportsWindowsLoginStart,
@@ -54,6 +56,21 @@ describe('desktop integration lifecycle', () => {
     ])
     expect(windowsStartupTaskArguments(false, 'ignored.exe')).toEqual(['/Delete', '/F', '/TN', windowsStartupTaskName])
     expect(() => windowsStartupTaskArguments(true, 'C:\\invalid"path.exe')).toThrow()
+  })
+
+  it('registers both installed and portable executables for the OBS companion plugin', () => {
+    expect(windowsCompanionRegistrationArguments('D:\\Tools\\OBS Stream Manager.exe')).toEqual([
+      'ADD',
+      windowsCompanionRegistryKey,
+      '/v',
+      'ExecutablePath',
+      '/t',
+      'REG_SZ',
+      '/d',
+      'D:\\Tools\\OBS Stream Manager.exe',
+      '/f',
+    ])
+    expect(() => windowsCompanionRegistrationArguments('bad\npath.exe')).toThrow()
   })
 
   it('uses the immediate task and removes the delayed login item when task registration succeeds', async () => {
@@ -127,10 +144,14 @@ describe('desktop integration lifecycle', () => {
 
   it('restores the OBS plugin during install so OBS can start the companion immediately after an upgrade', async () => {
     const installer = await readFile(new URL('../installer.nsh', import.meta.url), 'utf8')
+    const builder = await readFile(new URL('../electron-builder.yml', import.meta.url), 'utf8')
 
     expect(installer).toContain('ReadEnvStr $1 "ProgramData"')
     expect(installer).toContain('CopyFiles /SILENT "$INSTDIR\\resources\\obs-plugin\\bin\\64bit\\obs-stream-manager-output.dll"')
     expect(installer).toContain('$1\\obs-studio\\plugins\\obs-stream-manager-output\\bin\\64bit\\obs-stream-manager-output.dll')
+    expect(builder).toContain('oneClick: true')
+    expect(builder).toContain('perMachine: true')
+    expect(builder).toContain('requestExecutionLevel: admin')
   })
 
   it('lets the installed OBS plugin start the companion before the dock is loaded', async () => {

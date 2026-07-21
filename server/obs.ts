@@ -2,6 +2,7 @@ import OBSWebSocket, { type OBSRequestTypes } from 'obs-websocket-js'
 import type { AppConfig, BgmPlayback, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
 import type { CommonTemplateRender } from './common-template.js'
 import type { AudioCalibrationResult } from '../shared/audio-calibration.js'
+import { STOCK_BGM_INPUT_NAME } from '../shared/bgm.js'
 import { AudioCalibrationService } from './audio-calibration.js'
 import { SecretStore } from './secrets.js'
 
@@ -11,7 +12,7 @@ type AppliedStreamService = { streamServiceType: string; server: string; key: st
 type ObsRuntimeStatus = Omit<RuntimeStatus, 'platforms'>
 type TwitchOutputPluginStatus = NonNullable<ObsRuntimeStatus['twitchOutputPlugin']>
 const twitchOutputPluginApiVersion = 1
-export const stockBgmInputName = 'BGM Stock'
+export const stockBgmInputName = STOCK_BGM_INPUT_NAME
 export type BgmControlAction = 'play' | 'pause' | 'stop' | 'restart'
 export type TwitchIngestTestResult = {
   ok: true
@@ -112,6 +113,138 @@ export class ObsController {
     try { await this.obs.call('SetInputMute', { inputName, inputMuted: muted }) } catch { /* optional/missing input */ }
   }
 
+  private async reconcileMicrophoneSceneItems(config: AppConfig, profile: GameProfile, warnings: string[]): Promise<void> {
+    const configured = await this.obs.call('GetInputSettings', { inputName: config.sources.microphone }).catch(() => null)
+    if (!configured) return
+    const configuredSettings = configured.inputSettings as Record<string, unknown>
+    const configuredDevice = configured.inputKind === 'wasapi_input_capture'
+      ? (typeof configuredSettings.device_id === 'string' && configuredSettings.device_id ? configuredSettings.device_id : 'default')
+      : null
+    const disabledDuplicates = new Set<string>()
+
+    for (const sceneName of new Set([profile.obs.startingScene, profile.obs.sceneName])) {
+      const response = await this.obs.call('GetSceneItemList', { sceneName }).catch(() => null)
+      if (!response || !Array.isArray(response.sceneItems)) continue
+      const configuredItem = response.sceneItems.find(({ sourceName }) => sourceName === config.sources.microphone)
+      if (configuredItem && typeof configuredItem.sceneItemId === 'number') {
+        await this.obs.call('SetSceneItemEnabled', { sceneName, sceneItemId: configuredItem.sceneItemId, sceneItemEnabled: true }).catch(() => undefined)
+      } else {
+        await this.obs.call('CreateSceneItem', { sceneName, sourceName: config.sources.microphone, sceneItemEnabled: true })
+          .catch(() => warnings.push(`${sceneName}へ調整済みマイク「${config.sources.microphone}」を追加できませんでした`))
+      }
+      if (!configuredDevice) continue
+
+      for (const item of response.sceneItems) {
+        if (item.sourceName === config.sources.microphone || item.sceneItemEnabled !== true || typeof item.sourceName !== 'string' || typeof item.sceneItemId !== 'number') continue
+        const candidate = await this.obs.call('GetInputSettings', { inputName: item.sourceName }).catch(() => null)
+        if (!candidate || candidate.inputKind !== 'wasapi_input_capture') continue
+        const settings = candidate.inputSettings as Record<string, unknown>
+        const device = typeof settings.device_id === 'string' && settings.device_id ? settings.device_id : 'default'
+        if (device !== configuredDevice) continue
+        await this.obs.call('SetSceneItemEnabled', { sceneName, sceneItemId: item.sceneItemId, sceneItemEnabled: false })
+        disabledDuplicates.add(item.sourceName)
+      }
+    }
+
+    if (disabledDuplicates.size) {
+      warnings.push(`同じマイクを二重取り込みしていたため、${[...disabledDuplicates].map((name) => `「${name}」`).join('・')}を無効化しました`)
+    }
+  }
+
+  private async highResolutionSimulcast(config: AppConfig, profile: GameProfile): Promise<{ protected: boolean; width: number; height: number }> {
+    const simulcasting = config.features.youtube && profile.youtube.enabled && config.features.twitch && profile.twitch.enabled
+    if (!simulcasting) return { protected: false, width: 0, height: 0 }
+    const video = await this.obs.call('GetVideoSettings').catch(() => null)
+    const width = video?.outputWidth ?? 0
+    const height = video?.outputHeight ?? 0
+    return { protected: width * height >= 2560 * 1440, width, height }
+  }
+
+  private audioTrackSelection(...enabled: number[]): Record<string, boolean> {
+    const selected = new Set(enabled)
+    return Object.fromEntries(Array.from({ length: 6 }, (_, index) => [String(index + 1), selected.has(index + 1)]))
+  }
+
+  private async configureSeparatedAudioTracks(config: AppConfig, warnings: string[]): Promise<void> {
+    const [stream, record, replay] = await Promise.all([
+      this.obs.call('GetStreamStatus').catch(() => ({ outputActive: false })),
+      this.obs.call('GetRecordStatus').catch(() => ({ outputActive: false })),
+      this.getReplayBufferStatus().catch(() => ({ outputActive: false })),
+    ])
+    if (stream.outputActive || record.outputActive || replay.outputActive) {
+      warnings.push('音声トラック分離は出力中のため変更していません。配信・録画・リプレイを停止してゲームを選び直すと反映されます')
+      return
+    }
+
+    const inputList = await this.obs.call('GetInputList').catch(() => null)
+    if (!inputList || !Array.isArray(inputList.inputs)) return
+    const inputs = inputList.inputs.flatMap((input) => typeof input.inputName === 'string'
+      ? [{ inputName: input.inputName, inputKind: typeof input.inputKind === 'string' ? input.inputKind : '' }]
+      : [])
+    const existing = new Set(inputs.map(({ inputName }) => inputName))
+    const outputMode = await this.obs.call('GetProfileParameter', { parameterCategory: 'Output', parameterName: 'Mode' })
+      .then(({ parameterValue }) => parameterValue)
+      .catch(() => null)
+    const advanced = outputMode === 'Advanced'
+    const streamMix = advanced ? 6 : 1
+    const routes: Array<{ inputName: string; isolatedTrack: number; includeInStream?: boolean }> = [
+      ...[...new Set([config.sources.pcGame, config.sources.geforceNow, config.sources.switchGame])]
+        .map((inputName) => ({ inputName, isolatedTrack: advanced ? 1 : 2 })),
+      { inputName: config.sources.discord, isolatedTrack: advanced ? 2 : 3 },
+      { inputName: config.sources.microphone, isolatedTrack: advanced ? 3 : 4 },
+      { inputName: config.sources.bgm, isolatedTrack: advanced ? 4 : 5 },
+      { inputName: stockBgmInputName, isolatedTrack: advanced ? 4 : 5 },
+    ]
+    const managedNames = new Set(routes.map(({ inputName }) => inputName))
+    const auxiliaryKinds = new Set([
+      'game_capture',
+      'window_capture',
+      'display_capture',
+      'dshow_input',
+      'wasapi_output_capture',
+      'wasapi_input_capture',
+      'wasapi_process_output_capture',
+    ])
+    for (const input of inputs) {
+      if (managedNames.has(input.inputName)) continue
+      const audioTracks = await this.obs.call('GetInputAudioTracks', { inputName: input.inputName }).catch(() => null)
+      if (!audioTracks) continue
+      routes.push({
+        inputName: input.inputName,
+        isolatedTrack: advanced ? 5 : 6,
+        includeInStream: !auxiliaryKinds.has(input.inputKind),
+      })
+    }
+    for (const { inputName, isolatedTrack, includeInStream = true } of routes) {
+      if (!existing.has(inputName)) continue
+      await this.obs.call('SetInputAudioTracks', {
+        inputName,
+        inputAudioTracks: this.audioTrackSelection(isolatedTrack, ...(includeInStream ? [streamMix] : [])),
+      }).catch(() => warnings.push(`音声ソース「${inputName}」の録画トラックを分離できませんでした`))
+    }
+
+    const profileSettings = advanced
+      ? [
+          { parameterCategory: 'AdvOut', parameterName: 'TrackIndex', parameterValue: '6' },
+          { parameterCategory: 'AdvOut', parameterName: 'RecTracks', parameterValue: '31' },
+          { parameterCategory: 'AdvOut', parameterName: 'RecEncoder', parameterValue: 'none' },
+          { parameterCategory: 'AdvOut', parameterName: 'RecUseRescale', parameterValue: 'false' },
+          { parameterCategory: 'AdvOut', parameterName: 'Track1Name', parameterValue: 'GAME' },
+          { parameterCategory: 'AdvOut', parameterName: 'Track2Name', parameterValue: 'DISCORD' },
+          { parameterCategory: 'AdvOut', parameterName: 'Track3Name', parameterValue: 'MIC' },
+          { parameterCategory: 'AdvOut', parameterName: 'Track4Name', parameterValue: 'BGM' },
+          { parameterCategory: 'AdvOut', parameterName: 'Track5Name', parameterValue: 'AUX CAPTURE' },
+          { parameterCategory: 'AdvOut', parameterName: 'Track6Name', parameterValue: 'STREAM MIX' },
+        ]
+      : [
+          { parameterCategory: 'SimpleOutput', parameterName: 'RecTracks', parameterValue: '62' },
+          { parameterCategory: 'SimpleOutput', parameterName: 'RecQuality', parameterValue: 'Stream' },
+        ]
+    const results = await Promise.all(profileSettings.map((setting) => this.obs.call('SetProfileParameter', setting).then(() => true).catch(() => false)))
+    if (results.some((result) => !result)) warnings.push('OBS録画プロファイルの一部で音声トラック名または録音対象を更新できませんでした')
+    if (!advanced) warnings.push('OBSが基本出力モードのため、配信用MIXをA1、分離録画をA2以降へ設定しました。詳細出力モードではA1=ゲーム、A2=Discord、A3=マイク、A4=BGM、A5=AUXになります')
+  }
+
   private async ensureStockBgmInput(filename: string): Promise<void> {
     const sceneList = await this.obs.call('GetSceneList')
     let created = false
@@ -152,6 +285,13 @@ export class ObsController {
   async playBgm(config: AppConfig, filename: string, volumeDb = -25, restart = true): Promise<void> {
     await this.connect(config)
     await this.ensureStockBgmInput(filename)
+    const advanced = await this.obs.call('GetProfileParameter', { parameterCategory: 'Output', parameterName: 'Mode' })
+      .then(({ parameterValue }) => parameterValue === 'Advanced')
+      .catch(() => false)
+    await this.obs.call('SetInputAudioTracks', {
+      inputName: stockBgmInputName,
+      inputAudioTracks: this.audioTrackSelection(advanced ? 4 : 5, advanced ? 6 : 1),
+    }).catch(() => undefined)
     await this.obs.call('SetInputVolume', { inputName: stockBgmInputName, inputVolumeDb: volumeDb })
     await this.obs.call('TriggerMediaInputAction', {
       inputName: stockBgmInputName,
@@ -540,6 +680,9 @@ export class ObsController {
       this.setVolume(stockBgmInputName, profile.audio.bgmDb),
       this.setVolume(method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame, profile.audio.gameDb),
     ])
+    await this.setMuted(config.sources.microphone, false)
+    await this.reconcileMicrophoneSceneItems(config, profile, warnings)
+    await this.configureSeparatedAudioTracks(config, warnings)
 
     const activeAudio = method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame
     for (const source of [config.sources.pcGame, config.sources.geforceNow, config.sources.switchGame]) await this.setMuted(source, source !== activeAudio)
@@ -618,31 +761,10 @@ export class ObsController {
     let restoreManagedStreamServiceOnFailure = false
     try {
       const stream = await this.obs.call('GetStreamStatus')
+      if (!stream.outputActive) await this.configureSeparatedAudioTracks(config, warnings)
       if (!stream.outputActive) {
         await this.configurePrimaryStream(config, profile)
         restoreManagedStreamServiceOnFailure = this.streamServiceManaged
-      }
-      const record = await this.obs.call('GetRecordStatus')
-      if (config.features.recording && profile.recording.enabled && !record.outputActive) {
-        try { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }
-        catch (error) { warnings.push(`通常録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
-      }
-      const replay = await this.getReplayBufferStatus()
-      if (config.features.replayBuffer && !replay.outputActive) {
-        try { await this.obs.call('StartReplayBuffer'); this.started.replay = true; startedNow.replay = true }
-        catch (error) { warnings.push(`リプレイバッファを開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
-      }
-      if (config.features.sourceRecord && profile.recording.sourceRecord) {
-        try {
-          await this.callVendor('source-record', 'record_start', { source: selectedSource })
-          this.started.sourceRecord = true; this.started.sourceRecordSource = selectedSource; startedNow.sourceRecord = true
-        } catch (error) { warnings.push(`Source Recordを開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
-      }
-      if (config.features.verticalRecording && profile.recording.verticalRecording) {
-        try {
-          await this.callVertical('start_recording')
-          this.started.vertical = true; startedNow.vertical = true
-        } catch (error) { warnings.push(`Aitum Vertical録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
       }
       if (!stream.outputActive) {
         await this.obs.call('StartStream')
@@ -662,12 +784,68 @@ export class ObsController {
         this.started.twitch = true
         startedNow.twitch = true
       }
-      await wait(config.obs.startDelaySeconds * 1000)
+
+      // Allocate the primary simulcast encoder before optional recording encoders.
+      // Source Record was observed dropping 99.9% of frames when it competed with
+      // a 4K60 simulcast and a vertical encoder.
+      const protection = await this.highResolutionSimulcast(config, profile)
+      const record = await this.obs.call('GetRecordStatus')
+      if (config.features.recording && profile.recording.enabled && !record.outputActive) {
+        try { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }
+        catch (error) { warnings.push(`通常録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
+      }
+      const replay = await this.getReplayBufferStatus()
+      if (config.features.replayBuffer && !replay.outputActive) {
+        try { await this.obs.call('StartReplayBuffer'); this.started.replay = true; startedNow.replay = true }
+        catch (error) { warnings.push(`リプレイバッファを開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
+      }
+
+      const optionalRequested = (config.features.sourceRecord && profile.recording.sourceRecord)
+        || (config.features.verticalRecording && profile.recording.verticalRecording)
+      const baselineSkippedFrames = optionalRequested && !protection.protected
+        ? await this.obs.call('GetStats').then(({ outputSkippedFrames }) => outputSkippedFrames).catch(() => null)
+        : null
+      if (protection.protected && optionalRequested) {
+        warnings.push(`${protection.width}×${protection.height}の同時配信を60 FPSで維持するため、Source RecordとAitum Vertical録画は開始しませんでした`)
+      } else {
+        if (config.features.sourceRecord && profile.recording.sourceRecord) {
+          try {
+            await this.callVendor('source-record', 'record_start', { source: selectedSource })
+            this.started.sourceRecord = true; this.started.sourceRecordSource = selectedSource; startedNow.sourceRecord = true
+          } catch (error) { warnings.push(`Source Recordを開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
+        }
+        if (config.features.verticalRecording && profile.recording.verticalRecording) {
+          try {
+            await this.callVertical('start_recording')
+            this.started.vertical = true; startedNow.vertical = true
+          } catch (error) { warnings.push(`Aitum Vertical録画を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`) }
+        }
+      }
+
+      const optionalStarted = startedNow.sourceRecord || startedNow.vertical
+      await wait(Math.max(config.obs.startDelaySeconds * 1000, optionalStarted ? 1_500 : 0))
+      if (optionalStarted && baselineSkippedFrames !== null) {
+        const skippedFrames = await this.obs.call('GetStats').then(({ outputSkippedFrames }) => outputSkippedFrames).catch(() => baselineSkippedFrames)
+        if (skippedFrames - baselineSkippedFrames >= 10) {
+          if (startedNow.vertical) await this.callVertical('stop_recording').catch(() => undefined)
+          if (startedNow.sourceRecord) await this.callVendor('source-record', 'record_stop', { source: selectedSource }).catch(() => undefined)
+          this.started.vertical = false
+          this.started.sourceRecord = false
+          this.started.sourceRecordSource = null
+          startedNow.vertical = false
+          startedNow.sourceRecord = false
+          warnings.push('エンコード遅延を検出したため、素材録画と縦録画を自動停止してYouTube・Twitch配信を優先しました')
+        }
+      }
       if (!(await this.obs.call('GetStreamStatus')).outputActive) throw new Error('OBS配信出力が開始直後に停止しました。OBSログを確認してください')
       await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.sceneName })
       this.rollbackScene = previousScene
       return warnings
     } catch (error) {
+      if (startedNow.vertical) await this.callVertical('stop_recording').catch(() => undefined)
+      if (startedNow.sourceRecord) await this.callVendor('source-record', 'record_stop', { source: selectedSource }).catch(() => undefined)
+      if (startedNow.replay) await this.obs.call('StopReplayBuffer').catch(() => undefined)
+      if (startedNow.record) await this.obs.call('StopRecord').catch(() => undefined)
       if (startedNow.twitch) await this.stopTwitchSecondary().catch(() => undefined)
       let rollbackStreamStopped = true
       if (startedNow.stream) {
@@ -683,10 +861,6 @@ export class ObsController {
       } else if (restoreManagedStreamServiceOnFailure) {
         warnings.push('OBS配信出力の停止を確認できなかったため、配信サービス設定を復元していません')
       }
-      if (startedNow.vertical) await this.callVertical('stop_recording').catch(() => undefined)
-      if (startedNow.sourceRecord) await this.callVendor('source-record', 'record_stop', { source: selectedSource }).catch(() => undefined)
-      if (startedNow.replay) await this.obs.call('StopReplayBuffer').catch(() => undefined)
-      if (startedNow.record) await this.obs.call('StopRecord').catch(() => undefined)
       if (startedNow.stream) this.started.stream = false
       if (startedNow.twitch) this.started.twitch = false
       if (startedNow.vertical) this.started.vertical = false

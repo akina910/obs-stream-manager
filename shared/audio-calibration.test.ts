@@ -55,14 +55,25 @@ describe('audio calibration math', () => {
     expect(recommendation.withinTarget).toBe(true)
   })
 
-  it('never exceeds the UI-safe fader range', () => {
+  it('allows a quiet microphone to go beyond the former +6 dB ceiling', () => {
     const recommendation = recommendInputVolume(5, {
       sampleCount: 80,
       activeSampleCount: 72,
       referenceDb: -40,
       peakDb: -30,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
-    expect(recommendation.appliedDb).toBe(6)
+    expect(recommendation.appliedDb).toBe(17)
+    expect(recommendation.constrainedByFader).toBe(false)
+  })
+
+  it('still caps the OBS fader at a safe +20 dB', () => {
+    const recommendation = recommendInputVolume(15, {
+      sampleCount: 80,
+      activeSampleCount: 72,
+      referenceDb: -40,
+      peakDb: -30,
+    }, AUDIO_CALIBRATION_TARGETS.microphone)
+    expect(recommendation.appliedDb).toBe(20)
     expect(recommendation.constrainedByFader).toBe(true)
   })
 })

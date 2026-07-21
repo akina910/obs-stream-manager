@@ -1,10 +1,10 @@
-import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
+import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, LocalObsSetupStatus, RuntimeStatus } from '../shared/contracts'
 import type { CommonTemplateConfig, CommonTemplateSettings } from '../shared/common-template'
 import type { AudioCalibrationResult } from '../shared/audio-calibration'
 
 export type { CommonTemplateSettings } from '../shared/common-template'
 
-export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
+export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus; obsSetup: LocalObsSetupStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
 export type OAuthProvider = 'youtube' | 'twitch'
 export type OAuthConnectionStage = 'setup_required' | 'ready' | 'authorizing' | 'partial' | 'connected'
@@ -36,6 +36,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   status: () => request<RuntimeStatus>('/api/status'),
+  obsSetup: () => request<LocalObsSetupStatus>('/api/obs/setup-status'),
+  prepareObs: () => request<LocalObsSetupStatus>('/api/obs/prepare', { method: 'POST', body: '{}' }),
   comments: () => request<ChatMessage[]>('/api/comments'),
   bgm: () => request<BgmLibraryStatus>('/api/bgm'),
   addBgm: (filename: string, data: string) => request<BgmLibraryStatus>('/api/bgm', { method: 'POST', body: JSON.stringify({ filename, data }) }),

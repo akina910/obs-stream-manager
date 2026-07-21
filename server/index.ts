@@ -12,6 +12,7 @@ import { CaptureDetector } from './capture.js'
 import { CommonTemplateService } from './common-template.js'
 import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
+import { LocalObsProvisioner } from './local-obs-provisioning.js'
 import { ObsController } from './obs.js'
 import { OAuthManager } from './oauth.js'
 import { youtubeOAuthCallbackHtml } from './oauth-callback.js'
@@ -31,6 +32,8 @@ const bgm = new BgmLibraryStore(dataDir)
 await bgm.initialize()
 const secrets = new SecretStore()
 await provisionDistributorOAuth(store, secrets)
+const localObs = new LocalObsProvisioner(store, secrets)
+if (process.env.NODE_ENV !== 'test') await localObs.start()
 const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets, 8_000, 45_000)
 const platforms = new PlatformServices(secrets, store)
@@ -81,8 +84,10 @@ app.setErrorHandler((error, _request, reply) => {
 })
 
 app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
-app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
+app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus(), obsSetup: localObs.status() }))
 app.get('/api/status', async () => orchestrator.getStatus())
+app.get('/api/obs/setup-status', async () => localObs.status())
+app.post('/api/obs/prepare', async () => localObs.prepare())
 app.get('/api/comments', async () => platforms.getComments())
 app.get('/api/bgm', async () => ({ ...(await bgm.getLibrary()), playback: await obs.bgmPlaybackStatus(await store.getConfig()) }))
 app.post<{ Body: { filename?: string; data?: string } }>('/api/bgm', { bodyLimit: 70 * 1024 * 1024 }, async (request, reply) => {
@@ -412,6 +417,7 @@ export async function startServer(): Promise<{ host: string; port: number; url: 
 }
 
 export async function stopServer(): Promise<void> {
+  localObs.stop()
   await platforms.stopComments().catch(() => undefined)
   await obs.disconnect().catch(() => undefined)
   if (started) {

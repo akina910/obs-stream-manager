@@ -33,12 +33,11 @@ win:
 nsis:
   artifactName: "${productName}-Setup-${version}-${arch}.${ext}"
   include: installer.nsh
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
+  oneClick: true
+  perMachine: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
   deleteAppDataOnUninstall: false
 portable:
   artifactName: "${productName}-Portable-${version}-${arch}.${ext}"
-  requestExecutionLevel: user
+  requestExecutionLevel: admin

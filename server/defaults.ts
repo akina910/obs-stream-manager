@@ -9,7 +9,7 @@ export const defaultConfig: AppConfig = {
   sources: {
     microphone: 'MIC', pcGame: 'GAME_PC', geforceNow: 'GAME_GFN', switchGame: 'GAME_SWITCH', discord: 'DISCORD', bgm: 'BGM',
   },
-  features: { youtube: true, twitch: true, recording: true, replayBuffer: true, sourceRecord: true, verticalRecording: true },
+  features: { youtube: true, twitch: true, recording: true, replayBuffer: true, sourceRecord: false, verticalRecording: false },
   commonTemplate: defaultCommonTemplateConfig,
   steam: { steamId64: '', apiKeyStored: false, installPath: '' },
   youtube: { clientId: '', clientSecretStored: false, refreshTokenStored: false, broadcastId: '' },
@@ -25,7 +25,7 @@ const pcBase = {
   youtube: { enabled: true, titleTemplate: '{game}｜ゲーム配信', description: '', privacy: 'public' as const, categoryId: '20' },
   twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: '', tags: ['日本語'] },
   audio: { microphoneDb: -3, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
-  recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: true, verticalRecording: true },
+  recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: false, verticalRecording: false },
   state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered' as const, thumbnailLastAppliedAt: null, nextPartNumber: 1 },
 }
 

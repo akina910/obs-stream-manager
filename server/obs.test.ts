@@ -72,6 +72,10 @@ describe('ObsController BGM stock', () => {
       sceneItemEnabled: true,
     })
     expect(calls.find(({ request }) => request === 'SetInputVolume')?.data).toEqual({ inputName: 'BGM Stock', inputVolumeDb: -21 })
+    expect(calls.find(({ request }) => request === 'SetInputAudioTracks')?.data).toEqual({
+      inputName: 'BGM Stock',
+      inputAudioTracks: { '1': true, '2': false, '3': false, '4': false, '5': true, '6': false },
+    })
     expect(calls.find(({ request }) => request === 'TriggerMediaInputAction')?.data).toEqual({
       inputName: 'BGM Stock',
       mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART',
@@ -123,6 +127,154 @@ describe('ObsController BGM stock', () => {
 })
 
 describe('ObsController recording fallbacks', () => {
+  it('keeps standard recording but suppresses extra video encoders for a 4K simulcast', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let streaming = false
+    let twitchActive = false
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '10_GAME_PC' }
+        if (request === 'GetInputList') return { inputs: [] }
+        if (request === 'GetVideoSettings') return { outputWidth: 3840, outputHeight: 2160 }
+        if (request === 'GetStreamStatus') return { outputActive: streaming }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetStreamServiceSettings') return { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
+        if (request === 'StartStream') { streaming = true; return {} }
+        if (request === 'StartRecord' || request === 'StartReplayBuffer') return {}
+        if (request === 'CallVendorRequest') {
+          const vendor = data as { vendorName: string; requestType: string }
+          if (vendor.vendorName === 'obs-stream-manager-output') {
+            if (vendor.requestType === 'start_twitch') twitchActive = true
+            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: twitchActive } }
+          }
+          return { responseData: { success: true } }
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['youtube-stream-key', 'youtube-key'],
+      ['youtube-stream-server', 'rtmps://youtube.example/live2'],
+      ['twitch-stream-key', 'twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    config.obs.startDelaySeconds = 0
+    config.features.sourceRecord = true
+    config.features.verticalRecording = true
+    profile.recording.sourceRecord = true
+    profile.recording.verticalRecording = true
+
+    const warnings = await controller.start(config, profile, profile.capture.localSourceName)
+
+    expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['StartStream', 'StartRecord', 'StartReplayBuffer']))
+    expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { vendorName?: string }).vendorName === 'source-record')).toBe(false)
+    expect(calls.map(({ request }) => request)).not.toContain('TriggerHotkeyByName')
+    expect(warnings.join(' ')).toContain('3840×2160')
+    expect(warnings.join(' ')).toContain('60 FPS')
+  })
+
+  it('routes isolated recording stems to A1-A5 and the simulcast mix to A6', async () => {
+    const tracks = new Map<string, Record<string, boolean>>()
+    const profileParameters: Array<Record<string, unknown>> = []
+    const inputs = [
+      ['GAME_PC', 'wasapi_output_capture'],
+      ['GAME_GFN', 'wasapi_output_capture'],
+      ['GAME_SWITCH', 'wasapi_output_capture'],
+      ['DISCORD', 'wasapi_output_capture'],
+      ['MIC', 'wasapi_input_capture'],
+      ['BGM', 'wasapi_output_capture'],
+      ['Desktop Audio', 'wasapi_output_capture'],
+      ['Mic/Aux', 'wasapi_input_capture'],
+      ['PC Game Capture', 'game_capture'],
+      ['Elgato Game Capture', 'dshow_input'],
+      ['Alerts', 'browser_source'],
+    ].map(([inputName, inputKind]) => ({ inputName, inputKind }))
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetInputSettings') throw new Error('not required')
+        if (request === 'GetInputList') return { inputs }
+        if (request === 'GetProfileParameter') return { parameterValue: 'Advanced' }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'MIC Ducking' }] }
+        if (request === 'SetInputAudioTracks') {
+          const value = data as { inputName: string; inputAudioTracks: Record<string, boolean> }
+          tracks.set(value.inputName, value.inputAudioTracks)
+        }
+        if (request === 'SetProfileParameter') profileParameters.push(data as Record<string, unknown>)
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+
+    expect(tracks.get('GAME_PC')).toEqual({ '1': true, '2': false, '3': false, '4': false, '5': false, '6': true })
+    expect(tracks.get('DISCORD')).toEqual({ '1': false, '2': true, '3': false, '4': false, '5': false, '6': true })
+    expect(tracks.get('MIC')).toEqual({ '1': false, '2': false, '3': true, '4': false, '5': false, '6': true })
+    expect(tracks.get('BGM')).toEqual({ '1': false, '2': false, '3': false, '4': true, '5': false, '6': true })
+    expect(tracks.get('Desktop Audio')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': false })
+    expect(tracks.get('Mic/Aux')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': false })
+    expect(tracks.get('PC Game Capture')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': false })
+    expect(tracks.get('Alerts')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': true })
+    expect(profileParameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'TrackIndex', parameterValue: '6' }),
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'RecTracks', parameterValue: '31' }),
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'RecEncoder', parameterValue: 'none' }),
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'Track5Name', parameterValue: 'AUX CAPTURE' }),
+    ]))
+  })
+
+  it('uses the calibrated microphone in the starting scene and disables a duplicate default input', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetInputSettings') {
+          const inputName = (data as { inputName: string }).inputName
+          if (inputName === 'MIC') return { inputKind: 'wasapi_input_capture', inputSettings: { device_id: 'default' } }
+          if (inputName === '音声入力キャプチャ') return { inputKind: 'wasapi_input_capture', inputSettings: {} }
+          throw new Error('missing input')
+        }
+        if (request === 'GetSceneItemList') {
+          const sceneName = (data as { sceneName: string }).sceneName
+          return sceneName === '00_STARTING'
+            ? { sceneItems: [{ sourceName: '音声入力キャプチャ', sceneItemId: 11, sceneItemEnabled: true }] }
+            : { sceneItems: [{ sourceName: 'MIC', sceneItemId: 21, sceneItemEnabled: true }, { sourceName: '音声入力キャプチャ', sceneItemId: 22, sceneItemEnabled: true }] }
+        }
+        if (request === 'GetInputList') return { inputs: [] }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'MIC Ducking' }] }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const warnings = await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+
+    expect(calls).toContainEqual({ request: 'CreateSceneItem', data: { sceneName: '00_STARTING', sourceName: 'MIC', sceneItemEnabled: true } })
+    expect(calls).toContainEqual({ request: 'SetSceneItemEnabled', data: { sceneName: '00_STARTING', sceneItemId: 11, sceneItemEnabled: false } })
+    expect(calls).toContainEqual({ request: 'SetSceneItemEnabled', data: { sceneName: '10_GAME_PC', sceneItemId: 22, sceneItemEnabled: false } })
+    expect(warnings.join(' ')).toContain('二重取り込み')
+  })
+
   it('starts and stops a secure in-memory Twitch secondary output for simultaneous streaming', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
     let streaming = false
@@ -305,6 +457,10 @@ describe('ObsController recording fallbacks', () => {
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
     config.features.twitch = false
+    config.features.sourceRecord = true
+    config.features.verticalRecording = true
+    profile.recording.sourceRecord = true
+    profile.recording.verticalRecording = true
     config.obs.startDelaySeconds = 0
     const warnings = await controller.start(config, profile, profile.capture.localSourceName)
     expect(calls).toContain('StartStream')
@@ -529,6 +685,8 @@ describe('ObsController recording fallbacks', () => {
     config.features.replayBuffer = false
     config.features.sourceRecord = false
     config.features.twitch = false
+    config.features.verticalRecording = true
+    profile.recording.verticalRecording = true
 
     await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
     expect(calls).toContainEqual({
@@ -671,6 +829,7 @@ describe('ObsController recording fallbacks', () => {
       { inputName: 'BGM', inputVolumeDb: -27 },
     ]))
     expect(mutes).toEqual([
+      { inputName: 'MIC', inputMuted: false },
       { inputName: 'GAME_PC', inputMuted: false },
       { inputName: 'GAME_GFN', inputMuted: true },
       { inputName: 'GAME_SWITCH', inputMuted: true },

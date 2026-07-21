@@ -34,7 +34,7 @@ export function createGameProfile(id: string, displayName: string, platformGroup
     youtube: { enabled: true, titleTemplate: '{game}｜ゲーム配信', description: '', privacy: 'public', categoryId: '20' },
     twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: displayName, tags: ['日本語'] },
     audio: { microphoneDb: -3, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
-    recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: true, verticalRecording: true },
+    recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: false, verticalRecording: false },
     state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null, nextPartNumber: 1 },
   }
 }

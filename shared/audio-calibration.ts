@@ -123,7 +123,10 @@ export function recommendInputVolume(
   const peakSafeDifference = Math.min(levelDifference, peakHeadroom)
   const boundedDifference = clamp(peakSafeDifference, -maximumAdjustmentDb, maximumAdjustmentDb)
   const unclampedFader = roundHalfDb(currentDb + boundedDifference)
-  const appliedDb = clamp(unclampedFader, -30, 6)
+  // OBS supports substantially more than +6 dB. Quiet interfaces such as the
+  // current Focusrite input can otherwise hit the artificial ceiling while
+  // remaining inaudible after noise suppression and compression.
+  const appliedDb = clamp(unclampedFader, -30, 20)
   const adjustmentDb = roundHalfDb(appliedDb - currentDb)
   return {
     appliedDb,

@@ -6,6 +6,7 @@ export const backgroundLaunchArgument = '--background'
 export const quitApplicationArgument = '--quit'
 export const windowsAppId = 'io.github.akina910.obs-stream-manager'
 export const windowsStartupTaskName = 'OBS Stream Manager'
+export const windowsCompanionRegistryKey = 'HKCU\\Software\\OBS Stream Manager'
 
 export type WindowsStartupRegistration = 'disabled' | 'login-item' | 'task'
 
@@ -60,6 +61,20 @@ export function windowsStartupTaskArguments(enabled: boolean, executablePath: st
 export async function runWindowsStartupTaskCommand(args: string[]): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     execFile('schtasks.exe', args, { timeout: 5_000, windowsHide: true }, (error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+  })
+}
+
+export function windowsCompanionRegistrationArguments(executablePath: string): string[] {
+  if (!executablePath.trim() || /[\r\n\0]/.test(executablePath)) throw new Error('The companion application path cannot be registered')
+  return ['ADD', windowsCompanionRegistryKey, '/v', 'ExecutablePath', '/t', 'REG_SZ', '/d', executablePath, '/f']
+}
+
+export async function registerWindowsCompanionExecutable(executablePath: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    execFile('reg.exe', windowsCompanionRegistrationArguments(executablePath), { timeout: 5_000, windowsHide: true }, (error) => {
       if (error) reject(error)
       else resolve()
     })

@@ -103,13 +103,25 @@ export class PlatformServices {
       const lifeCycle = String(broadcast.status.lifeCycleStatus ?? '')
       if (lifeCycle === 'live') {
         let viewerCount: number | null = null
+        let viewerCountState: 'available' | 'hidden' | 'unavailable' = 'unavailable'
         try {
           const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
-          videoUrl.search = new URLSearchParams({ part: 'liveStreamingDetails', id: broadcast.id }).toString()
-          const video = await apiJson<{ items: Array<{ liveStreamingDetails?: { concurrentViewers?: string } }> }>(videoUrl.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
-          viewerCount = parseViewerCount(video.items[0]?.liveStreamingDetails?.concurrentViewers)
-        } catch { /* A hidden/unavailable view count must not downgrade a confirmed live broadcast. */ }
-        return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt, viewerCount }
+          videoUrl.search = new URLSearchParams({ part: 'liveStreamingDetails,status', id: broadcast.id }).toString()
+          const video = await apiJson<{ items: Array<{ liveStreamingDetails?: { concurrentViewers?: string }; status?: { publicStatsViewable?: boolean } }> }>(videoUrl.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
+          const item = video.items[0]
+          const parsed = parseViewerCount(item?.liveStreamingDetails?.concurrentViewers)
+          if (parsed !== null) {
+            viewerCount = parsed
+            viewerCountState = 'available'
+          } else if (item?.liveStreamingDetails && item.status?.publicStatsViewable === false) {
+            viewerCountState = 'hidden'
+          } else if (item?.liveStreamingDetails) {
+            // YouTube omits concurrentViewers when the current audience is zero.
+            viewerCount = 0
+            viewerCountState = 'available'
+          }
+        } catch { /* Viewer metrics must not downgrade a confirmed live broadcast. */ }
+        return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt, viewerCount, viewerCountState }
       }
       if (lifeCycle === 'liveStarting') return { state: 'starting', detail: 'YouTubeで公開開始処理中', checkedAt }
       if (lifeCycle === 'testing' || lifeCycle === 'testStarting') return { state: 'starting', detail: 'YouTubeテスト配信中（視聴者には未公開）', checkedAt }
@@ -133,9 +145,9 @@ export class PlatformServices {
         headers: { authorization: `Bearer ${token}`, 'client-id': config.twitch.clientId },
       })
       const live = result.data.find((stream) => stream.type === 'live')
-      return live
-        ? { state: 'live', detail: 'Twitchで公開配信中', checkedAt, viewerCount: parseViewerCount(live.viewer_count) }
-        : { state: 'offline', detail: 'Twitchはオフライン', checkedAt }
+      if (!live) return { state: 'offline', detail: 'Twitchはオフライン', checkedAt }
+      const viewerCount = parseViewerCount(live.viewer_count)
+      return { state: 'live', detail: 'Twitchで公開配信中', checkedAt, viewerCount, viewerCountState: viewerCount === null ? 'unavailable' : 'available' }
     } catch (error) {
       return { state: 'error', detail: `Twitch状態の確認に失敗: ${error instanceof Error ? error.message : String(error)}`, checkedAt }
     }

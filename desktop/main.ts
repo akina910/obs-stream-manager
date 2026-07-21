@@ -12,6 +12,7 @@ import {
   DesktopPreferenceStore,
   hasDesktopArgument,
   quitApplicationArgument,
+  registerWindowsCompanionExecutable,
   runWindowsStartupTaskCommand,
   shouldShowWindowForSecondInstance,
   supportsWindowsLoginStart,
@@ -136,12 +137,15 @@ async function installObsOutputPlugin(): Promise<'unavailable' | 'current' | 'in
   if (!app.isPackaged) return 'unavailable'
   const source = path.join(process.resourcesPath, 'obs-plugin', 'bin', '64bit', 'obs-stream-manager-output.dll')
   if (!existsSync(source)) return 'unavailable'
-  const legacyPluginRoot = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output')
-  await rm(legacyPluginRoot, { recursive: true, force: true }).catch(() => {
-    // A running OBS instance can keep the previous DLL locked. The installer also retries this migration.
-  })
+  const isolatedPluginRoot = process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_DIR?.trim()
+  if (!isolatedPluginRoot) {
+    const legacyPluginRoot = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output')
+    await rm(legacyPluginRoot, { recursive: true, force: true }).catch(() => {
+      // A running OBS instance can keep the previous DLL locked. The installer also retries this migration.
+    })
+  }
   const programData = process.env.PROGRAMDATA?.trim() || process.env.ProgramData?.trim() || 'C:\\ProgramData'
-  const pluginRoot = path.join(programData, 'obs-studio', 'plugins', 'obs-stream-manager-output')
+  const pluginRoot = isolatedPluginRoot || path.join(programData, 'obs-studio', 'plugins', 'obs-stream-manager-output')
   const targetDirectory = path.join(pluginRoot, 'bin', '64bit')
   const target = path.join(targetDirectory, 'obs-stream-manager-output.dll')
   const pending = path.join(targetDirectory, 'obs-stream-manager-output.pending.dll')
@@ -351,6 +355,14 @@ if (!app.requestSingleInstanceLock()) {
       if (loginItemSupported) await applyWindowsStartupRegistration(integrationSettings.startWithWindows)
       const providerFile = await providerBundlePath()
       if (providerFile) process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE = providerFile
+      if (app.isPackaged && process.platform === 'win32') {
+        try {
+          await registerWindowsCompanionExecutable(process.execPath)
+          await markLifecycle('obs-companion-registered').catch(() => undefined)
+        } catch {
+          await markLifecycle('obs-companion-registration-unavailable').catch(() => undefined)
+        }
+      }
       const obsPluginState = await installObsOutputPlugin()
       process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_INSTALL_STATE = obsPluginState
       await markLifecycle(`obs-output-plugin-${obsPluginState}`).catch(() => undefined)

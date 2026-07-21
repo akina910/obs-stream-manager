@@ -77,8 +77,8 @@ export const GameProfileSchema = z.object({
     enabled: z.boolean().default(true),
     directory: z.string().default(''),
     replayBufferSeconds: z.number().int().min(5).max(1200).default(180),
-    sourceRecord: z.boolean().default(true),
-    verticalRecording: z.boolean().default(true),
+    sourceRecord: z.boolean().default(false),
+    verticalRecording: z.boolean().default(false),
   }),
   state: z.object({
     lastCaptureMethod: CaptureMethodSchema.optional(),
@@ -123,8 +123,8 @@ export const AppConfigSchema = z.object({
     twitch: z.boolean().default(true),
     recording: z.boolean().default(true),
     replayBuffer: z.boolean().default(true),
-    sourceRecord: z.boolean().default(true),
-    verticalRecording: z.boolean().default(true),
+    sourceRecord: z.boolean().default(false),
+    verticalRecording: z.boolean().default(false),
   }),
   commonTemplate: CommonTemplateConfigSchema.default(defaultCommonTemplateConfig),
   steam: z.object({
@@ -184,6 +184,17 @@ export const BgmPlaybackSchema = z.object({
 export type BgmPlayback = z.infer<typeof BgmPlaybackSchema>
 export type BgmLibraryStatus = BgmLibrary & { playback: BgmPlayback }
 
+export const LocalObsSetupStatusSchema = z.object({
+  phase: z.enum(['ready', 'waiting_for_obs', 'restart_required', 'error']),
+  detail: z.string(),
+  dockConfigured: z.boolean(),
+  websocketConfigured: z.boolean(),
+})
+
+export type LocalObsSetupStatus = z.infer<typeof LocalObsSetupStatusSchema>
+
+const ViewerCountStateSchema = z.enum(['available', 'hidden', 'unavailable'])
+
 export const RuntimeStatusSchema = z.object({
   obsConnected: z.boolean(),
   streaming: z.boolean(),
@@ -210,12 +221,14 @@ export const RuntimeStatusSchema = z.object({
       detail: z.string(),
       checkedAt: z.string().datetime().nullable(),
       viewerCount: z.number().int().nonnegative().nullable().optional(),
+      viewerCountState: ViewerCountStateSchema.optional(),
     }),
     twitch: z.object({
       state: z.enum(['disabled', 'unprepared', 'ready', 'starting', 'live', 'stopping', 'offline', 'error']),
       detail: z.string(),
       checkedAt: z.string().datetime().nullable(),
       viewerCount: z.number().int().nonnegative().nullable().optional(),
+      viewerCountState: ViewerCountStateSchema.optional(),
     }),
   }),
 })

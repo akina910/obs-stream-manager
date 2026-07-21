@@ -652,11 +652,43 @@ describe('PlatformServices external live status', () => {
     const platforms = new PlatformServices(secretStore, {} as DataStore)
 
     await expect(platforms.getLiveStatus(configured, profile)).resolves.toMatchObject({
-      youtube: { state: 'live', detail: 'YouTubeで公開配信中', viewerCount: 12 },
-      twitch: { state: 'live', detail: 'Twitchで公開配信中', viewerCount: 7 },
+      youtube: { state: 'live', detail: 'YouTubeで公開配信中', viewerCount: 12, viewerCountState: 'available' },
+      twitch: { state: 'live', detail: 'Twitchで公開配信中', viewerCount: 7, viewerCountState: 'available' },
     })
+    expect(String(fetchMock.mock.calls.find(([input]) => String(input).includes('/videos'))?.[0])).toContain('part=liveStreamingDetails%2Cstatus')
     await platforms.getLiveStatus(configured, profile)
     expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it.each([
+    { publicStatsViewable: true, expectedCount: 0, expectedState: 'available' },
+    { publicStatsViewable: false, expectedCount: null, expectedState: 'hidden' },
+  ])('distinguishes a zero YouTube audience from a hidden viewer count', async ({ publicStatsViewable, expectedCount, expectedState }) => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+      ['twitch-access-token', 'twitch-access'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.youtube = { clientId: 'youtube-client', clientSecretStored: true, refreshTokenStored: true, broadcastId: 'broadcast-id' }
+    configured.twitch = { clientId: 'twitch-client', clientSecretStored: false, accessTokenStored: true, refreshTokenStored: false, broadcasterId: 'broadcaster-id' }
+    const profile = structuredClone(starterProfiles[0])
+    const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') return json({ access_token: 'youtube-access', expires_in: 3600 })
+      if (url.pathname.endsWith('/liveBroadcasts')) return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus: 'live' }, contentDetails: { boundStreamId: 'stream-id' } }] })
+      if (url.pathname.endsWith('/videos')) return json({ items: [{ liveStreamingDetails: {}, status: { publicStatsViewable } }] })
+      if (url.hostname === 'api.twitch.tv') return json({ data: [] })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    const result = await new PlatformServices(secretStore, {} as DataStore).getLiveStatus(configured, profile)
+    expect(result.youtube).toMatchObject({ state: 'live', viewerCount: expectedCount, viewerCountState: expectedState })
   })
 
   it('does not let an invalidated in-flight status request repopulate the cache', async () => {

@@ -1,4 +1,5 @@
 import OBSWebSocket, { EventSubscription } from 'obs-websocket-js'
+import { STOCK_BGM_INPUT_NAME } from '../shared/bgm.js'
 import type { AppConfig, CaptureMethod, GameProfile } from '../shared/contracts.js'
 import {
   AUDIO_CALIBRATION_ROLES,
@@ -197,14 +198,17 @@ export class AudioCalibrationService {
   }
 
   private async sourceStates(client: AudioObsClient, sources: AudioSource[]): Promise<SourceState[]> {
+    const inputList = await client.call('GetInputList')
+    const inputNames = new Set(inputList.inputs.map(({ inputName }) => inputName))
+    const resolvedSources = sources.map((source) => source.role === 'bgm' && inputNames.has(STOCK_BGM_INPUT_NAME)
+      ? { ...source, sourceName: STOCK_BGM_INPUT_NAME }
+      : source)
     const uniqueNames = new Set<string>()
-    for (const source of sources) {
+    for (const source of resolvedSources) {
       if (uniqueNames.has(source.sourceName)) throw asStatusError(`音声ソース名「${source.sourceName}」が複数用途で重複しています。設定画面で別々のOBSソース名を指定してください`, 400)
       uniqueNames.add(source.sourceName)
     }
-    const inputList = await client.call('GetInputList')
-    const inputNames = new Set(inputList.inputs.map(({ inputName }) => inputName))
-    return Promise.all(sources.map(async (source) => {
+    return Promise.all(resolvedSources.map(async (source) => {
       if (!inputNames.has(source.sourceName)) return { ...source, missing: true }
       const [volume, mute] = await Promise.all([
         client.call('GetInputVolume', { inputName: source.sourceName }),
@@ -308,14 +312,14 @@ export class AudioCalibrationService {
         sourceName,
         filterName: 'OBS Stream Manager - Expander',
         filterKind: 'expander_filter',
-        filterSettings: { attack_time: 10, detector: 'RMS', output_gain: 0, presets: 'expander', ratio: 2.5, release_time: 100, threshold: -45 },
+        filterSettings: { attack_time: 10, detector: 'RMS', output_gain: 0, presets: 'expander', ratio: 1.5, release_time: 120, threshold: -50 },
         compatible: ({ filterKind }) => filterKind === 'expander_filter' || filterKind === 'noise_gate_filter',
       },
       {
         sourceName,
         filterName: 'OBS Stream Manager - Compressor',
         filterKind: 'compressor_filter',
-        filterSettings: { attack_time: 6, output_gain: 0, ratio: 3, release_time: 60, sidechain_source: 'none', threshold: -18 },
+        filterSettings: { attack_time: 6, output_gain: 4, ratio: 3, release_time: 60, sidechain_source: 'none', threshold: -18 },
         compatible: ({ filterKind, filterSettings }) => filterKind === 'compressor_filter' && (!filterSettings.sidechain_source || filterSettings.sidechain_source === 'none'),
       },
       {
@@ -392,8 +396,7 @@ export class AudioCalibrationService {
     const baselineDurationMs = Math.floor(durationMs * 0.54)
     const firstVerificationDurationMs = Math.floor(durationMs * 0.27)
     const finalVerificationDurationMs = durationMs - baselineDurationMs - firstVerificationDurationMs
-    const sources = sourceMap(config, method)
-    const sourceNames = new Set(sources.map(({ sourceName }) => sourceName))
+    const configuredSources = sourceMap(config, method)
     const client = this.clientFactory()
     const warnings: string[] = []
     const filterResults: AudioManagedFilterResult[] = []
@@ -405,7 +408,9 @@ export class AudioCalibrationService {
       connected = true
       await this.assertOutputsInactive(client)
 
-      const states = await this.sourceStates(client, sources)
+      const states = await this.sourceStates(client, configuredSources)
+      const sources: AudioSource[] = states.map(({ role, sourceName, required }) => ({ role, sourceName, required }))
+      const sourceNames = new Set(sources.map(({ sourceName }) => sourceName))
       const unavailableRequired = states.filter(({ required, missing, muted }) => required && (missing || muted))
       if (unavailableRequired.length) {
         const detail = unavailableRequired.map(({ role, sourceName, missing }) => `${role === 'microphone' ? 'マイク' : 'ゲーム音'}「${sourceName}」${missing ? 'が見つかりません' : 'がミュートされています'}`).join(' / ')
