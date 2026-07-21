@@ -9,7 +9,7 @@ type CommonTemplateEditorProps = {
   config: CommonTemplateConfig
   profiles: GameProfile[]
   disabled: boolean
-  onChanged: (config: CommonTemplateConfig) => void
+  onChanged: (config: CommonTemplateConfig, feedback: { kind: 'success' | 'warning'; text: string }) => void
 }
 
 function editableSettings(config: CommonTemplateConfig): CommonTemplateSettings {
@@ -50,6 +50,7 @@ export function CommonTemplateEditor({ config, profiles, disabled, onChanged }: 
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const operationLock = useRef(false)
   const previewRef = useRef<HTMLDivElement>(null)
   const previewImageRef = useRef<HTMLImageElement>(null)
   const [previewScale, setPreviewScale] = useState(1)
@@ -85,32 +86,34 @@ export function CommonTemplateEditor({ config, profiles, disabled, onChanged }: 
   }), [draft.fontFamily, draft.fontSize, draft.horizontalAlign, draft.outlineColor, draft.outlineWidth, draft.positionX, draft.positionY, draft.textColor, previewScale, transformX, transformY])
 
   const execute = async (operation: () => Promise<void>) => {
-    if (busy || disabled) return
+    if (operationLock.current || disabled) return
+    operationLock.current = true
     setBusy(true)
     setError(null)
     setMessage(null)
     try { await operation() }
     catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)) }
-    finally { setBusy(false) }
+    finally { operationLock.current = false; setBusy(false) }
   }
   const save = () => execute(async () => {
     const saved = await api.saveCommonTemplate(draft)
-    onChanged(saved)
-    setMessage(t('共通テンプレートを保存し、全ゲーム分の画像を更新しました'))
+    setDraft(editableSettings(saved))
+    const success = t('共通テンプレートを保存し、全ゲーム分の画像を更新しました')
+    onChanged(saved, { kind: 'success', text: success })
   })
   const upload = (file: File) => execute(async () => {
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error(t('PNG、JPG、WEBPを選択してください'))
     if (file.size > 12 * 1024 * 1024) throw new Error(t('共通テンプレート画像は12MB以下にしてください'))
     const saved = await api.uploadCommonTemplateImage(file.type, await fileAsBase64(file, t('共通テンプレート画像の読み込みに失敗しました')), file.name)
-    onChanged(saved)
-    setMessage(t('共通テンプレート画像を登録しました'))
+    setDraft(editableSettings(saved))
+    onChanged(saved, { kind: 'success', text: t('共通テンプレート画像を登録しました') })
   })
   const remove = () => execute(async () => {
     if (!window.confirm(t('共通テンプレート画像と生成済み画像を削除しますか？'))) return
     const saved = await api.deleteCommonTemplateImage()
     setDraft(editableSettings(saved))
-    onChanged(saved)
-    setMessage(t('共通テンプレート画像を削除しました'))
+    const success = t('共通テンプレート画像を削除しました')
+    onChanged(saved, { kind: 'success', text: success })
   })
   const applyAll = () => execute(async () => {
     const result = await api.applyCommonTemplate()

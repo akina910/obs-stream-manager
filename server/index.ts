@@ -83,21 +83,18 @@ app.get('/api/comments', async () => platforms.getComments())
 app.get('/api/templates/common', async () => (await store.getConfig()).commonTemplate)
 app.put<{ Body: unknown }>('/api/templates/common', async (request) => {
   await orchestrator.assertNotStreaming()
-  const current = await store.getConfig()
   const settings = CommonTemplateSettingsSchema.parse(request.body)
-  if (settings.enabled && !current.commonTemplate.imageFilename) throw Object.assign(new Error('有効化する前に共通テンプレート画像を登録してください'), { statusCode: 400 })
-  const saved = await store.saveConfig({
-    ...current,
-    commonTemplate: {
-      ...settings,
-      imageFilename: current.commonTemplate.imageFilename,
-      imageOriginalName: current.commonTemplate.imageOriginalName,
-      imageUpdatedAt: current.commonTemplate.imageUpdatedAt,
-    },
+  const { savedConfig } = await commonTemplates.saveSettings(settings, async (previousConfig, nextConfig) => {
+    const previous = previousConfig.commonTemplate
+    const next = nextConfig.commonTemplate
+    if (!previous.enabled || (next.enabled && previous.obsSourceName === next.obsSourceName)) return
+    try { await obs.clearCommonTemplate(previousConfig, previous.obsSourceName) }
+    catch (error) {
+      await logger.write('common_template_clear_failed', { sourceName: previous.obsSourceName, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined)
+      throw error
+    }
   })
-  if (saved.commonTemplate.enabled) await commonTemplates.renderAll()
-  else if (current.commonTemplate.enabled) await obs.clearCommonTemplate(saved, current.commonTemplate.obsSourceName).catch(() => undefined)
-  return saved.commonTemplate
+  return savedConfig.commonTemplate
 })
 app.get('/api/templates/common/image', async (_request, reply) => {
   const image = await commonTemplates.readBackground()
@@ -108,16 +105,19 @@ app.get('/api/templates/common/image', async (_request, reply) => {
 })
 app.post<{ Body: { mime: string; data: string; filename?: string } }>('/api/templates/common/image', async (request) => {
   await orchestrator.assertNotStreaming()
-  const template = await store.saveCommonTemplateImage(Buffer.from(request.body.data, 'base64'), request.body.mime, request.body.filename)
-  if (template.enabled) await commonTemplates.renderAll()
-  return template
+  return commonTemplates.saveBackground(Buffer.from(request.body.data, 'base64'), request.body.mime, request.body.filename)
 })
 app.delete('/api/templates/common/image', async () => {
   await orchestrator.assertNotStreaming()
-  const current = await store.getConfig()
-  const removed = await store.removeCommonTemplateImage()
-  if (current.commonTemplate.enabled) await obs.clearCommonTemplate(current, current.commonTemplate.obsSourceName).catch(() => undefined)
-  return removed
+  const { template } = await commonTemplates.removeBackground(async (previousConfig) => {
+    if (!previousConfig.commonTemplate.enabled) return
+    try { await obs.clearCommonTemplate(previousConfig, previousConfig.commonTemplate.obsSourceName) }
+    catch (error) {
+      await logger.write('common_template_clear_failed', { sourceName: previousConfig.commonTemplate.obsSourceName, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined)
+      throw error
+    }
+  })
+  return template
 })
 app.post('/api/templates/common/apply', async () => {
   await orchestrator.assertNotStreaming()
@@ -146,13 +146,13 @@ app.get<{ Params: { requestId: string } }>('/api/oauth/twitch/device/:requestId'
 app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
   await orchestrator.assertNotStreaming()
-  const profile = await store.saveProfile(GameProfileSchema.parse(request.body))
+  const profile = await commonTemplates.withExclusiveAccess(() => store.saveProfile(GameProfileSchema.parse(request.body)))
   await orchestrator.invalidateProfile(profile.id)
   return profile
 })
 app.delete<{ Params: { id: string } }>('/api/profiles/:id', async (request, reply) => {
   await orchestrator.assertNotStreaming()
-  if (!(await store.removeProfile(request.params.id))) return reply.status(404).send({ error: 'Profile not found' })
+  if (!(await commonTemplates.withExclusiveAccess(() => store.removeProfile(request.params.id)))) return reply.status(404).send({ error: 'Profile not found' })
   await orchestrator.invalidateProfile(request.params.id)
   return { ok: true }
 })
@@ -282,19 +282,21 @@ app.post('/api/steam/scan', async () => {
     if (statusCode !== 409) throw error
     return { profiles: await store.listProfiles(), owned: 0, installed: 0, created: 0, updated: 0, libraries: [], warnings: [], skipped: true }
   }
-  return syncSteamProfiles('automatic')
+  return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('automatic'))
 })
 app.post('/api/steam/sync', async () => {
   await orchestrator.assertNotStreaming()
-  return syncSteamProfiles('manual')
+  return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('manual'))
 })
-app.post('/api/backup/export', async () => store.exportBackup())
+app.post('/api/backup/export', async () => commonTemplates.withExclusiveAccess(() => store.exportBackup()))
 app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
   await orchestrator.assertNotStreaming()
   const providerConfig = await store.getConfig()
-  await store.importBackup(request.body)
-  const importedConfig = await store.getConfig()
-  await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+  await commonTemplates.withExclusiveAccess(async () => {
+    await store.importBackup(request.body)
+    const importedConfig = await store.getConfig()
+    await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+  })
   await obs.disconnect()
   await orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
   return { ok: true }
