@@ -38,7 +38,7 @@
   },
   "name": "obs-stream-manager-output",
   "displayName": "OBS Stream Manager Output",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": "OBS Stream Manager contributors",
   "website": "https://github.com/akina910/obs-stream-manager",
   "email": ""

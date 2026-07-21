@@ -12,10 +12,13 @@ import {
   DesktopPreferenceStore,
   hasDesktopArgument,
   quitApplicationArgument,
+  runWindowsStartupTaskCommand,
   shouldShowWindowForSecondInstance,
   supportsWindowsLoginStart,
+  syncWindowsStartupRegistration,
   windowsAppId,
   type DesktopIntegrationSettings,
+  type WindowsStartupRegistration,
 } from './integration.js'
 import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
 import { createElectronUpdateAdapter, getUpdateBlockReason, ManualUpdateService } from './updater.js'
@@ -45,6 +48,18 @@ let quitRequested = false
 let shutdownStarted = false
 let shutdownComplete = false
 let closeNoticeShown = false
+
+async function applyWindowsStartupRegistration(startWithWindows: boolean): Promise<WindowsStartupRegistration> {
+  if (process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM === '1') return 'disabled'
+  const registration = await syncWindowsStartupRegistration(
+    startWithWindows,
+    process.execPath,
+    runWindowsStartupTaskCommand,
+    (settings) => app.setLoginItemSettings(settings),
+  )
+  await markLifecycle(`windows-startup-${registration}`).catch(() => undefined)
+  return registration
+}
 
 async function markLifecycle(stage: string): Promise<void> {
   const directory = process.env.OBS_STREAM_MANAGER_DATA_DIR?.trim()
@@ -189,9 +204,7 @@ async function setStartWithWindows(startWithWindows: boolean): Promise<DesktopIn
   if (!preferences || !integrationSettings.supported) return integrationSettings
   await preferences.setStartWithWindows(startWithWindows)
   integrationSettings = { ...integrationSettings, startWithWindows }
-  if (process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM !== '1') {
-    app.setLoginItemSettings({ openAtLogin: startWithWindows, path: process.execPath, args: startWithWindows ? [backgroundLaunchArgument] : [] })
-  }
+  await applyWindowsStartupRegistration(startWithWindows)
   rebuildTrayMenu()
   return integrationSettings
 }
@@ -335,9 +348,7 @@ if (!app.requestSingleInstanceLock()) {
       preferences = new DesktopPreferenceStore(process.env.OBS_STREAM_MANAGER_DATA_DIR, loginItemSupported)
       const storedPreferences = await preferences.read()
       integrationSettings = { supported: loginItemSupported, startWithWindows: loginItemSupported && storedPreferences.startWithWindows }
-      if (loginItemSupported && process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM !== '1') {
-        app.setLoginItemSettings({ openAtLogin: integrationSettings.startWithWindows, path: process.execPath, args: integrationSettings.startWithWindows ? [backgroundLaunchArgument] : [] })
-      }
+      if (loginItemSupported) await applyWindowsStartupRegistration(integrationSettings.startWithWindows)
       const providerFile = await providerBundlePath()
       if (providerFile) process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE = providerFile
       const obsPluginState = await installObsOutputPlugin()

@@ -18,7 +18,7 @@ A Windows application that brings game selection, OBS controls, and YouTube/Twit
 
 ### Installer
 
-Run `OBS Stream Manager-Setup-*-x64.exe` and follow the prompts to install for the current Windows user. It creates Start menu and desktop shortcuts. This is the recommended option for normal use. After the first launch, silent startup at Windows sign-in is enabled by default so the OBS dock is ready immediately. You can disable it from Settings or the notification-area menu. Once public Releases begin, installed builds can download an update from Settings and restart into it.
+Run `OBS Stream Manager-Setup-*-x64.exe` and follow the prompts to install for the current Windows user. It creates Start menu and desktop shortcuts. This is the recommended option for normal use. After the first launch, silent startup at Windows sign-in is enabled by default so the OBS dock is ready immediately. If Windows delays that startup entry, the bundled OBS plugin also requests a background launch of the installed companion application. You can disable login startup from Settings or the notification-area menu. Once public Releases begin, installed builds can download an update from Settings and restart into it.
 
 ### Portable EXE
 

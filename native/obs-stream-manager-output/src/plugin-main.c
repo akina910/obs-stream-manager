@@ -11,6 +11,10 @@ the Free Software Foundation; either version 2 of the License, or
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "obs-websocket-api.h"
 
 OBS_DECLARE_MODULE()
@@ -21,6 +25,44 @@ OBS_MODULE_AUTHOR("OBS Stream Manager contributors")
 static obs_websocket_vendor vendor;
 static obs_output_t *twitch_output;
 static obs_service_t *twitch_service;
+
+#ifdef _WIN32
+static void launch_companion_app(void)
+{
+	wchar_t executable[MAX_PATH];
+	DWORD value_type = 0;
+	DWORD value_size = sizeof(executable);
+	const LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, L"Software\\OBS Stream Manager", L"ExecutablePath",
+					    RRF_RT_REG_SZ, &value_type, executable, &value_size);
+	if (status != ERROR_SUCCESS || value_type != REG_SZ || value_size < sizeof(wchar_t))
+		return;
+
+	executable[(sizeof(executable) / sizeof(executable[0])) - 1] = L'\0';
+	const DWORD attributes = GetFileAttributesW(executable);
+	if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+		blog(LOG_WARNING, "[OBS Stream Manager Output] Registered companion application is unavailable");
+		return;
+	}
+
+	wchar_t command_line[(MAX_PATH * 2) + 32];
+	const int length = swprintf_s(command_line, sizeof(command_line) / sizeof(command_line[0]), L"\"%ls\" --background",
+				      executable);
+	if (length <= 0)
+		return;
+
+	STARTUPINFOW startup = {0};
+	PROCESS_INFORMATION process = {0};
+	startup.cb = sizeof(startup);
+	if (!CreateProcessW(executable, command_line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &startup, &process)) {
+		blog(LOG_WARNING, "[OBS Stream Manager Output] Companion application launch failed: %lu", GetLastError());
+		return;
+	}
+
+	CloseHandle(process.hThread);
+	CloseHandle(process.hProcess);
+	blog(LOG_INFO, "[OBS Stream Manager Output] Companion application launch requested");
+}
+#endif
 
 MODULE_EXPORT const char *obs_module_description(void)
 {
@@ -140,6 +182,9 @@ static void twitch_status(obs_data_t *request, obs_data_t *response, void *priva
 
 bool obs_module_load(void)
 {
+	#ifdef _WIN32
+	launch_companion_app();
+	#endif
 	blog(LOG_INFO, "[OBS Stream Manager Output] Plugin loaded");
 	return true;
 }
