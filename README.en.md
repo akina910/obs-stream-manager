@@ -81,6 +81,7 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 - Automatic discovery and library insertion of owned Steam games, including uninstalled games
 - Clear indication of the selected game and currently applied profile
 - OBS scene, capture, audio, recording, and replay-buffer control
+- A BGM library for MP3, WAV, OGG, FLAC, and M4A files with shared looping playback, pause, and resume across scenes
 - Automatic YouTube broadcast, title, description, privacy, and per-game thumbnail setup
 - Automatic Twitch title, category, tag, stream-key, and secondary-video-output setup, plus a non-public bandwidth test
 - Title variables `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`, with automatic Part advancement after a successful stream
@@ -90,7 +91,7 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 
 ## Data, updates, and uninstalling
 
-Personal settings, game profiles, thumbnails, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder.
+Personal settings, game profiles, thumbnails, BGM tracks, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder. Each BGM file can be up to 50 MB and is attached to OBS through the managed `BGM Stock` media source.
 
 ### Manual updates
 

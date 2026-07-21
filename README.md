@@ -81,6 +81,7 @@ Aitum Multistreamは不要です。Source RecordやAitum Verticalが無い場合
 - Steam所有ゲーム（未インストールを含む）の自動検出と一覧追加
 - 選択ゲームと適用中プロファイルの明示
 - OBSシーン、キャプチャ、音量、録画、リプレイの連動
+- MP3／WAV／OGG／FLAC／M4AのBGMストック、全シーン共通のループ再生、一時停止・再開
 - YouTube配信枠、タイトル、説明、公開範囲、ゲーム別サムネイルの自動適用
 - Twitchタイトル、カテゴリ、タグ、配信キー、副映像出力の自動適用と非公開帯域テスト
 - タイトル変数 `{game}`、`{part}`、`{date}`、`{time}`、`{datetime}` と配信成功後のPart自動更新
@@ -90,7 +91,7 @@ Aitum Multistreamは不要です。Source RecordやAitum Verticalが無い場合
 
 ## データ、更新、アンインストール
 
-個人設定、ゲームプロファイル、サムネイル、説明文、ログ、バックアップは `%APPDATA%\obs-stream-manager` に保存されます。アプリを更新してもこのフォルダーは維持されます。
+個人設定、ゲームプロファイル、サムネイル、BGMストック、説明文、ログ、バックアップは `%APPDATA%\obs-stream-manager` に保存されます。アプリを更新してもこのフォルダーは維持されます。BGMは1ファイル50 MBまでで、OBSには管理用メディアソース `BGM Stock` として追加されます。
 
 ### 手動アップデート
 

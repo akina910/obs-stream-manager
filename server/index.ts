@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url'
 import cors from '@fastify/cors'
 import fastifyStatic from '@fastify/static'
 import Fastify from 'fastify'
-import { ZodError } from 'zod'
+import { z, ZodError } from 'zod'
 import { AppConfigSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
+import { BgmLibraryStore, maxBgmTrackBytes } from './bgm-library.js'
 import { CaptureDetector } from './capture.js'
 import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
@@ -24,6 +25,8 @@ import { DataStore } from './storage.js'
 const dataDir = getDataDirectory()
 const store = new DataStore(dataDir)
 await store.initialize()
+const bgm = new BgmLibraryStore(dataDir)
+await bgm.initialize()
 const secrets = new SecretStore()
 await provisionDistributorOAuth(store, secrets)
 const logger = new AppLogger(dataDir)
@@ -78,6 +81,52 @@ app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
 app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
 app.get('/api/status', async () => orchestrator.getStatus())
 app.get('/api/comments', async () => platforms.getComments())
+app.get('/api/bgm', async () => ({ ...(await bgm.getLibrary()), playback: await obs.bgmPlaybackStatus(await store.getConfig()) }))
+app.post<{ Body: { filename?: string; data?: string } }>('/api/bgm', { bodyLimit: 70 * 1024 * 1024 }, async (request, reply) => {
+  const filename = typeof request.body?.filename === 'string' ? request.body.filename : ''
+  const encoded = typeof request.body?.data === 'string' ? request.body.data.replace(/\s/g, '') : ''
+  if (!filename || !encoded) return reply.status(400).send({ error: 'BGMファイルがありません' })
+  if (encoded.length > Math.ceil(maxBgmTrackBytes / 3) * 4 + 4) return reply.status(413).send({ error: 'BGMは50 MB以下にしてください' })
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return reply.status(400).send({ error: 'BGMファイルを読み込めませんでした' })
+  const bytes = Buffer.from(encoded, 'base64')
+  const library = await bgm.addTrack(filename, bytes)
+  await logger.write('bgm.added', { filename: path.basename(filename), size: bytes.byteLength })
+  return { ...library, playback: await obs.bgmPlaybackStatus(await store.getConfig()) }
+})
+app.post<{ Params: { id: string } }>('/api/bgm/:id/play', async (request) => {
+  const track = await bgm.getTrack(request.params.id)
+  if (!track) throw Object.assign(new Error('BGMが見つかりません'), { statusCode: 404 })
+  const config = await store.getConfig()
+  const runtime = await orchestrator.getStatus()
+  const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
+  await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25)
+  const library = await bgm.selectTrack(track.id)
+  await logger.write('bgm.played', { trackId: track.id, filename: track.originalName })
+  return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+})
+app.post<{ Body: { action?: string } }>('/api/bgm/control', async (request) => {
+  const action = z.enum(['play', 'pause', 'stop', 'restart']).parse(request.body?.action)
+  const config = await store.getConfig()
+  const library = await bgm.getLibrary()
+  if (action === 'play' || action === 'restart') {
+    const track = library.tracks.find((item) => item.id === library.selectedTrackId)
+    if (!track) throw Object.assign(new Error('再生するBGMを選択してください'), { statusCode: 409 })
+    const runtime = await orchestrator.getStatus()
+    const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
+    await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25, action === 'restart')
+  } else {
+    await obs.controlBgm(config, action)
+  }
+  return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+})
+app.delete<{ Params: { id: string } }>('/api/bgm/:id', async (request) => {
+  const config = await store.getConfig()
+  const library = await bgm.getLibrary()
+  if (library.selectedTrackId === request.params.id) await obs.clearBgm(config).catch(() => undefined)
+  const removed = await bgm.removeTrack(request.params.id)
+  await logger.write('bgm.removed', { trackId: removed.removed.id, filename: removed.removed.originalName })
+  return { ...removed.library, playback: await obs.bgmPlaybackStatus(config) }
+})
 app.get('/api/oauth/status', async () => oauth.status())
 app.post<{ Params: { provider: 'youtube' | 'twitch' }; Body: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
   if (!['youtube', 'twitch'].includes(request.params.provider)) return reply.status(404).send({ error: 'Unknown OAuth provider' })

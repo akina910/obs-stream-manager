@@ -137,6 +137,35 @@ export const AppConfigSchema = z.object({
 
 export type AppConfig = z.infer<typeof AppConfigSchema>
 
+export const BgmTrackSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1).max(180),
+  originalName: z.string().trim().min(1).max(255),
+  filename: z.string().regex(/^[0-9a-f-]+\.(mp3|wav|ogg|flac|m4a)$/),
+  mime: z.enum(['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/flac', 'audio/mp4']),
+  size: z.number().int().positive(),
+  addedAt: z.string().datetime(),
+})
+
+export type BgmTrack = z.infer<typeof BgmTrackSchema>
+
+export const BgmLibrarySchema = z.object({
+  version: z.literal(1).default(1),
+  tracks: z.array(BgmTrackSchema).default([]),
+  selectedTrackId: z.string().uuid().nullable().default(null),
+})
+
+export type BgmLibrary = z.infer<typeof BgmLibrarySchema>
+
+export const BgmPlaybackSchema = z.object({
+  state: z.enum(['playing', 'paused', 'stopped', 'unavailable']),
+  cursorMs: z.number().nonnegative().nullable(),
+  durationMs: z.number().nonnegative().nullable(),
+})
+
+export type BgmPlayback = z.infer<typeof BgmPlaybackSchema>
+export type BgmLibraryStatus = BgmLibrary & { playback: BgmPlayback }
+
 export const RuntimeStatusSchema = z.object({
   obsConnected: z.boolean(),
   streaming: z.boolean(),

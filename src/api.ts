@@ -1,4 +1,4 @@
-import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
+import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
@@ -21,7 +21,9 @@ export type OAuthStartResult =
 export type TwitchIngestTestResult = { ok: true; durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number; congestion: number }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
+  const headers = new Headers(init?.headers)
+  if (init?.body !== undefined && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  const response = await fetch(url, { ...init, headers })
   const body = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
   return body as T
@@ -31,6 +33,11 @@ export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   status: () => request<RuntimeStatus>('/api/status'),
   comments: () => request<ChatMessage[]>('/api/comments'),
+  bgm: () => request<BgmLibraryStatus>('/api/bgm'),
+  addBgm: (filename: string, data: string) => request<BgmLibraryStatus>('/api/bgm', { method: 'POST', body: JSON.stringify({ filename, data }) }),
+  playBgm: (id: string) => request<BgmLibraryStatus>(`/api/bgm/${encodeURIComponent(id)}/play`, { method: 'POST', body: '{}' }),
+  controlBgm: (action: 'play' | 'pause' | 'stop' | 'restart') => request<BgmLibraryStatus>('/api/bgm/control', { method: 'POST', body: JSON.stringify({ action }) }),
+  deleteBgm: (id: string) => request<BgmLibraryStatus>(`/api/bgm/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   oauthStatus: () => request<OAuthConnectionStatuses>('/api/oauth/status'),
   oauthStart: (provider: OAuthProvider, openerOrigin: string) => request<OAuthStartResult>(`/api/oauth/${provider}/start`, { method: 'POST', body: JSON.stringify({ openerOrigin }) }),
   oauthPollTwitch: (requestId: string) => request<{ status: 'pending' | 'complete' }>(`/api/oauth/twitch/device/${encodeURIComponent(requestId)}`),

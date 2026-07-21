@@ -241,6 +241,28 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .settings-card { padding: 14px; display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--border-mid); border-radius: 12px; background: var(--surface-2); }
 .settings-card h2 { margin: 0; font-size: 13px; font-weight: 700; }
 .settings-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.bgm-library-card .card-title-row h2 { display: inline-flex; align-items: center; gap: 7px; }
+.bgm-now-playing { min-width: 0; padding: 9px 10px; display: flex; align-items: center; gap: 10px; border: 1px solid rgba(111, 141, 255, .28); border-radius: 9px; background: rgba(111, 141, 255, .08); }
+.bgm-now-playing > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.bgm-now-playing span { color: var(--accent); font-size: 10px; font-weight: 700; }
+.bgm-now-playing strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.bgm-now-playing code { flex: none; color: var(--muted); font: 11px 'IBM Plex Mono', monospace; }
+.bgm-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bgm-controls .square-button { width: 36px; height: 36px; }
+.bgm-stock-list { display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+.bgm-stock-row { min-width: 0; padding: 7px 0; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
+.bgm-stock-row.selected .bgm-track-select { color: var(--text); }
+.bgm-track-select { appearance: none; min-width: 0; flex: 1; padding: 3px 5px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 7px; color: var(--text-sub); background: transparent; cursor: pointer; text-align: left; }
+.bgm-track-select:hover { background: var(--surface-3); }
+.bgm-track-select > svg { flex: none; color: var(--accent); }
+.bgm-track-select > span { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.bgm-track-select strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.bgm-track-select small { color: var(--dim); font-size: 10px; }
+.bgm-track-select b { flex: none; color: var(--live); font-size: 10px; }
+.bgm-stock-row > .square-button { flex: none; color: var(--muted); }
+.bgm-empty { min-height: 68px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--dim); font-size: 11px; }
+.bgm-upload { align-self: flex-start; }
+.bgm-upload.disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
 .card-title-row { min-width: 0; display: flex; align-items: center; gap: 9px; }
 .card-title-row h2 { min-width: 0; }
 .card-title-row .oauth-stage, .card-title-row .connection-label { margin-left: auto; }

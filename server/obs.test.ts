@@ -37,6 +37,91 @@ describe('ObsController stream events', () => {
   })
 })
 
+describe('ObsController BGM stock', () => {
+  it('creates one managed media input, adds it to every scene, and starts it at the requested volume', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSceneList') return {
+          currentProgramSceneName: '00_STARTING',
+          scenes: [{ sceneName: '20_TALK' }, { sceneName: '00_STARTING' }],
+        }
+        if (request === 'GetInputSettings') throw new Error('No source was found')
+        if (request === 'GetSceneItemId') throw new Error('No scene item was found')
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await controller.playBgm(structuredClone(defaultConfig), 'C:\\BGM\\stock.mp3', -21)
+
+    expect(calls.find(({ request }) => request === 'CreateInput')?.data).toMatchObject({
+      sceneName: '00_STARTING',
+      inputName: 'BGM Stock',
+      inputKind: 'ffmpeg_source',
+      inputSettings: { local_file: 'C:\\BGM\\stock.mp3', looping: true, restart_on_activate: false },
+    })
+    expect(calls.find(({ request }) => request === 'CreateSceneItem')?.data).toEqual({
+      sceneName: '20_TALK',
+      sourceName: 'BGM Stock',
+      sceneItemEnabled: true,
+    })
+    expect(calls.find(({ request }) => request === 'SetInputVolume')?.data).toEqual({ inputName: 'BGM Stock', inputVolumeDb: -21 })
+    expect(calls.find(({ request }) => request === 'TriggerMediaInputAction')?.data).toEqual({
+      inputName: 'BGM Stock',
+      mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART',
+    })
+  })
+
+  it('reports managed media playback without failing when OBS has no stock source', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetMediaInputStatus') return { mediaState: 'OBS_MEDIA_STATE_PAUSED', mediaCursor: 1_200, mediaDuration: 5_000 }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await expect(controller.bgmPlaybackStatus(structuredClone(defaultConfig))).resolves.toEqual({ state: 'paused', cursorMs: 1_200, durationMs: 5_000 })
+
+    fake.call.mockRejectedValueOnce(new Error('No source was found'))
+    await expect(controller.bgmPlaybackStatus(structuredClone(defaultConfig))).resolves.toEqual({ state: 'unavailable', cursorMs: null, durationMs: null })
+  })
+
+  it('removes the managed media input before deleting its selected file', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetSceneList') return { scenes: [{ sceneName: '00_STARTING' }, { sceneName: '20_TALK' }] }
+        if (request === 'GetSceneItemList') return { sceneItems: [{ sourceName: 'BGM Stock', sceneItemId: 7 }, { sourceName: 'Other', sceneItemId: 8 }] }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await controller.clearBgm(structuredClone(defaultConfig))
+
+    expect(fake.call.mock.calls).toEqual(expect.arrayContaining([
+      ['TriggerMediaInputAction', { inputName: 'BGM Stock', mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP' }],
+      ['RemoveSceneItem', { sceneName: '00_STARTING', sceneItemId: 7 }],
+      ['RemoveSceneItem', { sceneName: '20_TALK', sceneItemId: 7 }],
+      ['RemoveInput', { inputName: 'BGM Stock' }],
+    ]))
+  })
+})
+
 describe('ObsController recording fallbacks', () => {
   it('starts and stops a secure in-memory Twitch secondary output for simultaneous streaming', async () => {
     const calls: Array<{ request: string; data: unknown }> = []

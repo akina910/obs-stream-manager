@@ -1,5 +1,5 @@
 import OBSWebSocket, { type OBSRequestTypes } from 'obs-websocket-js'
-import type { AppConfig, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import type { AppConfig, BgmPlayback, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
 import { SecretStore } from './secrets.js'
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -8,6 +8,8 @@ type AppliedStreamService = { streamServiceType: string; server: string; key: st
 type ObsRuntimeStatus = Omit<RuntimeStatus, 'platforms'>
 type TwitchOutputPluginStatus = NonNullable<ObsRuntimeStatus['twitchOutputPlugin']>
 const twitchOutputPluginApiVersion = 1
+export const stockBgmInputName = 'BGM Stock'
+export type BgmControlAction = 'play' | 'pause' | 'stop' | 'restart'
 export type TwitchIngestTestResult = {
   ok: true
   durationMs: number
@@ -87,6 +89,98 @@ export class ObsController {
 
   private async setMuted(inputName: string, muted: boolean): Promise<void> {
     try { await this.obs.call('SetInputMute', { inputName, inputMuted: muted }) } catch { /* optional/missing input */ }
+  }
+
+  private async ensureStockBgmInput(filename: string): Promise<void> {
+    const sceneList = await this.obs.call('GetSceneList')
+    let created = false
+    try {
+      const input = await this.obs.call('GetInputSettings', { inputName: stockBgmInputName })
+      if (input.inputKind !== 'ffmpeg_source') throw new Error(`OBSソース「${stockBgmInputName}」がメディアソースではありません`)
+      await this.obs.call('SetInputSettings', {
+        inputName: stockBgmInputName,
+        inputSettings: { is_local_file: true, local_file: filename, looping: true, restart_on_activate: false, close_when_inactive: false },
+        overlay: true,
+      })
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('メディアソースではありません')) throw error
+      await this.obs.call('CreateInput', {
+        sceneName: sceneList.currentProgramSceneName,
+        inputName: stockBgmInputName,
+        inputKind: 'ffmpeg_source',
+        inputSettings: { is_local_file: true, local_file: filename, looping: true, restart_on_activate: false, close_when_inactive: false },
+        sceneItemEnabled: true,
+      })
+      created = true
+    }
+
+    for (const scene of sceneList.scenes) {
+      const sceneName = typeof scene.sceneName === 'string' ? scene.sceneName : null
+      if (!sceneName || created && sceneName === sceneList.currentProgramSceneName) continue
+      const sceneItemId = await this.obs.call('GetSceneItemId', { sceneName, sourceName: stockBgmInputName })
+        .then((item) => item.sceneItemId)
+        .catch(() => null)
+      if (sceneItemId === null) {
+        await this.obs.call('CreateSceneItem', { sceneName, sourceName: stockBgmInputName, sceneItemEnabled: true })
+      } else {
+        await this.obs.call('SetSceneItemEnabled', { sceneName, sceneItemId, sceneItemEnabled: true })
+      }
+    }
+  }
+
+  async playBgm(config: AppConfig, filename: string, volumeDb = -25, restart = true): Promise<void> {
+    await this.connect(config)
+    await this.ensureStockBgmInput(filename)
+    await this.obs.call('SetInputVolume', { inputName: stockBgmInputName, inputVolumeDb: volumeDb })
+    await this.obs.call('TriggerMediaInputAction', {
+      inputName: stockBgmInputName,
+      mediaAction: restart ? 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART' : 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY',
+    })
+  }
+
+  async controlBgm(config: AppConfig, action: BgmControlAction): Promise<void> {
+    await this.connect(config)
+    const actions: Record<BgmControlAction, string> = {
+      play: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY',
+      pause: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PAUSE',
+      stop: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP',
+      restart: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART',
+    }
+    await this.obs.call('TriggerMediaInputAction', { inputName: stockBgmInputName, mediaAction: actions[action] })
+  }
+
+  async clearBgm(config: AppConfig): Promise<void> {
+    await this.connect(config)
+    await this.obs.call('TriggerMediaInputAction', { inputName: stockBgmInputName, mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP' }).catch(() => undefined)
+    const sceneList = await this.obs.call('GetSceneList')
+    for (const scene of sceneList.scenes) {
+      const sceneName = typeof scene.sceneName === 'string' ? scene.sceneName : null
+      if (!sceneName) continue
+      const items = await this.obs.call('GetSceneItemList', { sceneName })
+      for (const item of items.sceneItems) {
+        if (item.sourceName !== stockBgmInputName || typeof item.sceneItemId !== 'number') continue
+        await this.obs.call('RemoveSceneItem', { sceneName, sceneItemId: item.sceneItemId })
+      }
+    }
+    await this.obs.call('RemoveInput', { inputName: stockBgmInputName }).catch(() => undefined)
+  }
+
+  async bgmPlaybackStatus(config: AppConfig): Promise<BgmPlayback> {
+    try {
+      await this.connect(config)
+      const status = await this.obs.call('GetMediaInputStatus', { inputName: stockBgmInputName })
+      const states: Record<string, BgmPlayback['state']> = {
+        OBS_MEDIA_STATE_PLAYING: 'playing',
+        OBS_MEDIA_STATE_PAUSED: 'paused',
+      }
+      return {
+        state: states[status.mediaState] ?? 'stopped',
+        cursorMs: Number.isFinite(status.mediaCursor) ? status.mediaCursor : null,
+        durationMs: Number.isFinite(status.mediaDuration) ? status.mediaDuration : null,
+      }
+    } catch {
+      return { state: 'unavailable', cursorMs: null, durationMs: null }
+    }
   }
 
   private async callVendor(vendorName: string, requestType: string, requestData: Record<string, string | number | boolean | null> = {}): Promise<Record<string, unknown>> {
@@ -422,6 +516,7 @@ export class ObsController {
       this.setVolume(config.sources.microphone, profile.audio.microphoneDb),
       this.setVolume(config.sources.discord, profile.audio.discordDb),
       this.setVolume(config.sources.bgm, profile.audio.bgmDb),
+      this.setVolume(stockBgmInputName, profile.audio.bgmDb),
       this.setVolume(method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame, profile.audio.gameDb),
     ])
 
