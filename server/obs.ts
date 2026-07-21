@@ -572,11 +572,16 @@ export class ObsController {
 
   async clearCommonTemplate(config: AppConfig, sourceName: string): Promise<void> {
     await this.connect(config)
-    await this.obs.call('SetInputSettings', {
-      inputName: sourceName,
-      inputSettings: { file: '' },
-      overlay: true,
-    })
+    try {
+      await this.obs.call('SetInputSettings', {
+        inputName: sourceName,
+        inputSettings: { file: '' },
+        overlay: true,
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new Error(`共通テンプレート用OBS画像ソース「${sourceName}」をクリアできませんでした: ${detail}`)
+    }
   }
 
   async start(config: AppConfig, profile: GameProfile, selectedSource: string): Promise<string[]> {

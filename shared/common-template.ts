@@ -28,6 +28,7 @@ export const CommonTemplateSettingsSchema = CommonTemplateConfigSchema.omit({
 })
 
 export type CommonTemplateConfig = z.infer<typeof CommonTemplateConfigSchema>
+export type CommonTemplateSettings = z.infer<typeof CommonTemplateSettingsSchema>
 
 export const defaultCommonTemplateConfig: CommonTemplateConfig = CommonTemplateConfigSchema.parse({})
 

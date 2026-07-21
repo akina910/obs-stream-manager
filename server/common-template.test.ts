@@ -2,7 +2,8 @@ import { mkdtemp, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import sharp from 'sharp'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CommonTemplateSettingsSchema } from '../shared/common-template.js'
 import { createGameProfile } from '../shared/profile-factory.js'
 import { CommonTemplateService } from './common-template.js'
 import { DataStore } from './storage.js'
@@ -52,5 +53,55 @@ describe('CommonTemplateService', () => {
     await store.saveConfig({ ...current, commonTemplate: { ...current.commonTemplate, enabled: true } })
 
     await expect(new CommonTemplateService(store).renderProfile(profile)).resolves.toMatchObject({ text: '<ARK & "Friends">' })
+  })
+
+  it('serializes background mutations so their rendered directories cannot race', async () => {
+    const store = await templateStore()
+    const service = new CommonTemplateService(store)
+    const background = await sharp({ create: { width: 320, height: 180, channels: 4, background: '#112233' } }).png().toBuffer()
+    const original = store.saveCommonTemplateImage.bind(store)
+    let active = 0
+    let maximumActive = 0
+    const spy = vi.spyOn(store, 'saveCommonTemplateImage').mockImplementation(async (...arguments_) => {
+      active += 1
+      maximumActive = Math.max(maximumActive, active)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      try { return await original(...arguments_) }
+      finally { active -= 1 }
+    })
+
+    await Promise.all([
+      service.saveBackground(background, 'image/png', 'first.png'),
+      service.saveBackground(background, 'image/png', 'second.png'),
+    ])
+
+    expect(maximumActive).toBe(1)
+    spy.mockRestore()
+  })
+
+  it('does not save settings when clearing the previous OBS source fails', async () => {
+    const store = await templateStore()
+    const service = new CommonTemplateService(store)
+    const current = await store.getConfig()
+    const settings = CommonTemplateSettingsSchema.parse(current.commonTemplate)
+
+    await expect(service.saveSettings({ ...settings, textTemplate: 'CHANGED {game}' }, async () => {
+      throw new Error('OBS clear failed')
+    })).rejects.toThrow('OBS clear failed')
+
+    await expect(store.getConfig()).resolves.toMatchObject({ commonTemplate: { textTemplate: '{game}' } })
+  })
+
+  it('keeps the background image when clearing the OBS source before deletion fails', async () => {
+    const store = await templateStore()
+    const service = new CommonTemplateService(store)
+    const background = await sharp({ create: { width: 320, height: 180, channels: 4, background: '#112233' } }).png().toBuffer()
+    await service.saveBackground(background, 'image/png', 'stream-screen.png')
+
+    await expect(service.removeBackground(async () => {
+      throw new Error('OBS clear failed')
+    })).rejects.toThrow('OBS clear failed')
+
+    await expect(service.readBackground()).resolves.toMatchObject({ mime: 'image/png' })
   })
 })

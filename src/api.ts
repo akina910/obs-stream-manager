@@ -1,7 +1,7 @@
 import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
-import type { CommonTemplateConfig } from '../shared/common-template'
+import type { CommonTemplateConfig, CommonTemplateSettings } from '../shared/common-template'
 
-export type CommonTemplateSettings = Omit<CommonTemplateConfig, 'imageFilename' | 'imageOriginalName' | 'imageUpdatedAt'>
+export type { CommonTemplateSettings } from '../shared/common-template'
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }

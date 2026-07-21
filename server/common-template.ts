@@ -1,9 +1,9 @@
 import crypto from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import sharp from 'sharp'
-import { renderCommonTemplateText, type CommonTemplateConfig } from '../shared/common-template.js'
-import type { GameProfile } from '../shared/contracts.js'
+import { renderCommonTemplateText, type CommonTemplateConfig, type CommonTemplateSettings } from '../shared/common-template.js'
+import type { AppConfig, GameProfile } from '../shared/contracts.js'
 import type { DataStore } from './storage.js'
 
 export type CommonTemplateRender = {
@@ -34,7 +34,19 @@ function textPosition(config: CommonTemplateConfig, width: number, height: numbe
 }
 
 export class CommonTemplateService {
+  private operationQueue: Promise<void> = Promise.resolve()
+
   constructor(private readonly store: DataStore) {}
+
+  private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.operationQueue.then(operation, operation)
+    this.operationQueue = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  withExclusiveAccess<T>(operation: () => Promise<T>): Promise<T> {
+    return this.exclusive(operation)
+  }
 
   private async renderWith(
     template: CommonTemplateConfig,
@@ -57,12 +69,16 @@ export class CommonTemplateService {
     await mkdir(directory, { recursive: true })
     const filename = path.join(directory, `${profile.id}.png`)
     const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`
-    await writeFile(temporary, bytes)
-    await rename(temporary, filename)
+    try {
+      await writeFile(temporary, bytes)
+      await rename(temporary, filename)
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined)
+    }
     return { profileId: profile.id, sourceName: template.obsSourceName, filename, text }
   }
 
-  async renderProfile(profile: GameProfile, now?: Date): Promise<CommonTemplateRender | null> {
+  private async renderProfileUnlocked(profile: GameProfile, now?: Date): Promise<CommonTemplateRender | null> {
     const config = await this.store.getConfig()
     const template = config.commonTemplate
     if (!template.enabled) return null
@@ -73,7 +89,7 @@ export class CommonTemplateService {
     return this.renderWith(template, backgroundBytes, metadata.width ?? 1920, metadata.height ?? 1080, profile, now)
   }
 
-  async renderAll(now?: Date): Promise<CommonTemplateRender[]> {
+  private async renderAllUnlocked(now?: Date): Promise<CommonTemplateRender[]> {
     const config = await this.store.getConfig()
     const template = config.commonTemplate
     if (!template.enabled) return []
@@ -91,12 +107,63 @@ export class CommonTemplateService {
     return rendered
   }
 
-  async readBackground(): Promise<{ bytes: Buffer; mime: string } | null> {
+  private async readBackgroundUnlocked(): Promise<{ bytes: Buffer; mime: string } | null> {
     const config = await this.store.getConfig()
     const filename = this.store.getCommonTemplateImagePath(config)
     if (!filename) return null
     const extension = path.extname(filename).toLowerCase()
     const mime = extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg'
     return { bytes: await readFile(filename), mime }
+  }
+
+  renderProfile(profile: GameProfile, now?: Date): Promise<CommonTemplateRender | null> {
+    return this.exclusive(() => this.renderProfileUnlocked(profile, now))
+  }
+
+  renderAll(now?: Date): Promise<CommonTemplateRender[]> {
+    return this.exclusive(() => this.renderAllUnlocked(now))
+  }
+
+  readBackground(): Promise<{ bytes: Buffer; mime: string } | null> {
+    return this.exclusive(() => this.readBackgroundUnlocked())
+  }
+
+  saveSettings(settings: CommonTemplateSettings, beforeSave?: (previousConfig: AppConfig, nextConfig: AppConfig) => Promise<void>): Promise<{ previousConfig: AppConfig; savedConfig: AppConfig }> {
+    return this.exclusive(async () => {
+      const previousConfig = await this.store.getConfig()
+      if (settings.enabled && !previousConfig.commonTemplate.imageFilename) {
+        throw Object.assign(new Error('有効化する前に共通テンプレート画像を登録してください'), { statusCode: 400 })
+      }
+      const nextConfig: AppConfig = {
+        ...previousConfig,
+        commonTemplate: {
+          ...settings,
+          imageFilename: previousConfig.commonTemplate.imageFilename,
+          imageOriginalName: previousConfig.commonTemplate.imageOriginalName,
+          imageUpdatedAt: previousConfig.commonTemplate.imageUpdatedAt,
+        },
+      }
+      if (beforeSave) await beforeSave(previousConfig, nextConfig)
+      const savedConfig = await this.store.saveConfig(nextConfig)
+      if (savedConfig.commonTemplate.enabled) await this.renderAllUnlocked()
+      return { previousConfig, savedConfig }
+    })
+  }
+
+  saveBackground(bytes: Uint8Array, mime: string, originalName?: string): Promise<CommonTemplateConfig> {
+    return this.exclusive(async () => {
+      const template = await this.store.saveCommonTemplateImage(bytes, mime, originalName)
+      if (template.enabled) await this.renderAllUnlocked()
+      return template
+    })
+  }
+
+  removeBackground(beforeRemove?: (previousConfig: AppConfig) => Promise<void>): Promise<{ previousConfig: AppConfig; template: CommonTemplateConfig }> {
+    return this.exclusive(async () => {
+      const previousConfig = await this.store.getConfig()
+      if (beforeRemove) await beforeRemove(previousConfig)
+      const template = await this.store.removeCommonTemplateImage()
+      return { previousConfig, template }
+    })
   }
 }
