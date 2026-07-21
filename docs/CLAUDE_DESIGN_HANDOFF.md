@@ -1,9 +1,9 @@
 # Claude Design handoff — OBS Stream Manager
 
-更新日: 2026-07-21  
-リポジトリ: `akina910/obs-stream-manager`  
-作業ブランチ: `fix/windows-early-startup`  
-基準コミット: `34c5a5d018ccd9cef50084ce00475d7566971a45`  
+更新日: 2026-07-21
+リポジトリ: `akina910/obs-stream-manager`
+作業ブランチ: `fix/windows-early-startup`
+基準コミット: `f9a1bccc6aa86c228e3c7dc992fb3fc2484c0e6b`
 アプリバージョン: `0.2.8`
 
 ## Claude Design への依頼文
@@ -220,12 +220,20 @@ OBS接続、OAuth、更新、機能、音声ソース、共通テンプレート
 
 - TypeScript: PASS
 - ESLint: PASS
-- Vitest: 32ファイル、204テスト PASS
+- Vitest: 32ファイル、210テスト PASS
 - 全到達履歴の秘密スキャン: PASS
 - 本番Webビルド: PASS
 - Electronデスクトップビルド: PASS
 
-外部LLMの統合後レビューは、このハンドオフを先に渡すため未完了です。ClaudeとGitHub Copilotの初回レビューは対象差分が大きくタイムアウトし、Gemini CLIは `UNSUPPORTED_CLIENT` で認証不可でした。PR単体ではレビュー済みですが、デザイン作業開始時点では統合後の外部レビューをPASS扱いにしないでください。
+外部LLMの統合後レビューも完了しています。
+
+- GitHub Copilotレビューで、BGM本体と選択状態がバックアップ／復元に含まれない問題を検出
+- 同レビューで、設定復元失敗時のBGMロールバックとOBS切断時の旧ファイル保持を追加確認
+- 指摘を `f9a1bcc` で修正し、Copilotの再レビューはPASS
+- Claude Sonnet 4.6（Copilot CLI経由）のUI/APIレビューで、OBS切断中に選択曲を削除した場合の参照切れを検出
+- 同じ保留ファイル機構を削除処理にも適用し、Claude Sonnet 4.6の再レビューはPASS
+
+直接のClaude Code CLIレビューは制限時間内に完了せず、Gemini CLIは `UNSUPPORTED_CLIENT` で認証不可だったため成功レビューには数えていません。上記のCopilotとClaude Sonnet 4.6の実行結果、修正後テスト、ビルドを現在のレビュー証跡とします。
 
 ## 未完了の実機確認
 
@@ -237,4 +245,3 @@ OBS接続、OAuth、更新、機能、音声ソース、共通テンプレート
 - BGMの再生、一時停止、停止、ループ、シーン切替後の継続
 - OBSブラウザドックの320〜760px表示
 - Windowsインストール版での再起動後の表示と操作
-
