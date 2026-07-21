@@ -1,4 +1,7 @@
 import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
+import type { CommonTemplateConfig } from '../shared/common-template'
+
+export type CommonTemplateSettings = Omit<CommonTemplateConfig, 'imageFilename' | 'imageOriginalName' | 'imageUpdatedAt'>
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
@@ -38,6 +41,11 @@ export const api = {
   playBgm: (id: string) => request<BgmLibraryStatus>(`/api/bgm/${encodeURIComponent(id)}/play`, { method: 'POST', body: '{}' }),
   controlBgm: (action: 'play' | 'pause' | 'stop' | 'restart') => request<BgmLibraryStatus>('/api/bgm/control', { method: 'POST', body: JSON.stringify({ action }) }),
   deleteBgm: (id: string) => request<BgmLibraryStatus>(`/api/bgm/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  commonTemplate: () => request<CommonTemplateConfig>('/api/templates/common'),
+  saveCommonTemplate: (settings: CommonTemplateSettings) => request<CommonTemplateConfig>('/api/templates/common', { method: 'PUT', body: JSON.stringify(settings) }),
+  uploadCommonTemplateImage: (mime: string, data: string, filename: string) => request<CommonTemplateConfig>('/api/templates/common/image', { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
+  deleteCommonTemplateImage: () => request<CommonTemplateConfig>('/api/templates/common/image', { method: 'DELETE' }),
+  applyCommonTemplate: () => request<{ ok: true; rendered: number }>('/api/templates/common/apply', { method: 'POST', body: '{}' }),
   oauthStatus: () => request<OAuthConnectionStatuses>('/api/oauth/status'),
   oauthStart: (provider: OAuthProvider, openerOrigin: string) => request<OAuthStartResult>(`/api/oauth/${provider}/start`, { method: 'POST', body: JSON.stringify({ openerOrigin }) }),
   oauthPollTwitch: (requestId: string) => request<{ status: 'pending' | 'complete' }>(`/api/oauth/twitch/device/${encodeURIComponent(requestId)}`),

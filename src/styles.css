@@ -432,6 +432,23 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .setup-footer { justify-content: flex-end; }
 .setup-footer .close-button { margin-left: auto; }
 
+.common-template-card > p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.common-template-card .card-title-row > svg { flex: none; color: var(--accent); }
+.common-template-layout { display: grid; grid-template-columns: minmax(220px, 1.1fr) minmax(220px, 1fr); gap: 14px; align-items: start; }
+.common-template-preview { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: #080a0f; }
+.common-template-preview img { width: 100%; height: 100%; display: block; object-fit: contain; }
+.common-template-preview > span { position: absolute; max-width: 94%; overflow: hidden; font-weight: 700; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
+.common-template-empty { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--dim); font-size: 11px; font-weight: 600; }
+.common-template-controls { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.common-template-controls label { margin: 0; }
+.common-template-controls input[type='color'] { min-height: 38px; padding: 3px; }
+.common-template-controls input[type='range'] { height: auto; padding: 0; accent-color: var(--accent); }
+.common-template-controls label > span:not(.field-hint) { color: var(--text-sub); font: 11px 'IBM Plex Mono', monospace; }
+.native-toggle { min-height: 36px; display: flex !important; flex-direction: row !important; align-items: center; gap: 8px !important; color: var(--text-sub); font-size: 12px; font-weight: 700; }
+.native-toggle input { width: 17px; height: 17px; padding: 0; accent-color: var(--accent); }
+.common-template-actions { flex-wrap: wrap; }
+.template-success { color: #77e29f; border-color: rgba(70, 212, 126, .28); background: rgba(70, 212, 126, .08); }
+
 .toast-stack { position: fixed; z-index: 80; top: 14px; right: 14px; width: min(340px, calc(100vw - 28px)); }
 .toast { padding: 11px 13px; display: flex; align-items: flex-start; gap: 9px; border: 1px solid var(--border-strong); border-radius: 10px; background: #171b28; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
 .toast.success { border-color: rgba(70, 212, 126, .35); }
@@ -457,6 +474,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .scene-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .game-list { grid-template-columns: minmax(0, 1fr); }
   .selected-game-copy > small { white-space: normal; }
+  .common-template-layout { grid-template-columns: minmax(0, 1fr); }
   .selection-summary b { max-width: 88px; }
 }
 

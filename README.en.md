@@ -87,11 +87,14 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 - Title variables `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`, with automatic Part advancement after a successful stream
 - Separate authorization and actual live-status indicators for YouTube and Twitch
 - Combined chat display and settings backup/restore
+- Shared PNG/JPEG/WEBP stream-screen templates with per-profile game-label replacement and one-click application to every profile
 - Japanese and English UI
 
 ## Data, updates, and uninstalling
 
-Personal settings, game profiles, thumbnails, BGM tracks, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder. Each BGM file can be up to 50 MB and is attached to OBS through the managed `BGM Stock` media source.
+Personal settings, game profiles, thumbnails, BGM tracks, shared stream templates, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder. Each BGM file can be up to 50 MB and is attached to OBS through the managed `BGM Stock` media source.
+
+Configure the shared stream template from Settings. Its text supports `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`. Each game can override only its template display name, such as shortening `ARK: Survival Ascended` to `ARK`. Create an OBS image source named `COMMON_STREAM_TEMPLATE` (or use the same custom source name in both OBS and the app). Selecting a game then assigns that profile's generated PNG to the source automatically.
 
 ### Manual updates
 

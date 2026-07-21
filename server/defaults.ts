@@ -1,4 +1,5 @@
 import type { AppConfig, GameProfile } from '../shared/contracts.js'
+import { defaultCommonTemplateConfig } from '../shared/common-template.js'
 import { createGameProfile } from '../shared/profile-factory.js'
 
 export const defaultConfig: AppConfig = {
@@ -9,6 +10,7 @@ export const defaultConfig: AppConfig = {
     microphone: 'MIC', pcGame: 'GAME_PC', geforceNow: 'GAME_GFN', switchGame: 'GAME_SWITCH', discord: 'DISCORD', bgm: 'BGM',
   },
   features: { youtube: true, twitch: true, recording: true, replayBuffer: true, sourceRecord: true, verticalRecording: true },
+  commonTemplate: defaultCommonTemplateConfig,
   steam: { steamId64: '', apiKeyStored: false, installPath: '' },
   youtube: { clientId: '', clientSecretStored: false, refreshTokenStored: false, broadcastId: '' },
   twitch: { clientId: '', clientSecretStored: false, accessTokenStored: false, refreshTokenStored: false, broadcasterId: '' },
@@ -17,6 +19,7 @@ export const defaultConfig: AppConfig = {
 const pcBase = {
   favorite: false,
   hidden: false,
+  presentation: { templateLabel: '' },
   library: { gamePass: false, exception: false, installed: false },
   obs: { sceneName: '10_GAME_PC', startingScene: '00_STARTING', endingScene: '90_ENDING' },
   youtube: { enabled: true, titleTemplate: '{game}｜ゲーム配信', description: '', privacy: 'public' as const, categoryId: '20' },
