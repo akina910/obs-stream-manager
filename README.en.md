@@ -81,6 +81,7 @@ The bundled plugin is installed in OBS's official Windows plugin directory at `C
 - Automatic discovery and library insertion of owned Steam games, including uninstalled games
 - Clear indication of the selected game and currently applied profile
 - OBS scene, capture, audio, recording, and replay-buffer control
+- Per-game audio auto-adjustment from OBS meters, peak protection, and microphone sidechain ducking
 - Automatic YouTube broadcast, title, description, privacy, and per-game thumbnail setup
 - Automatic Twitch title, category, tag, stream-key, and secondary-video-output setup, plus a non-public bandwidth test
 - Title variables `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`, with automatic Part advancement after a successful stream

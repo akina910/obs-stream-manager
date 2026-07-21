@@ -5,7 +5,7 @@ import cors from '@fastify/cors'
 import fastifyStatic from '@fastify/static'
 import Fastify from 'fastify'
 import { ZodError } from 'zod'
-import { AppConfigSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
+import { AppConfigSchema, AudioCalibrationRequestSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
 import { CaptureDetector } from './capture.js'
 import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
@@ -157,6 +157,10 @@ app.post('/api/twitch/output-test', async () => {
     congestion: result.congestion,
   })
   return result
+})
+app.post('/api/audio/auto-adjust', async (request) => {
+  const body = AudioCalibrationRequestSchema.parse(request.body)
+  return orchestrator.autoAdjustAudio(body.gameId, body.durationMs, body.audio)
 })
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })

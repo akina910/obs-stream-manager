@@ -410,6 +410,19 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .setup-footer { justify-content: flex-end; }
 .setup-footer .close-button { margin-left: auto; }
 
+.audio-auto-adjust { margin-top: 12px; padding: 12px; display: flex; flex-direction: column; gap: 9px; border: 1px solid rgba(111, 141, 255, .3); border-radius: 10px; background: rgba(111, 141, 255, .07); }
+.audio-auto-adjust > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.audio-auto-adjust strong { font-size: 12px; }
+.audio-auto-adjust p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.audio-auto-adjust > button { align-self: flex-start; }
+.audio-calibration-result { padding-top: 9px; display: flex; flex-direction: column; gap: 7px; border-top: 1px solid var(--border-mid); }
+.audio-calibration-result > div { display: grid; gap: 5px; }
+.audio-reading { padding: 7px 8px; display: grid; grid-template-columns: minmax(58px, auto) auto 1fr; align-items: center; gap: 8px; border: 1px solid var(--border-mid); border-radius: 7px; background: var(--surface-1); }
+.audio-reading > span { font-size: 11px; font-weight: 700; }
+.audio-reading code { color: var(--accent); font: 10px 'IBM Plex Mono', monospace; }
+.audio-reading small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.audio-reading.status-limited, .audio-reading.status-no_signal, .audio-reading.status-muted, .audio-reading.status-missing { border-color: rgba(242, 177, 61, .35); }
+
 .toast-stack { position: fixed; z-index: 80; top: 14px; right: 14px; width: min(340px, calc(100vw - 28px)); }
 .toast { padding: 11px 13px; display: flex; align-items: flex-start; gap: 9px; border: 1px solid var(--border-strong); border-radius: 10px; background: #171b28; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
 .toast.success { border-color: rgba(70, 212, 126, .35); }
@@ -464,4 +477,6 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .setup-finish-actions { flex-direction: column; }
   .setup-finish-actions button { width: 100%; }
   .thumbnail-preview-frame { width: 100%; }
+  .audio-reading { grid-template-columns: 1fr auto; }
+  .audio-reading small { grid-column: 1 / -1; }
 }
