@@ -5,6 +5,7 @@ import {
   Search, Settings, Star, Trash2, Upload, Users, X,
 } from 'lucide-react'
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
+import type { AudioCalibrationResult, AudioCalibrationRole } from '../shared/audio-calibration'
 import { createGameProfile } from '../shared/profile-factory'
 import { renderTitleTemplate, TITLE_TEMPLATE_VARIABLES } from '../shared/title-template'
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider, type SteamSyncResult } from './api'
@@ -333,19 +334,24 @@ function TitleTemplateField({ value, game, part, onChange }: { value: string; ga
   </div>
 }
 
-function RangeField({ label, value, disabled, onChange }: { label: string; value: number; disabled: boolean; onChange: (value: number) => void }) {
-  return <label>{label}<div className="range-control"><input type="range" min="-30" max="6" step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} /><span>{value > 0 ? '+' : ''}{value} dB</span></div></label>
+function RangeField({ label, value, disabled, minimum = -30, maximum = 6, onChange }: { label: string; value: number; disabled: boolean; minimum?: number; maximum?: number; onChange: (value: number) => void }) {
+  return <label>{label}<div className="range-control"><input type="range" min={minimum} max={maximum} step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} /><span>{value > 0 ? '+' : ''}{value} dB</span></div></label>
 }
 
 function Toggle({ checked, disabled = false, label, onChange }: { checked: boolean; disabled?: boolean; label: string; onChange: (checked: boolean) => void }) {
   return <label className="toggle-row"><button type="button" role="switch" aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}><span /></button><span>{label}</span></label>
 }
 
-function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbnail, onDeleteThumbnail }: { profile: GameProfile; readOnly: boolean; onClose: () => void; onSave: (profile: GameProfile) => Promise<void>; onDelete: () => Promise<void>; onThumbnail: (file: File, draft: GameProfile) => Promise<void>; onDeleteThumbnail: (draft: GameProfile) => Promise<void> }) {
+const audioRoleLabels: Record<AudioCalibrationRole, string> = { microphone: 'マイク', game: 'ゲーム', discord: 'Discord', bgm: 'BGM' }
+const calibrationNeedsAttention = (result: AudioCalibrationResult) => result.readings.some(({ status }) => ['limited', 'no_signal', 'muted', 'missing'].includes(status))
+
+function ProfileEditor({ profile, readOnly, canAutoAdjust, onClose, onSave, onDelete, onThumbnail, onDeleteThumbnail, onAutoAdjust }: { profile: GameProfile; readOnly: boolean; canAutoAdjust: boolean; onClose: () => void; onSave: (profile: GameProfile) => Promise<void>; onDelete: () => Promise<void>; onThumbnail: (file: File, draft: GameProfile) => Promise<void>; onDeleteThumbnail: (draft: GameProfile) => Promise<void>; onAutoAdjust: (draft: GameProfile) => Promise<AudioCalibrationResult> }) {
   const { t } = useI18n()
   const [draft, setDraft] = useState(profile)
   const [openSections, setOpenSections] = useState(() => new Set(['recording']))
   const [saving, setSaving] = useState(false)
+  const [calibrating, setCalibrating] = useState(false)
+  const [calibration, setCalibration] = useState<AudioCalibrationResult | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const savingRef = useRef(false)
@@ -369,6 +375,19 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
   const save = () => execute(async () => { await onSave(draft); onClose() })
   const upload = (file: File) => execute(() => onThumbnail(file, draft))
   const removeThumbnail = () => execute(() => onDeleteThumbnail(draft))
+  const autoAdjustAudio = async () => {
+    if (savingRef.current || readOnly || !canAutoAdjust) return
+    savingRef.current = true; setSaving(true); setCalibrating(true); setSaveError(null); setCalibration(null)
+    try {
+      const result = await onAutoAdjust(draft)
+      setDraft((current) => ({ ...current, audio: result.profile.audio }))
+      setCalibration(result)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error))
+    } finally {
+      savingRef.current = false; setSaving(false); setCalibrating(false)
+    }
+  }
   const browseFolder = () => execute(async () => {
     const result = await api.selectFolder(draft.recording.directory)
     if (result.path) patch('recording', { ...draft.recording, directory: result.path })
@@ -405,7 +424,17 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
             <fieldset disabled={locked}><Toggle disabled={locked} checked={draft.twitch.enabled} label={t('このゲームで有効')} onChange={(value) => patch('twitch', { ...draft.twitch, enabled: value })} /><TitleTemplateField value={draft.twitch.titleTemplate} game={draft.displayName} part={draft.state.nextPartNumber} onChange={(value) => patch('twitch', { ...draft.twitch, titleTemplate: value })} /><div className="field-grid"><label>{t('カテゴリ')}<input value={draft.twitch.categoryName} onChange={(event) => patch('twitch', { ...draft.twitch, categoryName: event.target.value })} /></label><label>{t('タグ（カンマ区切り）')}<input value={draft.twitch.tags.join(', ')} onChange={(event) => patch('twitch', { ...draft.twitch, tags: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></label></div></fieldset>
           </AccordionSection>
           <AccordionSection title={t('音声')} summary={`${t('ゲーム')} ${draft.audio.gameDb > 0 ? '+' : ''}${draft.audio.gameDb} dB`} open={openSections.has('audio')} onToggle={() => toggleSection('audio')}>
-            <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /></fieldset>
+            <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /><RangeField disabled={locked} label={t('発話中のゲーム音減衰')} value={draft.audio.duckingDb} minimum={-12} maximum={0} onChange={(value) => patch('audio', { ...draft.audio, duckingDb: value })} /></fieldset>
+            <div className="audio-auto-adjust">
+              <div><strong>{t('実音量から自動調整')}</strong><p>{t('15秒間、普段の声量で話しながらゲーム音を鳴らしてください。DiscordとBGMも鳴っていれば同時に調整します。')}</p></div>
+              {!canAutoAdjust && <span className="field-hint">{t('先にこのゲームを選択してOBSへ適用し、配信・録画を停止してください。')}</span>}
+              <button type="button" className="secondary-button" disabled={locked || !canAutoAdjust} onClick={() => void autoAdjustAudio()}>{calibrating ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}{t(calibrating ? '音声を測定・調整中…' : '15秒測定して自動調整')}</button>
+              {calibration && <div className="audio-calibration-result" role="status">
+                <strong>{t(calibrationNeedsAttention(calibration) ? '一部の音声は確認が必要です' : '音声設定を自動調整しました')}</strong>
+                <div>{calibration.readings.map((reading) => <div className={`audio-reading status-${reading.status}`} key={reading.role}><span>{t(audioRoleLabels[reading.role])}</span><code>{reading.appliedDb === undefined ? '—' : `${reading.appliedDb > 0 ? '+' : ''}${reading.appliedDb} dB`}</code><small>{t(reading.message)}</small></div>)}</div>
+                {calibration.warnings.slice(0, 3).map((warning) => <p className="field-hint" key={warning}>{warning}</p>)}
+              </div>}
+            </div>
           </AccordionSection>
           <AccordionSection title={t('録画')} summary={t('リプレイ {seconds}秒', { seconds: draft.recording.replayBufferSeconds })} open={openSections.has('recording')} onToggle={() => toggleSection('recording')}>
             <fieldset disabled={locked}><label>{t('録画先')}<div className="folder-control"><span title={draft.recording.directory}>{draft.recording.directory || t('未設定')}</span><button type="button" disabled={locked} onClick={() => void browseFolder()}>{t('参照')}</button></div></label><label>{t('リプレイ秒数')}<NumericInput disabled={locked} value={draft.recording.replayBufferSeconds} onValueChange={(value) => value !== undefined && patch('recording', { ...draft.recording, replayBufferSeconds: value })} /></label><div className="toggle-grid"><Toggle disabled={locked} checked={draft.recording.enabled} label={t('通常録画')} onChange={(value) => patch('recording', { ...draft.recording, enabled: value })} /><Toggle disabled={locked} checked={draft.recording.sourceRecord} label="Source Record" onChange={(value) => patch('recording', { ...draft.recording, sourceRecord: value })} /><Toggle disabled={locked} checked={draft.recording.verticalRecording} label="Aitum Vertical" onChange={(value) => patch('recording', { ...draft.recording, verticalRecording: value })} /></div></fieldset>
@@ -860,7 +889,7 @@ export default function App() {
     </main>}
     <ControlPanel status={status} selected={selected} busy={actionBusy} onChooseGame={chooseGame} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
     {setupOpen && <FirstRunSetup config={config} status={status} oauthStatus={oauthStatus} steamScan={steamScan} onSaveObs={saveSetupObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onLanguageChange={changeLanguage} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}
-    {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} readOnly={activeOperation} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(t('{game}を削除しますか？', { game: editing.displayName }))) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} />}
+    {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} readOnly={activeOperation} canAutoAdjust={status.obsConnected && status.selectedGameId === editing.id && !activeOperation && !status.streaming && !status.recording && !status.replayBuffer} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(t('{game}を削除しますか？', { game: editing.displayName }))) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} onAutoAdjust={async (profile) => { const result = await api.autoAdjustAudio(profile.id, profile.audio); setProfiles((current) => current.map((item) => item.id === result.profile.id ? result.profile : item)); setEditing(result.profile); setStatus(await api.status()); const needsAttention = calibrationNeedsAttention(result); setToast({ kind: needsAttention ? 'warning' : 'success', text: needsAttention ? result.warnings[0] ?? '一部の音声は確認が必要です' : '音声設定を自動調整しました' }); return result }} />}
     {adding && <AddGameModal initialGroup={tab === 'settings' ? 'pc' : tab} onClose={() => setAdding(false)} onCreate={(profile) => { setAdding(false); setEditing(profile) }} />}
     <div className="toast-stack" aria-live="polite">{toast && <div className={`toast ${toast.kind}`}><StatusDot tone={toast.kind === 'success' ? 'live' : toast.kind === 'error' ? 'error' : 'pending'} /><span>{t(toast.text, toast.values)}</span><button aria-label={t('通知を閉じる')} onClick={() => setToast(null)}><X size={14} /></button></div>}</div>
   </div></div></I18nProvider>
