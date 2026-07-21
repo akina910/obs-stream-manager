@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import sharp from 'sharp'
@@ -53,6 +53,46 @@ describe('CommonTemplateService', () => {
     await store.saveConfig({ ...current, commonTemplate: { ...current.commonTemplate, enabled: true } })
 
     await expect(new CommonTemplateService(store).renderProfile(profile)).resolves.toMatchObject({ text: '<ARK & "Friends">' })
+  })
+
+  it('renders a transparent 1920x1080 template when no background image is registered', async () => {
+    const store = await templateStore()
+    const profile = createGameProfile('text-only', 'Text Only')
+    await store.saveProfile(profile)
+    const current = await store.getConfig()
+    await store.saveConfig({ ...current, commonTemplate: { ...current.commonTemplate, enabled: true, textTemplate: '{game}' } })
+
+    const rendered = await new CommonTemplateService(store).renderProfile(profile)
+
+    expect(rendered).not.toBeNull()
+    await expect(sharp(rendered!.filename).metadata()).resolves.toMatchObject({ width: 1920, height: 1080, format: 'png' })
+  })
+
+  it('keeps save and apply-all as separate operations', async () => {
+    const store = await templateStore()
+    await store.saveProfile(createGameProfile('save-without-apply', 'Save Without Apply'))
+    const service = new CommonTemplateService(store)
+    const current = await store.getConfig()
+    const settings = CommonTemplateSettingsSchema.parse({ ...current.commonTemplate, enabled: true })
+
+    await service.saveSettings(settings)
+
+    await expect(stat(path.join(store.dataDir, 'templates', 'common', 'rendered', 'save-without-apply.png'))).rejects.toThrow()
+    await expect(service.renderAll()).resolves.toHaveLength(1)
+  })
+
+  it('reports the game names when apply-all cannot render profiles', async () => {
+    const store = await templateStore()
+    await store.saveProfile(createGameProfile('first-failure', 'First Failure'))
+    await store.saveProfile(createGameProfile('second-failure', 'Second Failure'))
+    const current = await store.getConfig()
+    await store.saveConfig({ ...current, commonTemplate: { ...current.commonTemplate, enabled: true } })
+    const renderedPath = path.join(store.dataDir, 'templates', 'common', 'rendered')
+    await rm(renderedPath, { recursive: true, force: true })
+    await mkdir(path.dirname(renderedPath), { recursive: true })
+    await writeFile(renderedPath, 'not a directory')
+
+    await expect(new CommonTemplateService(store).renderAll()).rejects.toThrow(/First Failure.*Second Failure/)
   })
 
   it('serializes background mutations so their rendered directories cannot race', async () => {

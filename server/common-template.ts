@@ -83,8 +83,9 @@ export class CommonTemplateService {
     const template = config.commonTemplate
     if (!template.enabled) return null
     const background = this.store.getCommonTemplateImagePath(config)
-    if (!background) throw new Error('共通テンプレート画像が登録されていません')
-    const backgroundBytes = await readFile(background)
+    const backgroundBytes = background
+      ? await readFile(background)
+      : await sharp({ create: { width: 1920, height: 1080, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer()
     const metadata = await sharp(backgroundBytes).metadata()
     return this.renderWith(template, backgroundBytes, metadata.width ?? 1920, metadata.height ?? 1080, profile, now)
   }
@@ -94,15 +95,28 @@ export class CommonTemplateService {
     const template = config.commonTemplate
     if (!template.enabled) return []
     const background = this.store.getCommonTemplateImagePath(config)
-    if (!background) throw new Error('共通テンプレート画像が登録されていません')
-    const backgroundBytes = await readFile(background)
+    const backgroundBytes = background
+      ? await readFile(background)
+      : await sharp({ create: { width: 1920, height: 1080, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer()
     const metadata = await sharp(backgroundBytes).metadata()
     const width = metadata.width ?? 1920
     const height = metadata.height ?? 1080
     const profiles = await this.store.listProfiles()
     const rendered: CommonTemplateRender[] = []
+    const failedProfiles: GameProfile[] = []
     for (let index = 0; index < profiles.length; index += 4) {
-      rendered.push(...await Promise.all(profiles.slice(index, index + 4).map((profile) => this.renderWith(template, backgroundBytes, width, height, profile, now))))
+      const batch = profiles.slice(index, index + 4)
+      const settled = await Promise.allSettled(batch.map((profile) => this.renderWith(template, backgroundBytes, width, height, profile, now)))
+      settled.forEach((result, resultIndex) => {
+        const profile = batch[resultIndex]
+        if (result.status === 'fulfilled') rendered.push(result.value)
+        else if (profile) failedProfiles.push(profile)
+      })
+    }
+    if (failedProfiles.length > 0) {
+      const visibleNames = failedProfiles.slice(0, 10).map((profile) => profile.displayName)
+      const remaining = failedProfiles.length - visibleNames.length
+      throw Object.assign(new Error(`共通テンプレートを反映できなかったゲーム: ${visibleNames.join('、')}${remaining > 0 ? `、ほか${remaining}件` : ''}`), { statusCode: 500 })
     }
     return rendered
   }
@@ -131,9 +145,6 @@ export class CommonTemplateService {
   saveSettings(settings: CommonTemplateSettings, beforeSave?: (previousConfig: AppConfig, nextConfig: AppConfig) => Promise<void>): Promise<{ previousConfig: AppConfig; savedConfig: AppConfig }> {
     return this.exclusive(async () => {
       const previousConfig = await this.store.getConfig()
-      if (settings.enabled && !previousConfig.commonTemplate.imageFilename) {
-        throw Object.assign(new Error('有効化する前に共通テンプレート画像を登録してください'), { statusCode: 400 })
-      }
       const nextConfig: AppConfig = {
         ...previousConfig,
         commonTemplate: {
@@ -145,7 +156,6 @@ export class CommonTemplateService {
       }
       if (beforeSave) await beforeSave(previousConfig, nextConfig)
       const savedConfig = await this.store.saveConfig(nextConfig)
-      if (savedConfig.commonTemplate.enabled) await this.renderAllUnlocked()
       return { previousConfig, savedConfig }
     })
   }
@@ -153,7 +163,6 @@ export class CommonTemplateService {
   saveBackground(bytes: Uint8Array, mime: string, originalName?: string): Promise<CommonTemplateConfig> {
     return this.exclusive(async () => {
       const template = await this.store.saveCommonTemplateImage(bytes, mime, originalName)
-      if (template.enabled) await this.renderAllUnlocked()
       return template
     })
   }

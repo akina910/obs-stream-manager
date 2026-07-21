@@ -7,7 +7,7 @@ describe('BgmLibrarySection', () => {
     const html = renderToStaticMarkup(<BgmLibrarySection obsConnected />)
 
     expect(html).toContain('BGMストック')
-    expect(html).toContain('BGMを追加')
+    expect(html).toContain('曲を追加')
     expect(html).toContain('BGMストックを読み込んでいます')
     expect(html).toContain('accept=".mp3,.wav,.ogg,.flac,.m4a')
     expect(html).toContain('disabled=""')
