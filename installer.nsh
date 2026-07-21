@@ -5,6 +5,17 @@
   FileWrite $0 "installed"
   FileClose $0
   WriteRegStr HKCU "Software\OBS Stream Manager" "ExecutablePath" "$INSTDIR\OBS Stream Manager.exe"
+
+  ; An upgrade runs the previous uninstaller first, which removes its OBS plugin.
+  ; Restore the bundled plugin here so OBS can launch the companion before the
+  ; user has manually opened the newly installed application.
+  ReadEnvStr $1 "ProgramData"
+  StrCmp $1 "" obsPluginInstallDone
+  CreateDirectory "$1\obs-studio\plugins\obs-stream-manager-output\bin\64bit"
+  CreateDirectory "$1\obs-studio\plugins\obs-stream-manager-output\data\locale"
+  CopyFiles /SILENT "$INSTDIR\resources\obs-plugin\bin\64bit\obs-stream-manager-output.dll" "$1\obs-studio\plugins\obs-stream-manager-output\bin\64bit\obs-stream-manager-output.dll"
+  CopyFiles /SILENT "$INSTDIR\resources\obs-plugin\data\locale\en-US.ini" "$1\obs-studio\plugins\obs-stream-manager-output\data\locale\en-US.ini"
+  obsPluginInstallDone:
 !macroend
 
 !macro customUnInstall

@@ -11,6 +11,7 @@ import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
 import { ObsController } from './obs.js'
 import { OAuthManager } from './oauth.js'
+import { youtubeOAuthCallbackHtml } from './oauth-callback.js'
 import { StreamOrchestrator } from './orchestrator.js'
 import { PlatformServices } from './platforms.js'
 import { getDataDirectory } from './paths.js'
@@ -93,7 +94,7 @@ app.get<{ Querystring: { code?: string; state?: string; error?: string } }>('/ap
   if (request.query.error) throw new Error(`OAuth authorization failed: ${request.query.error}`)
   if (!request.query.code || !request.query.state) throw new Error('OAuth callback is incomplete')
   const openerOrigin = await oauth.exchange('youtube', request.query.code, request.query.state)
-  return reply.type('text/html').send(`<!doctype html><meta charset="utf-8"><title>認証完了</title><body style="background:#0b0d12;color:#fff;font-family:sans-serif;padding:40px"><h1>YouTube 接続が完了しました</h1><p>このウィンドウは自動で閉じます。</p><script>window.opener?.postMessage({type:"oauth-complete",provider:"youtube"},${JSON.stringify(openerOrigin)});setTimeout(()=>window.close(),800)</script></body>`)
+  return reply.type('text/html; charset=utf-8').send(youtubeOAuthCallbackHtml(openerOrigin))
 })
 app.get<{ Params: { requestId: string } }>('/api/oauth/twitch/device/:requestId', async (request) => oauth.pollTwitch(request.params.requestId))
 app.get('/api/profiles', async () => store.listProfiles())

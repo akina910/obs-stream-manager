@@ -125,6 +125,14 @@ describe('desktop integration lifecycle', () => {
     expect(installer).toContain('DeleteRegKey HKCU "Software\\OBS Stream Manager"')
   })
 
+  it('restores the OBS plugin during install so OBS can start the companion immediately after an upgrade', async () => {
+    const installer = await readFile(new URL('../installer.nsh', import.meta.url), 'utf8')
+
+    expect(installer).toContain('ReadEnvStr $1 "ProgramData"')
+    expect(installer).toContain('CopyFiles /SILENT "$INSTDIR\\resources\\obs-plugin\\bin\\64bit\\obs-stream-manager-output.dll"')
+    expect(installer).toContain('$1\\obs-studio\\plugins\\obs-stream-manager-output\\bin\\64bit\\obs-stream-manager-output.dll')
+  })
+
   it('lets the installed OBS plugin start the companion before the dock is loaded', async () => {
     const plugin = await readFile(new URL('../native/obs-stream-manager-output/src/plugin-main.c', import.meta.url), 'utf8')
     expect(plugin).toContain('RegGetValueW(HKEY_CURRENT_USER')
