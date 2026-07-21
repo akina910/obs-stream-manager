@@ -277,4 +277,23 @@ describe('DataStore', () => {
     expect(result.profiles.find((profile) => profile.library.steamAppId === 777777)?.id).toBe('steam_777777')
     expect(result.profiles.filter((profile) => profile.displayName === 'Duplicate Game' && profile.library.steamAppId === undefined)).toHaveLength(2)
   })
+
+  it('backs up and restores the shared stream template image and settings', async () => {
+    const store = await createStore()
+    const image = await sharp({ create: { width: 640, height: 360, channels: 4, background: '#334455' } }).png().toBuffer()
+    await store.saveCommonTemplateImage(image, 'image/png', 'shared-screen.png')
+    const current = await store.getConfig()
+    await store.saveConfig({ ...current, commonTemplate: { ...current.commonTemplate, enabled: true, textTemplate: 'LIVE: {game}' } })
+
+    const backup = await store.exportBackup()
+    expect(backup.commonTemplateImage).toMatchObject({ mime: 'image/png', originalName: 'shared-screen.png' })
+    await store.removeCommonTemplateImage()
+    await store.importBackup(backup)
+
+    const restored = await store.getConfig()
+    expect(restored.commonTemplate).toMatchObject({ enabled: true, textTemplate: 'LIVE: {game}', imageOriginalName: 'shared-screen.png' })
+    const filename = store.getCommonTemplateImagePath(restored)
+    expect(filename).not.toBeNull()
+    await expect(readFile(filename!)).resolves.toEqual(image)
+  })
 })

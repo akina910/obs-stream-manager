@@ -14,6 +14,7 @@ export function createGameProfile(id: string, displayName: string, platformGroup
     platformGroup,
     favorite: false,
     hidden: false,
+    presentation: { templateLabel: '' },
     library: { gamePass: false, exception: platformGroup === 'exception', installed: false },
     capture: {
       preferred: capture,
