@@ -66,4 +66,89 @@ describe('BgmLibraryStore', () => {
 
     await expect(readFile(orphan)).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  it('exports and restores track files and the selected track', async () => {
+    const source = await createLibrary()
+    const first = (await source.addTrack('first.mp3', mp3('first'))).tracks[0]
+    const second = (await source.addTrack('second.mp3', mp3('second'))).tracks[1]
+    await source.selectTrack(second.id)
+    const backup = await source.exportBackup()
+
+    const destination = await createLibrary()
+    await destination.addTrack('old.mp3', mp3('old'))
+    const restored = await destination.importPreparedBackup(destination.prepareBackupImport(backup))
+
+    expect(restored.tracks.map(({ name }) => name)).toEqual(['first', 'second'])
+    expect(restored.tracks.find(({ id }) => id === restored.selectedTrackId)?.name).toBe('second')
+    expect(restored.tracks.map(({ id }) => id)).not.toContain(first.id)
+    await expect(readFile(destination.trackPath(restored.tracks[0]))).resolves.toEqual(mp3('first'))
+    await expect(readFile(destination.trackPath(restored.tracks[1]))).resolves.toEqual(mp3('second'))
+  })
+
+  it('rejects corrupt backup audio before replacing the current library', async () => {
+    const source = await createLibrary()
+    const track = (await source.addTrack('first.mp3', mp3('first'))).tracks[0]
+    const backup = await source.exportBackup()
+    backup.tracks[track.id].data = Buffer.from('not audio').toString('base64')
+    backup.library.tracks[0].size = Buffer.byteLength('not audio')
+
+    const destination = await createLibrary()
+    const before = await destination.addTrack('keep.mp3', mp3('keep'))
+
+    expect(() => destination.prepareBackupImport(backup)).toThrow('有効な音声')
+    expect(await destination.getLibrary()).toEqual(before)
+  })
+
+  it('keeps the previous library and files when a prepared import is rolled back', async () => {
+    const source = await createLibrary()
+    await source.addTrack('incoming.mp3', mp3('incoming'))
+    const prepared = source.prepareBackupImport(await source.exportBackup())
+
+    const destination = await createLibrary()
+    const previous = await destination.addTrack('keep.mp3', mp3('keep'))
+    const previousTrack = previous.tracks[0]
+    const transaction = await destination.beginPreparedBackupImport(prepared)
+    expect(transaction.library.tracks[0]?.name).toBe('incoming')
+
+    await transaction.rollback()
+
+    expect(await destination.getLibrary()).toEqual(previous)
+    await expect(readFile(destination.trackPath(previousTrack))).resolves.toEqual(mp3('keep'))
+    await expect(readFile(destination.trackPath(transaction.library.tracks[0]))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('retains previous files across restart until new playback can safely release them', async () => {
+    const source = await createLibrary()
+    await source.addTrack('incoming.mp3', mp3('incoming'))
+    const prepared = source.prepareBackupImport(await source.exportBackup())
+
+    const destination = await createLibrary()
+    const previous = await destination.addTrack('keep.mp3', mp3('keep'))
+    const previousPath = destination.trackPath(previous.tracks[0])
+    const transaction = await destination.beginPreparedBackupImport(prepared)
+    await transaction.commit({ removePreviousFiles: false })
+
+    await expect(readFile(previousPath)).resolves.toEqual(mp3('keep'))
+    const restarted = new BgmLibraryStore(destination.dataDir)
+    await restarted.initialize()
+    await expect(readFile(previousPath)).resolves.toEqual(mp3('keep'))
+
+    await restarted.releaseRetainedFiles()
+    await expect(readFile(previousPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('retains a deleted selected track until OBS can switch to another file', async () => {
+    const library = await createLibrary()
+    const track = (await library.addTrack('playing.mp3', mp3('playing'))).tracks[0]
+    await library.selectTrack(track.id)
+    const filename = library.trackPath(track)
+
+    const removed = await library.removeTrack(track.id, { retainFile: true })
+
+    expect(removed.library.tracks).toEqual([])
+    expect(removed.library.selectedTrackId).toBeNull()
+    await expect(readFile(filename)).resolves.toEqual(mp3('playing'))
+    await library.releaseRetainedFiles()
+    await expect(readFile(filename)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
 })

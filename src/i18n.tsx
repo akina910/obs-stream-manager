@@ -245,6 +245,7 @@ export const englishTranslations: Record<string, string> = {
   'セットアップを開く': 'Open setup',
   'バックアップ / 復元': 'Backup / Restore',
   'アプリ設定・ゲームプロファイル・サムネイルを書き出します。OBS本体の設定と、OAuthトークンなどの秘密情報は含まれません。': 'Export app settings, game profiles, and thumbnails. OBS settings and secrets such as OAuth tokens are excluded.',
+  'アプリ設定・ゲームプロファイル・サムネイル・共通テンプレート・BGMを書き出します。OBS本体の設定と、OAuthトークンなどの秘密情報は含まれません。': 'Export app settings, game profiles, thumbnails, the shared template, and BGM tracks. OBS settings and secrets such as OAuth tokens are excluded.',
   '書き出し': 'Export',
   '復元': 'Restore',
   'ようこそ': 'Welcome',

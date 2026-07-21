@@ -169,6 +169,12 @@ export const BgmLibrarySchema = z.object({
 
 export type BgmLibrary = z.infer<typeof BgmLibrarySchema>
 
+export type BgmBackup = {
+  version: 1
+  library: BgmLibrary
+  tracks: Record<string, { data: string }>
+}
+
 export const BgmPlaybackSchema = z.object({
   state: z.enum(['playing', 'paused', 'stopped', 'unavailable']),
   cursorMs: z.number().nonnegative().nullable(),

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import sharp from 'sharp'
@@ -102,6 +102,18 @@ describe('DataStore', () => {
     await expect(store.importBackup(backup)).resolves.toBeUndefined()
     expect(await store.getProfile('temporary_game')).toBeNull()
     expect((await store.getProfile(profile.id))?.state.thumbnailFilename).toBe('default.png')
+  })
+
+  it('includes supplied BGM data in the returned and locally saved backup', async () => {
+    const store = await createStore()
+    const bgm = { version: 1 as const, library: { version: 1 as const, tracks: [], selectedTrackId: null }, tracks: {} }
+
+    const backup = await store.exportBackup({ bgm })
+
+    expect(backup.bgm).toEqual(bgm)
+    const filenames = await readdir(path.join(store.dataDir, 'backups'))
+    const saved = JSON.parse(await readFile(path.join(store.dataDir, 'backups', filenames[0]), 'utf8')) as { bgm?: unknown }
+    expect(saved.bgm).toEqual(bgm)
   })
 
   it('removes untouched legacy starters restored from an old backup', async () => {

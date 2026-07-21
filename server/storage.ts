@@ -2,7 +2,7 @@ import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 
 import path from 'node:path'
 import sharp from 'sharp'
 import YAML from 'yaml'
-import { AppConfigSchema, GameProfileSchema, type AppConfig, type GameProfile, type PlatformGroup } from '../shared/contracts.js'
+import { AppConfigSchema, GameProfileSchema, type AppConfig, type BgmBackup, type GameProfile, type PlatformGroup } from '../shared/contracts.js'
 import type { CommonTemplateConfig } from '../shared/common-template.js'
 import { createPcProfile, defaultConfig, starterProfiles } from './defaults.js'
 import { runtimeDirectories } from './paths.js'
@@ -302,7 +302,7 @@ export class DataStore {
     return path.join(this.dataDir, 'thumbnails', profile.platformGroup, profile.id, path.basename(profile.state.thumbnailFilename))
   }
 
-  async exportBackup(): Promise<{ version: 1; exportedAt: string; config: AppConfig; profiles: GameProfile[]; thumbnails: Record<string, { mime: string; data: string }>; commonTemplateImage?: { mime: string; data: string; originalName?: string } }> {
+  async exportBackup(additional: { bgm?: BgmBackup } = {}): Promise<{ version: 1; exportedAt: string; config: AppConfig; profiles: GameProfile[]; thumbnails: Record<string, { mime: string; data: string }>; commonTemplateImage?: { mime: string; data: string; originalName?: string }; bgm?: BgmBackup }> {
     const profiles = await this.listProfiles()
     const currentConfig = await this.getConfig()
     const config: AppConfig = {
@@ -329,7 +329,7 @@ export class DataStore {
         originalName: config.commonTemplate.imageOriginalName,
       }
     }
-    const backup = { version: 1 as const, exportedAt: new Date().toISOString(), config, profiles, thumbnails, ...(commonTemplateImage ? { commonTemplateImage } : {}) }
+    const backup = { version: 1 as const, exportedAt: new Date().toISOString(), config, profiles, thumbnails, ...(commonTemplateImage ? { commonTemplateImage } : {}), ...(additional.bgm ? { bgm: additional.bgm } : {}) }
     await atomicWrite(path.join(this.dataDir, 'backups', `backup-${backup.exportedAt.replaceAll(':', '-')}.json`), JSON.stringify(backup, null, 2))
     return backup
   }

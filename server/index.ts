@@ -7,7 +7,7 @@ import Fastify from 'fastify'
 import { z, ZodError } from 'zod'
 import { CommonTemplateSettingsSchema } from '../shared/common-template.js'
 import { AppConfigSchema, AudioCalibrationRequestSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
-import { BgmLibraryStore, maxBgmTrackBytes } from './bgm-library.js'
+import { BgmLibraryStore, maxBackupRequestBytes, maxBgmTrackBytes } from './bgm-library.js'
 import { CaptureDetector } from './capture.js'
 import { CommonTemplateService } from './common-template.js'
 import { selectFolder } from './folder-picker.js'
@@ -104,6 +104,7 @@ app.post<{ Params: { id: string } }>('/api/bgm/:id/play', async (request) => {
   const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
   await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25)
   const library = await bgm.selectTrack(track.id)
+  await bgm.releaseRetainedFiles().catch(() => undefined)
   await logger.write('bgm.played', { trackId: track.id, filename: track.originalName })
   return { ...library, playback: await obs.bgmPlaybackStatus(config) }
 })
@@ -125,8 +126,16 @@ app.post<{ Body: { action?: string } }>('/api/bgm/control', async (request) => {
 app.delete<{ Params: { id: string } }>('/api/bgm/:id', async (request) => {
   const config = await store.getConfig()
   const library = await bgm.getLibrary()
-  if (library.selectedTrackId === request.params.id) await obs.clearBgm(config).catch(() => undefined)
-  const removed = await bgm.removeTrack(request.params.id)
+  let cleared = true
+  if (library.selectedTrackId === request.params.id) {
+    try {
+      await obs.clearBgm(config)
+    } catch (error) {
+      cleared = false
+      await logger.write('bgm.delete-clear-failed', { trackId: request.params.id, message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const removed = await bgm.removeTrack(request.params.id, { retainFile: !cleared })
   await logger.write('bgm.removed', { trackId: removed.removed.id, filename: removed.removed.originalName })
   return { ...removed.library, playback: await obs.bgmPlaybackStatus(config) }
 })
@@ -342,15 +351,41 @@ app.post('/api/steam/sync', async () => {
   await orchestrator.assertNotStreaming()
   return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('manual'))
 })
-app.post('/api/backup/export', async () => commonTemplates.withExclusiveAccess(() => store.exportBackup()))
-app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
+app.post('/api/backup/export', async () => commonTemplates.withExclusiveAccess(async () => store.exportBackup({ bgm: await bgm.exportBackup() })))
+app.post<{ Body: unknown }>('/api/backup/import', { bodyLimit: maxBackupRequestBytes }, async (request) => {
   await orchestrator.assertNotStreaming()
+  if (!request.body || typeof request.body !== 'object') throw new Error('Invalid backup')
+  const backup = request.body as Record<string, unknown>
+  const preparedBgm = Object.prototype.hasOwnProperty.call(backup, 'bgm') ? bgm.prepareBackupImport(backup.bgm) : null
   const providerConfig = await store.getConfig()
-  await commonTemplates.withExclusiveAccess(async () => {
-    await store.importBackup(request.body)
-    const importedConfig = await store.getConfig()
-    await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
-  })
+  const bgmTransaction = preparedBgm ? await bgm.beginPreparedBackupImport(preparedBgm) : null
+  try {
+    await commonTemplates.withExclusiveAccess(async () => {
+      await store.importBackup(request.body)
+      const importedConfig = await store.getConfig()
+      await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+    })
+    if (bgmTransaction) {
+      let cleared = false
+      try {
+        await obs.clearBgm(providerConfig)
+        cleared = true
+      } catch (error) {
+        await logger.write('bgm.restore-clear-failed', { message: error instanceof Error ? error.message : String(error) })
+      }
+      await bgmTransaction.commit({ removePreviousFiles: cleared })
+    }
+  } catch (error) {
+    if (!bgmTransaction) throw error
+    try {
+      await bgmTransaction.rollback()
+    } catch (rollbackError) {
+      const primary = error instanceof Error ? error : new Error(String(error))
+      primary.message = `${primary.message} / BGMのロールバックにも失敗しました: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+      throw primary
+    }
+    throw error
+  }
   await obs.disconnect()
   await orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
   return { ok: true }
