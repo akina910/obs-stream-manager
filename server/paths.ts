@@ -8,5 +8,5 @@ export function getDataDirectory(): string {
   return path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'), 'obs-stream-manager')
 }
 
-export const runtimeDirectories = ['config', 'profiles/pc', 'profiles/switch', 'profiles/exception', 'thumbnails', 'descriptions', 'logs', 'backups', 'database'] as const
+export const runtimeDirectories = ['config', 'profiles/pc', 'profiles/switch', 'profiles/exception', 'thumbnails', 'templates/common/rendered', 'descriptions', 'logs', 'backups', 'database'] as const
 

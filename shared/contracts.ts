@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { CommonTemplateConfigSchema, defaultCommonTemplateConfig } from './common-template.js'
 
 export const PlatformGroupSchema = z.enum(['pc', 'switch', 'exception'])
 export type PlatformGroup = z.infer<typeof PlatformGroupSchema>
@@ -23,6 +24,9 @@ export const GameProfileSchema = z.object({
   platformGroup: PlatformGroupSchema,
   favorite: z.boolean().default(false),
   hidden: z.boolean().default(false),
+  presentation: z.object({
+    templateLabel: z.string().trim().max(100).default(''),
+  }).default({ templateLabel: '' }),
   coverUrl: z.string().url().optional(),
   library: z.object({
     steamAppId: z.number().int().positive().optional(),
@@ -115,6 +119,7 @@ export const AppConfigSchema = z.object({
     sourceRecord: z.boolean().default(true),
     verticalRecording: z.boolean().default(true),
   }),
+  commonTemplate: CommonTemplateConfigSchema.default(defaultCommonTemplateConfig),
   steam: z.object({
     steamId64: z.string().default(''),
     apiKeyStored: z.boolean().default(false),

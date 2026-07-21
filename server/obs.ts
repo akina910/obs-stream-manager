@@ -1,5 +1,6 @@
 import OBSWebSocket, { type OBSRequestTypes } from 'obs-websocket-js'
 import type { AppConfig, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import type { CommonTemplateRender } from './common-template.js'
 import { SecretStore } from './secrets.js'
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -458,6 +459,34 @@ export class ObsController {
       if (!applied) warnings.push(`リプレイバッファ時間 ${profile.recording.replayBufferSeconds} 秒をOBSプロファイルへ反映できませんでした`)
     }
     return warnings
+  }
+
+  async applyCommonTemplate(config: AppConfig, rendered: CommonTemplateRender): Promise<void> {
+    await this.connect(config)
+    try {
+      await this.obs.call('SetInputSettings', {
+        inputName: rendered.sourceName,
+        inputSettings: { file: rendered.filename },
+        overlay: true,
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new Error(`共通テンプレート用OBS画像ソース「${rendered.sourceName}」を更新できませんでした: ${detail}`)
+    }
+  }
+
+  async clearCommonTemplate(config: AppConfig, sourceName: string): Promise<void> {
+    await this.connect(config)
+    try {
+      await this.obs.call('SetInputSettings', {
+        inputName: sourceName,
+        inputSettings: { file: '' },
+        overlay: true,
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new Error(`共通テンプレート用OBS画像ソース「${sourceName}」をクリアできませんでした: ${detail}`)
+    }
   }
 
   async start(config: AppConfig, profile: GameProfile, selectedSource: string): Promise<string[]> {

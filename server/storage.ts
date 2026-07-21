@@ -3,6 +3,7 @@ import path from 'node:path'
 import sharp from 'sharp'
 import YAML from 'yaml'
 import { AppConfigSchema, GameProfileSchema, type AppConfig, type GameProfile, type PlatformGroup } from '../shared/contracts.js'
+import type { CommonTemplateConfig } from '../shared/common-template.js'
 import { createPcProfile, defaultConfig, starterProfiles } from './defaults.js'
 import { runtimeDirectories } from './paths.js'
 
@@ -17,6 +18,14 @@ async function validateThumbnail(bytes: Uint8Array, mime: string): Promise<{ ext
   const format = thumbnailFormats[mime]
   if (!format || !format.signature(bytes)) throw new Error('Only valid PNG, JPEG and WEBP images are accepted')
   await sharp(bytes, { limitInputPixels: 16_000_000 }).raw().toBuffer()
+  return format
+}
+
+async function validateCommonTemplateImage(bytes: Uint8Array, mime: string): Promise<{ ext: string }> {
+  if (bytes.byteLength > 12 * 1024 * 1024) throw new Error('Template image must be 12 MB or smaller')
+  const format = thumbnailFormats[mime]
+  if (!format || !format.signature(bytes)) throw new Error('Only valid PNG, JPEG and WEBP images are accepted')
+  await sharp(bytes, { limitInputPixels: 33_177_600 }).raw().toBuffer()
   return format
 }
 
@@ -119,6 +128,7 @@ export class DataStore {
     if (!profile) return false
     await rm(path.join(this.dataDir, 'profiles', profile.platformGroup, `${profile.id}.yaml`), { force: true })
     await rm(path.join(this.dataDir, 'thumbnails', profile.platformGroup, profile.id), { recursive: true, force: true })
+    await rm(path.join(this.dataDir, 'templates', 'common', 'rendered', `${profile.id}.png`), { force: true })
     return true
   }
 
@@ -156,6 +166,50 @@ export class DataStore {
         thumbnailLastError: undefined,
       },
     })
+  }
+
+  getCommonTemplateImagePath(config: AppConfig): string | null {
+    if (!config.commonTemplate.imageFilename) return null
+    return path.join(this.dataDir, 'templates', 'common', path.basename(config.commonTemplate.imageFilename))
+  }
+
+  async saveCommonTemplateImage(bytes: Uint8Array, mime: string, originalName?: string): Promise<CommonTemplateConfig> {
+    const format = await validateCommonTemplateImage(bytes, mime)
+    const directory = path.join(this.dataDir, 'templates', 'common')
+    await mkdir(directory, { recursive: true })
+    for (const old of ['background.png', 'background.jpg', 'background.webp']) await rm(path.join(directory, old), { force: true })
+    await rm(path.join(directory, 'rendered'), { recursive: true, force: true })
+    await mkdir(path.join(directory, 'rendered'), { recursive: true })
+    const filename = `background.${format.ext}`
+    await atomicWrite(path.join(directory, filename), bytes)
+    const config = await this.getConfig()
+    const next = await this.saveConfig({
+      ...config,
+      commonTemplate: {
+        ...config.commonTemplate,
+        imageFilename: filename,
+        imageOriginalName: originalName,
+        imageUpdatedAt: new Date().toISOString(),
+      },
+    })
+    return next.commonTemplate
+  }
+
+  async removeCommonTemplateImage(): Promise<CommonTemplateConfig> {
+    await rm(path.join(this.dataDir, 'templates', 'common'), { recursive: true, force: true })
+    await mkdir(path.join(this.dataDir, 'templates', 'common', 'rendered'), { recursive: true })
+    const config = await this.getConfig()
+    const next = await this.saveConfig({
+      ...config,
+      commonTemplate: {
+        ...config.commonTemplate,
+        enabled: false,
+        imageFilename: undefined,
+        imageOriginalName: undefined,
+        imageUpdatedAt: undefined,
+      },
+    })
+    return next.commonTemplate
   }
 
   async syncSteamLibrary(
@@ -248,7 +302,7 @@ export class DataStore {
     return path.join(this.dataDir, 'thumbnails', profile.platformGroup, profile.id, path.basename(profile.state.thumbnailFilename))
   }
 
-  async exportBackup(): Promise<{ version: 1; exportedAt: string; config: AppConfig; profiles: GameProfile[]; thumbnails: Record<string, { mime: string; data: string }> }> {
+  async exportBackup(): Promise<{ version: 1; exportedAt: string; config: AppConfig; profiles: GameProfile[]; thumbnails: Record<string, { mime: string; data: string }>; commonTemplateImage?: { mime: string; data: string; originalName?: string } }> {
     const profiles = await this.listProfiles()
     const currentConfig = await this.getConfig()
     const config: AppConfig = {
@@ -265,7 +319,17 @@ export class DataStore {
       const extension = path.extname(filename).toLowerCase()
       thumbnails[profile.id] = { mime: extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg', data: (await readFile(filename)).toString('base64') }
     }
-    const backup = { version: 1 as const, exportedAt: new Date().toISOString(), config, profiles, thumbnails }
+    const commonTemplateFilename = this.getCommonTemplateImagePath(config)
+    let commonTemplateImage: { mime: string; data: string; originalName?: string } | undefined
+    if (commonTemplateFilename && await exists(commonTemplateFilename)) {
+      const extension = path.extname(commonTemplateFilename).toLowerCase()
+      commonTemplateImage = {
+        mime: extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg',
+        data: (await readFile(commonTemplateFilename)).toString('base64'),
+        originalName: config.commonTemplate.imageOriginalName,
+      }
+    }
+    const backup = { version: 1 as const, exportedAt: new Date().toISOString(), config, profiles, thumbnails, ...(commonTemplateImage ? { commonTemplateImage } : {}) }
     await atomicWrite(path.join(this.dataDir, 'backups', `backup-${backup.exportedAt.replaceAll(':', '-')}.json`), JSON.stringify(backup, null, 2))
     return backup
   }
@@ -287,6 +351,14 @@ export class DataStore {
       await validateThumbnail(bytes, mime)
       thumbnails.set(profile.id, { mime, bytes })
     }
+    let commonTemplateImage: { mime: string; bytes: Buffer; originalName?: string } | undefined
+    if (backup.commonTemplateImage && typeof backup.commonTemplateImage === 'object') {
+      const { mime, data, originalName } = backup.commonTemplateImage as Record<string, unknown>
+      if (typeof mime !== 'string' || typeof data !== 'string' || (originalName !== undefined && typeof originalName !== 'string')) throw new Error('Invalid common template image backup')
+      const bytes = Buffer.from(data, 'base64')
+      await validateCommonTemplateImage(bytes, mime)
+      commonTemplateImage = { mime, bytes, ...(typeof originalName === 'string' ? { originalName } : {}) }
+    }
 
     await Promise.all(['pc', 'switch', 'exception'].map(async (group) => {
       const directory = path.join(this.dataDir, 'profiles', group)
@@ -295,7 +367,19 @@ export class DataStore {
     }))
     await rm(path.join(this.dataDir, 'thumbnails'), { recursive: true, force: true })
     await mkdir(path.join(this.dataDir, 'thumbnails'), { recursive: true })
-    await this.saveConfig(config)
+    await rm(path.join(this.dataDir, 'templates', 'common'), { recursive: true, force: true })
+    const cleanConfig = commonTemplateImage ? config : {
+      ...config,
+      commonTemplate: {
+        ...config.commonTemplate,
+        enabled: false,
+        imageFilename: undefined,
+        imageOriginalName: undefined,
+        imageUpdatedAt: undefined,
+      },
+    }
+    await this.saveConfig(cleanConfig)
+    if (commonTemplateImage) await this.saveCommonTemplateImage(commonTemplateImage.bytes, commonTemplateImage.mime, commonTemplateImage.originalName)
     for (const profile of profiles) {
       const thumbnail = thumbnails.get(profile.id)
       const cleanProfile = thumbnail ? profile : { ...profile, state: { ...profile.state, thumbnailFilename: undefined } }

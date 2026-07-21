@@ -5,8 +5,10 @@ import cors from '@fastify/cors'
 import fastifyStatic from '@fastify/static'
 import Fastify from 'fastify'
 import { ZodError } from 'zod'
+import { CommonTemplateSettingsSchema } from '../shared/common-template.js'
 import { AppConfigSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
 import { CaptureDetector } from './capture.js'
+import { CommonTemplateService } from './common-template.js'
 import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
 import { ObsController } from './obs.js'
@@ -28,7 +30,8 @@ await provisionDistributorOAuth(store, secrets)
 const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets, 8_000, 45_000)
 const platforms = new PlatformServices(secrets, store)
-const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger)
+const commonTemplates = new CommonTemplateService(store)
+const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger, commonTemplates)
 await orchestrator.restoreSelection()
 obs.onStreamStateChanged((active) => orchestrator.handleObsStreamStateChanged(active))
 const listenPort = Number(process.env.PORT ?? 4317)
@@ -42,7 +45,7 @@ const allowedOAuthOpenerOrigins = new Set([
 const allowedMutationOrigins = new Set(allowedOAuthOpenerOrigins)
 const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpenerOrigins)
 
-export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
+export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 18 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
 
 app.addHook('onRequest', async (request, reply) => {
@@ -77,6 +80,50 @@ app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
 app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
 app.get('/api/status', async () => orchestrator.getStatus())
 app.get('/api/comments', async () => platforms.getComments())
+app.get('/api/templates/common', async () => (await store.getConfig()).commonTemplate)
+app.put<{ Body: unknown }>('/api/templates/common', async (request) => {
+  await orchestrator.assertNotStreaming()
+  const settings = CommonTemplateSettingsSchema.parse(request.body)
+  const { savedConfig } = await commonTemplates.saveSettings(settings, async (previousConfig, nextConfig) => {
+    const previous = previousConfig.commonTemplate
+    const next = nextConfig.commonTemplate
+    if (!previous.enabled || (next.enabled && previous.obsSourceName === next.obsSourceName)) return
+    try { await obs.clearCommonTemplate(previousConfig, previous.obsSourceName) }
+    catch (error) {
+      await logger.write('common_template_clear_failed', { sourceName: previous.obsSourceName, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined)
+      throw error
+    }
+  })
+  return savedConfig.commonTemplate
+})
+app.get('/api/templates/common/image', async (_request, reply) => {
+  const image = await commonTemplates.readBackground()
+  if (!image) return reply.status(404).send({ error: '共通テンプレート画像が登録されていません' })
+  reply.header('cache-control', 'no-store')
+  reply.type(image.mime)
+  return reply.send(image.bytes)
+})
+app.post<{ Body: { mime: string; data: string; filename?: string } }>('/api/templates/common/image', async (request) => {
+  await orchestrator.assertNotStreaming()
+  return commonTemplates.saveBackground(Buffer.from(request.body.data, 'base64'), request.body.mime, request.body.filename)
+})
+app.delete('/api/templates/common/image', async () => {
+  await orchestrator.assertNotStreaming()
+  const { template } = await commonTemplates.removeBackground(async (previousConfig) => {
+    if (!previousConfig.commonTemplate.enabled) return
+    try { await obs.clearCommonTemplate(previousConfig, previousConfig.commonTemplate.obsSourceName) }
+    catch (error) {
+      await logger.write('common_template_clear_failed', { sourceName: previousConfig.commonTemplate.obsSourceName, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined)
+      throw error
+    }
+  })
+  return template
+})
+app.post('/api/templates/common/apply', async () => {
+  await orchestrator.assertNotStreaming()
+  const rendered = await commonTemplates.renderAll()
+  return { ok: true, rendered: rendered.length }
+})
 app.get('/api/oauth/status', async () => oauth.status())
 app.post<{ Params: { provider: 'youtube' | 'twitch' }; Body: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
   if (!['youtube', 'twitch'].includes(request.params.provider)) return reply.status(404).send({ error: 'Unknown OAuth provider' })
@@ -99,13 +146,13 @@ app.get<{ Params: { requestId: string } }>('/api/oauth/twitch/device/:requestId'
 app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
   await orchestrator.assertNotStreaming()
-  const profile = await store.saveProfile(GameProfileSchema.parse(request.body))
+  const profile = await commonTemplates.withExclusiveAccess(() => store.saveProfile(GameProfileSchema.parse(request.body)))
   await orchestrator.invalidateProfile(profile.id)
   return profile
 })
 app.delete<{ Params: { id: string } }>('/api/profiles/:id', async (request, reply) => {
   await orchestrator.assertNotStreaming()
-  if (!(await store.removeProfile(request.params.id))) return reply.status(404).send({ error: 'Profile not found' })
+  if (!(await commonTemplates.withExclusiveAccess(() => store.removeProfile(request.params.id)))) return reply.status(404).send({ error: 'Profile not found' })
   await orchestrator.invalidateProfile(request.params.id)
   return { ok: true }
 })
@@ -235,19 +282,21 @@ app.post('/api/steam/scan', async () => {
     if (statusCode !== 409) throw error
     return { profiles: await store.listProfiles(), owned: 0, installed: 0, created: 0, updated: 0, libraries: [], warnings: [], skipped: true }
   }
-  return syncSteamProfiles('automatic')
+  return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('automatic'))
 })
 app.post('/api/steam/sync', async () => {
   await orchestrator.assertNotStreaming()
-  return syncSteamProfiles('manual')
+  return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('manual'))
 })
-app.post('/api/backup/export', async () => store.exportBackup())
+app.post('/api/backup/export', async () => commonTemplates.withExclusiveAccess(() => store.exportBackup()))
 app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
   await orchestrator.assertNotStreaming()
   const providerConfig = await store.getConfig()
-  await store.importBackup(request.body)
-  const importedConfig = await store.getConfig()
-  await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+  await commonTemplates.withExclusiveAccess(async () => {
+    await store.importBackup(request.body)
+    const importedConfig = await store.getConfig()
+    await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+  })
   await obs.disconnect()
   await orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
   return { ok: true }

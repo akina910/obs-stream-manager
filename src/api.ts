@@ -1,4 +1,7 @@
 import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
+import type { CommonTemplateConfig, CommonTemplateSettings } from '../shared/common-template'
+
+export type { CommonTemplateSettings } from '../shared/common-template'
 
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
@@ -31,6 +34,11 @@ export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   status: () => request<RuntimeStatus>('/api/status'),
   comments: () => request<ChatMessage[]>('/api/comments'),
+  commonTemplate: () => request<CommonTemplateConfig>('/api/templates/common'),
+  saveCommonTemplate: (settings: CommonTemplateSettings) => request<CommonTemplateConfig>('/api/templates/common', { method: 'PUT', body: JSON.stringify(settings) }),
+  uploadCommonTemplateImage: (mime: string, data: string, filename: string) => request<CommonTemplateConfig>('/api/templates/common/image', { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
+  deleteCommonTemplateImage: () => request<CommonTemplateConfig>('/api/templates/common/image', { method: 'DELETE' }),
+  applyCommonTemplate: () => request<{ ok: true; rendered: number }>('/api/templates/common/apply', { method: 'POST', body: '{}' }),
   oauthStatus: () => request<OAuthConnectionStatuses>('/api/oauth/status'),
   oauthStart: (provider: OAuthProvider, openerOrigin: string) => request<OAuthStartResult>(`/api/oauth/${provider}/start`, { method: 'POST', body: JSON.stringify({ openerOrigin }) }),
   oauthPollTwitch: (requestId: string) => request<{ status: 'pending' | 'complete' }>(`/api/oauth/twitch/device/${encodeURIComponent(requestId)}`),

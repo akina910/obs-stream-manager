@@ -4,6 +4,7 @@ import { CaptureDetector } from './capture.js'
 import { ObsController } from './obs.js'
 import { PlatformServices } from './platforms.js'
 import { DataStore } from './storage.js'
+import type { CommonTemplateService } from './common-template.js'
 
 export type SelectionResult = ApplyResult & {
   services: Array<{ service: 'youtube' | 'twitch'; ok: boolean; message: string }>
@@ -28,6 +29,7 @@ export class StreamOrchestrator {
     private readonly capture: CaptureDetector,
     private readonly platforms: PlatformServices,
     private readonly logger: AppLogger,
+    private readonly commonTemplates?: CommonTemplateService,
   ) {}
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -95,6 +97,14 @@ export class StreamOrchestrator {
       const config = await this.store.getConfig()
       const detection = override && override !== 'auto' ? { method: override, warnings: [] } : await this.capture.detect(profile)
       const obsWarnings = await this.obs.applyProfile(config, profile, detection.method)
+      if (this.commonTemplates) {
+        try {
+          const renderedTemplate = await this.commonTemplates.renderProfile(profile)
+          if (renderedTemplate) await this.obs.applyCommonTemplate(config, renderedTemplate)
+        } catch (error) {
+          obsWarnings.push(error instanceof Error ? error.message : String(error))
+        }
+      }
       const services = await this.platforms.prepare(config, profile)
       const primaryService = config.features.youtube && profile.youtube.enabled
         ? 'youtube'
