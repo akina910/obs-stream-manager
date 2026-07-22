@@ -9,6 +9,68 @@ import type { PlatformServices } from './platforms.js'
 import type { DataStore } from './storage.js'
 
 describe('StreamOrchestrator operation exclusion', () => {
+  it('applies a running game profile automatically while OBS is idle', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      listProfiles: vi.fn().mockResolvedValue([profile]),
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({ obsConnected: true, streaming: false, recording: false, replayBuffer: false }),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ObsController
+    const capture = {
+      detectRunningProfile: vi.fn().mockResolvedValue({ profile, method: 'local', executableName: 'arkascended.exe' }),
+    } as unknown as CaptureDetector
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, capture, platforms, logger)
+
+    await expect(orchestrator.autoSelectRunningGame()).resolves.toMatchObject({
+      detected: true,
+      applied: true,
+      gameId: profile.id,
+      executableName: 'arkascended.exe',
+      captureMethod: 'local',
+    })
+    expect(obs.applyProfile).toHaveBeenCalledWith(config, profile, 'local')
+    expect(store.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ ui: expect.objectContaining({ lastSelectedGameId: profile.id }) }))
+    expect(logger.write).toHaveBeenCalledWith('profile.auto_detected', expect.objectContaining({ gameId: profile.id }))
+  })
+
+  it('rechecks OBS inside the exclusive section and never auto-applies during an active output', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      listProfiles: vi.fn().mockResolvedValue([profile]),
+      getConfig: vi.fn().mockResolvedValue(config),
+    } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({ obsConnected: true, streaming: true, recording: false, replayBuffer: false }),
+      applyProfile: vi.fn(),
+    } as unknown as ObsController
+    const capture = {
+      detectRunningProfile: vi.fn().mockResolvedValue({ profile, method: 'local', executableName: 'arkascended.exe' }),
+    } as unknown as CaptureDetector
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, capture, {} as PlatformServices, logger)
+
+    await expect(orchestrator.autoSelectRunningGame()).resolves.toMatchObject({ detected: true, applied: false, gameId: profile.id })
+    expect(obs.status).toHaveBeenCalledWith(config, null, null, true, null)
+    expect(obs.applyProfile).not.toHaveBeenCalled()
+  })
+
   it('keeps a Twitch bandwidth test mutually exclusive with normal stream startup', async () => {
     let releaseTest!: () => void
     const testBlocked = new Promise<never>((resolve) => { releaseTest = resolve as () => void })
@@ -72,7 +134,7 @@ describe('StreamOrchestrator operation exclusion', () => {
         warning: null,
         busy: true,
       }),
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       isStreaming: vi.fn().mockResolvedValue(false),
       testTwitchIngest: vi.fn(),
@@ -135,6 +197,77 @@ describe('StreamOrchestrator operation exclusion', () => {
     await expect(pendingReplay).resolves.toBeUndefined()
   })
 
+  it('lets a user operation wait for background audio recovery instead of failing with a busy error', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    profile.state.lastCaptureMethod = 'local'
+    profile.state.lastUsedAt = '2026-07-22T07:00:00.000Z'
+    config.ui.lastSelectedGameId = profile.id
+    const store = {
+      getConfig: vi.fn().mockResolvedValue(config),
+      listProfiles: vi.fn().mockResolvedValue([profile]),
+      getProfile: vi.fn().mockResolvedValue(profile),
+      saveConfig: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    let releaseAudio!: () => void
+    const audioBlocked = new Promise<void>((resolve) => { releaseAudio = resolve })
+    const ensureProfileAudio = vi.fn(async () => { await audioBlocked; return ['managed audio warning'] })
+    const switchScene = vi.fn().mockResolvedValue(undefined)
+    const obs = {
+      status: vi.fn(async (_config: unknown, selectedGameId: string | null, captureMethod: string | null, busy: boolean, warning: string | null) => ({
+        obsConnected: true,
+        streaming: false,
+        recording: false,
+        replayBuffer: false,
+        sourceRecord: false,
+        verticalRecording: false,
+        selectedGameId,
+        captureMethod,
+        currentScene: profile.obs.sceneName,
+        warning,
+        busy,
+      })),
+      ensureProfileAudio,
+      switchScene,
+    } as unknown as ObsController
+    const platforms = {
+      invalidateLiveStatus: vi.fn(),
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+        twitch: { state: 'offline', detail: 'offline', checkedAt: new Date().toISOString() },
+      }),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
+    ;(orchestrator as unknown as { warning: string | null }).warning = 'important existing warning'
+    await orchestrator.restoreSelection()
+
+    const pendingAudio = orchestrator.ensureSelectedAudio()
+    await vi.waitFor(() => expect(ensureProfileAudio).toHaveBeenCalledOnce())
+    const pendingScene = orchestrator.switchScene('20_TALK')
+    await Promise.resolve()
+    expect(switchScene).not.toHaveBeenCalled()
+
+    releaseAudio()
+    await expect(pendingAudio).resolves.toEqual({ applied: true, warnings: ['managed audio warning'] })
+    await expect(pendingScene).resolves.toBeUndefined()
+    expect(switchScene).toHaveBeenCalledOnce()
+    await orchestrator.getStatus()
+    expect(obs.status).toHaveBeenLastCalledWith(config, profile.id, 'local', false, 'important existing warning')
+
+    let releaseSecondAudio!: () => void
+    const secondAudioBlocked = new Promise<void>((resolve) => { releaseSecondAudio = resolve })
+    ensureProfileAudio.mockImplementationOnce(async () => { await secondAudioBlocked; return [] })
+    profile.audio.microphoneDb += 1
+    const staleAudio = orchestrator.ensureSelectedAudio()
+    await vi.waitFor(() => expect(ensureProfileAudio).toHaveBeenCalledTimes(2))
+    await orchestrator.invalidateProfile(profile.id)
+    releaseSecondAudio()
+
+    await expect(staleAudio).resolves.toEqual({ applied: false, warnings: [] })
+    await expect(orchestrator.getStatus()).resolves.toMatchObject({ selectedGameId: null, captureMethod: null })
+  })
+
   it('rejects profile and config changes until external live states have ended', async () => {
     const config = structuredClone(defaultConfig)
     const obs = {
@@ -187,9 +320,11 @@ describe('StreamOrchestrator selection recovery', () => {
       listProfiles: vi.fn().mockResolvedValue([older, latest]),
       getProfile: vi.fn(async (id: string) => id === latest.id ? latest : null),
     } as unknown as DataStore
+    let obsConnected = true
     const obs = {
+      ensureProfileAudio: vi.fn().mockResolvedValue([]),
       status: vi.fn(async (_config: unknown, selectedGameId: string | null, captureMethod: string | null) => ({
-        obsConnected: true,
+        obsConnected,
         streaming: false,
         recording: false,
         replayBuffer: false,
@@ -215,8 +350,17 @@ describe('StreamOrchestrator selection recovery', () => {
     await orchestrator.restoreSelection()
 
     await expect(orchestrator.getStatus()).resolves.toMatchObject({ selectedGameId: latest.id, captureMethod: 'local' })
+    await expect(orchestrator.ensureSelectedAudio()).resolves.toEqual({ applied: true, warnings: [] })
+    await expect(orchestrator.ensureSelectedAudio()).resolves.toEqual({ applied: true, warnings: [] })
+    expect(obs.ensureProfileAudio).toHaveBeenCalledOnce()
+    obsConnected = false
+    await orchestrator.getStatus()
+    obsConnected = true
+    await expect(orchestrator.ensureSelectedAudio()).resolves.toEqual({ applied: true, warnings: [] })
     expect(store.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ ui: expect.objectContaining({ lastSelectedGameId: latest.id }) }))
     expect(platforms.invalidateLiveStatus).toHaveBeenCalledOnce()
+    expect(obs.ensureProfileAudio).toHaveBeenCalledTimes(2)
+    expect(obs.ensureProfileAudio).toHaveBeenCalledWith(config, latest, 'local')
   })
 })
 
@@ -232,7 +376,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       isStreaming: vi.fn().mockResolvedValue(true),
@@ -267,7 +411,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
@@ -314,7 +458,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
@@ -354,7 +498,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
@@ -392,7 +536,7 @@ describe('StreamOrchestrator stream startup rollback', () => {
       saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
       start: vi.fn().mockResolvedValue([]),
       rollbackStart: vi.fn().mockResolvedValue([]),
@@ -437,9 +581,9 @@ describe('StreamOrchestrator OBS-triggered external sync', () => {
       saveConfig: vi.fn(async (value) => value),
     } as unknown as DataStore
     const obs = {
-      applyProfile: vi.fn().mockResolvedValue([]),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
-      startSecondaryTwitchForObsStream: vi.fn().mockResolvedValue(undefined),
+      startSecondaryTwitchForObsStream: vi.fn().mockResolvedValue([]),
       finishObsTriggeredStream: vi.fn().mockResolvedValue([]),
     } as unknown as ObsController
     const platforms = {

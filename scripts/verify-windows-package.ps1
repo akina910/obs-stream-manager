@@ -9,12 +9,16 @@ $port = 4317
 $testRoot = Join-Path $env:TEMP 'obs-stream-manager-package-verification-automated'
 $runtime = Join-Path $testRoot 'win-unpacked'
 $dataDirectory = Join-Path $testRoot 'data'
+$obsConfigDirectory = Join-Path $testRoot 'obs-studio'
+$obsPluginDirectory = Join-Path $testRoot 'obs-plugin'
 $secretService = 'obs-stream-manager-package-verification-automated'
 $secretMarker = 'VERIFY-SECRET-8f429421-2db8-47bb-af75-4f0731c7f1c2'
 $originalPath = $env:PATH
 $originalDataDirectory = $env:OBS_STREAM_MANAGER_DATA_DIR
 $originalSecretService = $env:OBS_STREAM_MANAGER_SECRET_SERVICE
 $originalDisableLoginItem = $env:OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM
+$originalObsConfigDirectory = $env:OBS_STREAM_MANAGER_OBS_CONFIG_DIR
+$originalObsPluginDirectory = $env:OBS_STREAM_MANAGER_OBS_PLUGIN_DIR
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
@@ -61,7 +65,9 @@ try {
   Assert-True ($resolvedTestRoot.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase)) 'Unsafe test directory'
   Assert-True (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) "Port $port is already in use"
   if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
-  New-Item -ItemType Directory -Path $testRoot, $dataDirectory | Out-Null
+  New-Item -ItemType Directory -Path $testRoot, $dataDirectory, (Join-Path $obsConfigDirectory 'plugin_config\obs-websocket') | Out-Null
+  Set-Content -LiteralPath (Join-Path $obsConfigDirectory 'global.ini') -Value "[General]`r`nName=PackageVerification`r`n`r`n[BasicWindow]`r`nExtraBrowserDocks=[]" -Encoding UTF8
+  Set-Content -LiteralPath (Join-Path $obsConfigDirectory 'user.ini') -Value "[General]`r`nName=PackageVerification`r`n`r`n[BasicWindow]`r`nExtraBrowserDocks=[]" -Encoding UTF8
   if ($PackageArchive) {
     $resolvedArchive = (Resolve-Path -LiteralPath $PackageArchive).Path
     Assert-True ([IO.Path]::GetExtension($resolvedArchive) -eq '.zip') 'Package archive must be a ZIP file'
@@ -125,6 +131,8 @@ try {
   $env:OBS_STREAM_MANAGER_DATA_DIR = $dataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $secretService
   $env:OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM = '1'
+  $env:OBS_STREAM_MANAGER_OBS_CONFIG_DIR = $obsConfigDirectory
+  $env:OBS_STREAM_MANAGER_OBS_PLUGIN_DIR = $obsPluginDirectory
   $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
   $results.nodeOnPath = [bool](Get-Command node -ErrorAction SilentlyContinue)
 
@@ -164,7 +172,10 @@ try {
   Start-Sleep -Seconds 1
   $results.closeKeepsDockAlive = [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) -and [bool](Get-Process -Id $primary.Id -ErrorAction SilentlyContinue)
 
-  $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
+  $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 60
+  $results.obsSetupAutomatic = $bootstrap.obsSetup.phase -eq 'ready' -and $bootstrap.obsSetup.dockConfigured -and $bootstrap.obsSetup.websocketConfigured
+  $results.obsDockRegistered = (Get-Content -LiteralPath (Join-Path $obsConfigDirectory 'user.ini') -Raw).Contains('"title":"Stream Manager"')
+  $results.obsPluginDeployed = Test-Path -LiteralPath (Join-Path $obsPluginDirectory 'bin\64bit\obs-stream-manager-output.dll')
   $oauthStatus = Invoke-RestMethod "http://127.0.0.1:$port/api/oauth/status" -TimeoutSec 10
   $providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
   if ($AllowMissingProviderOAuth) {
@@ -198,7 +209,7 @@ try {
     Start-Sleep -Milliseconds 250
   } while ((Get-Date) -lt $windowDeadline)
   $results.secondLaunchShowsWindow = [bool]$backgroundPrimary -and $backgroundPrimary.MainWindowHandle -ne 0
-  $restarted = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 10
+  $restarted = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 60
   $results.restartPersistence = $restarted.config.obs.startDelaySeconds -eq 7 -and $restarted.config.obs.passwordStored
   $results.languagePersistence = $restarted.config.ui.language -eq 'en'
 
@@ -218,4 +229,6 @@ try {
   $env:OBS_STREAM_MANAGER_DATA_DIR = $originalDataDirectory
   $env:OBS_STREAM_MANAGER_SECRET_SERVICE = $originalSecretService
   $env:OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM = $originalDisableLoginItem
+  $env:OBS_STREAM_MANAGER_OBS_CONFIG_DIR = $originalObsConfigDirectory
+  $env:OBS_STREAM_MANAGER_OBS_PLUGIN_DIR = $originalObsPluginDirectory
 }

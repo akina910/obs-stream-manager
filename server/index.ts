@@ -4,13 +4,18 @@ import { fileURLToPath } from 'node:url'
 import cors from '@fastify/cors'
 import fastifyStatic from '@fastify/static'
 import Fastify from 'fastify'
-import { ZodError } from 'zod'
-import { AppConfigSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
+import { z, ZodError } from 'zod'
+import { CommonTemplateSettingsSchema } from '../shared/common-template.js'
+import { AppConfigSchema, AudioCalibrationRequestSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
+import { BgmLibraryStore, maxBackupRequestBytes, maxBgmTrackBytes } from './bgm-library.js'
 import { CaptureDetector } from './capture.js'
+import { CommonTemplateService } from './common-template.js'
 import { selectFolder } from './folder-picker.js'
 import { AppLogger } from './logger.js'
+import { LocalObsProvisioner } from './local-obs-provisioning.js'
 import { ObsController } from './obs.js'
 import { OAuthManager } from './oauth.js'
+import { youtubeOAuthCallbackHtml } from './oauth-callback.js'
 import { StreamOrchestrator } from './orchestrator.js'
 import { PlatformServices } from './platforms.js'
 import { getDataDirectory } from './paths.js'
@@ -23,12 +28,17 @@ import { DataStore } from './storage.js'
 const dataDir = getDataDirectory()
 const store = new DataStore(dataDir)
 await store.initialize()
+const bgm = new BgmLibraryStore(dataDir)
+await bgm.initialize()
 const secrets = new SecretStore()
 await provisionDistributorOAuth(store, secrets)
+const localObs = new LocalObsProvisioner(store, secrets)
+if (process.env.NODE_ENV !== 'test') await localObs.start()
 const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets, 8_000, 45_000)
 const platforms = new PlatformServices(secrets, store)
-const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger)
+const commonTemplates = new CommonTemplateService(store)
+const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger, commonTemplates)
 await orchestrator.restoreSelection()
 obs.onStreamStateChanged((active) => orchestrator.handleObsStreamStateChanged(active))
 const listenPort = Number(process.env.PORT ?? 4317)
@@ -42,7 +52,7 @@ const allowedOAuthOpenerOrigins = new Set([
 const allowedMutationOrigins = new Set(allowedOAuthOpenerOrigins)
 const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpenerOrigins)
 
-export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 8 * 1024 * 1024 })
+export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 18 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
 
 app.addHook('onRequest', async (request, reply) => {
@@ -59,7 +69,7 @@ app.addHook('onSend', async (request, reply, payload) => {
   if (!request.url.startsWith('/api/')) {
     reply.header(
       'Content-Security-Policy',
-      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'",
+      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'",
     )
   }
   return payload
@@ -74,9 +84,110 @@ app.setErrorHandler((error, _request, reply) => {
 })
 
 app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
-app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus() }))
+app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus(), obsSetup: localObs.status() }))
 app.get('/api/status', async () => orchestrator.getStatus())
+app.get('/api/obs/setup-status', async () => localObs.status())
+app.post('/api/obs/prepare', async () => localObs.prepare())
 app.get('/api/comments', async () => platforms.getComments())
+app.get('/api/bgm', async () => ({ ...(await bgm.getLibrary()), playback: await obs.bgmPlaybackStatus(await store.getConfig()) }))
+app.post<{ Body: { filename?: string; data?: string } }>('/api/bgm', { bodyLimit: 70 * 1024 * 1024 }, async (request, reply) => {
+  const filename = typeof request.body?.filename === 'string' ? request.body.filename : ''
+  const encoded = typeof request.body?.data === 'string' ? request.body.data.replace(/\s/g, '') : ''
+  if (!filename || !encoded) return reply.status(400).send({ error: 'BGMファイルがありません' })
+  if (encoded.length > Math.ceil(maxBgmTrackBytes / 3) * 4 + 4) return reply.status(413).send({ error: 'BGMは50 MB以下にしてください' })
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return reply.status(400).send({ error: 'BGMファイルを読み込めませんでした' })
+  const bytes = Buffer.from(encoded, 'base64')
+  const library = await bgm.addTrack(filename, bytes)
+  await logger.write('bgm.added', { filename: path.basename(filename), size: bytes.byteLength })
+  return { ...library, playback: await obs.bgmPlaybackStatus(await store.getConfig()) }
+})
+app.post<{ Params: { id: string } }>('/api/bgm/:id/play', async (request) => {
+  const track = await bgm.getTrack(request.params.id)
+  if (!track) throw Object.assign(new Error('BGMが見つかりません'), { statusCode: 404 })
+  const config = await store.getConfig()
+  const runtime = await orchestrator.getStatus()
+  const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
+  await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25)
+  const library = await bgm.selectTrack(track.id)
+  await bgm.releaseRetainedFiles().catch(() => undefined)
+  await logger.write('bgm.played', { trackId: track.id, filename: track.originalName })
+  return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+})
+app.post<{ Body: { action?: string } }>('/api/bgm/control', async (request) => {
+  const action = z.enum(['play', 'pause', 'stop', 'restart']).parse(request.body?.action)
+  const config = await store.getConfig()
+  const library = await bgm.getLibrary()
+  if (action === 'play' || action === 'restart') {
+    const track = library.tracks.find((item) => item.id === library.selectedTrackId)
+    if (!track) throw Object.assign(new Error('再生するBGMを選択してください'), { statusCode: 409 })
+    const runtime = await orchestrator.getStatus()
+    const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
+    await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25, action === 'restart')
+  } else {
+    await obs.controlBgm(config, action)
+  }
+  return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+})
+app.delete<{ Params: { id: string } }>('/api/bgm/:id', async (request) => {
+  const config = await store.getConfig()
+  const library = await bgm.getLibrary()
+  let cleared = true
+  if (library.selectedTrackId === request.params.id) {
+    try {
+      await obs.clearBgm(config)
+    } catch (error) {
+      cleared = false
+      await logger.write('bgm.delete-clear-failed', { trackId: request.params.id, message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const removed = await bgm.removeTrack(request.params.id, { retainFile: !cleared })
+  await logger.write('bgm.removed', { trackId: removed.removed.id, filename: removed.removed.originalName })
+  return { ...removed.library, playback: await obs.bgmPlaybackStatus(config) }
+})
+app.get('/api/templates/common', async () => (await store.getConfig()).commonTemplate)
+app.put<{ Body: unknown }>('/api/templates/common', async (request) => {
+  await orchestrator.assertNotStreaming()
+  const settings = CommonTemplateSettingsSchema.parse(request.body)
+  const { savedConfig } = await commonTemplates.saveSettings(settings, async (previousConfig, nextConfig) => {
+    const previous = previousConfig.commonTemplate
+    const next = nextConfig.commonTemplate
+    if (!previous.enabled || (next.enabled && previous.obsSourceName === next.obsSourceName)) return
+    try { await obs.clearCommonTemplate(previousConfig, previous.obsSourceName) }
+    catch (error) {
+      await logger.write('common_template_clear_failed', { sourceName: previous.obsSourceName, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined)
+      throw error
+    }
+  })
+  return savedConfig.commonTemplate
+})
+app.get('/api/templates/common/image', async (_request, reply) => {
+  const image = await commonTemplates.readBackground()
+  if (!image) return reply.status(404).send({ error: '共通テンプレート画像が登録されていません' })
+  reply.header('cache-control', 'no-store')
+  reply.type(image.mime)
+  return reply.send(image.bytes)
+})
+app.post<{ Body: { mime: string; data: string; filename?: string } }>('/api/templates/common/image', async (request) => {
+  await orchestrator.assertNotStreaming()
+  return commonTemplates.saveBackground(Buffer.from(request.body.data, 'base64'), request.body.mime, request.body.filename)
+})
+app.delete('/api/templates/common/image', async () => {
+  await orchestrator.assertNotStreaming()
+  const { template } = await commonTemplates.removeBackground(async (previousConfig) => {
+    if (!previousConfig.commonTemplate.enabled) return
+    try { await obs.clearCommonTemplate(previousConfig, previousConfig.commonTemplate.obsSourceName) }
+    catch (error) {
+      await logger.write('common_template_clear_failed', { sourceName: previousConfig.commonTemplate.obsSourceName, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined)
+      throw error
+    }
+  })
+  return template
+})
+app.post('/api/templates/common/apply', async () => {
+  await orchestrator.assertNotStreaming()
+  const rendered = await commonTemplates.renderAll()
+  return { ok: true, rendered: rendered.length }
+})
 app.get('/api/oauth/status', async () => oauth.status())
 app.post<{ Params: { provider: 'youtube' | 'twitch' }; Body: { openerOrigin?: string } }>('/api/oauth/:provider/start', async (request, reply) => {
   if (!['youtube', 'twitch'].includes(request.params.provider)) return reply.status(404).send({ error: 'Unknown OAuth provider' })
@@ -93,19 +204,19 @@ app.get<{ Querystring: { code?: string; state?: string; error?: string } }>('/ap
   if (request.query.error) throw new Error(`OAuth authorization failed: ${request.query.error}`)
   if (!request.query.code || !request.query.state) throw new Error('OAuth callback is incomplete')
   const openerOrigin = await oauth.exchange('youtube', request.query.code, request.query.state)
-  return reply.type('text/html').send(`<!doctype html><meta charset="utf-8"><title>認証完了</title><body style="background:#0b0d12;color:#fff;font-family:sans-serif;padding:40px"><h1>YouTube 接続が完了しました</h1><p>このウィンドウは自動で閉じます。</p><script>window.opener?.postMessage({type:"oauth-complete",provider:"youtube"},${JSON.stringify(openerOrigin)});setTimeout(()=>window.close(),800)</script></body>`)
+  return reply.type('text/html; charset=utf-8').send(youtubeOAuthCallbackHtml(openerOrigin))
 })
 app.get<{ Params: { requestId: string } }>('/api/oauth/twitch/device/:requestId', async (request) => oauth.pollTwitch(request.params.requestId))
 app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
   await orchestrator.assertNotStreaming()
-  const profile = await store.saveProfile(GameProfileSchema.parse(request.body))
+  const profile = await commonTemplates.withExclusiveAccess(() => store.saveProfile(GameProfileSchema.parse(request.body)))
   await orchestrator.invalidateProfile(profile.id)
   return profile
 })
 app.delete<{ Params: { id: string } }>('/api/profiles/:id', async (request, reply) => {
   await orchestrator.assertNotStreaming()
-  if (!(await store.removeProfile(request.params.id))) return reply.status(404).send({ error: 'Profile not found' })
+  if (!(await commonTemplates.withExclusiveAccess(() => store.removeProfile(request.params.id)))) return reply.status(404).send({ error: 'Profile not found' })
   await orchestrator.invalidateProfile(request.params.id)
   return { ok: true }
 })
@@ -147,8 +258,8 @@ app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', as
 })
 app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
-app.post('/api/twitch/output-test', async () => {
-  const result = await orchestrator.testTwitchOutput()
+app.post<{ Body: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } }>('/api/twitch/output-test', async (request) => {
+  const result = await orchestrator.testTwitchOutput(request.body ?? {})
   await logger.write('twitch.output_test.completed', {
     durationMs: result.durationMs,
     bytesSent: result.bytesSent,
@@ -158,6 +269,11 @@ app.post('/api/twitch/output-test', async () => {
   })
   return result
 })
+app.post('/api/audio/auto-adjust', async (request) => {
+  const body = AudioCalibrationRequestSchema.parse(request.body)
+  return orchestrator.autoAdjustAudio(body.gameId, body.durationMs, body.audio)
+})
+app.post('/api/audio/ensure', async () => ({ ok: true, ...await orchestrator.ensureSelectedAudio() }))
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })
 app.post<{ Body: { initialPath?: string } }>('/api/folders/select', async (request) => ({ path: await selectFolder(typeof request.body?.initialPath === 'string' ? request.body.initialPath : '') }))
@@ -235,19 +351,47 @@ app.post('/api/steam/scan', async () => {
     if (statusCode !== 409) throw error
     return { profiles: await store.listProfiles(), owned: 0, installed: 0, created: 0, updated: 0, libraries: [], warnings: [], skipped: true }
   }
-  return syncSteamProfiles('automatic')
+  return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('automatic'))
 })
 app.post('/api/steam/sync', async () => {
   await orchestrator.assertNotStreaming()
-  return syncSteamProfiles('manual')
+  return commonTemplates.withExclusiveAccess(() => syncSteamProfiles('manual'))
 })
-app.post('/api/backup/export', async () => store.exportBackup())
-app.post<{ Body: unknown }>('/api/backup/import', async (request) => {
+app.post('/api/backup/export', async () => commonTemplates.withExclusiveAccess(async () => store.exportBackup({ bgm: await bgm.exportBackup() })))
+app.post<{ Body: unknown }>('/api/backup/import', { bodyLimit: maxBackupRequestBytes }, async (request) => {
   await orchestrator.assertNotStreaming()
+  if (!request.body || typeof request.body !== 'object') throw new Error('Invalid backup')
+  const backup = request.body as Record<string, unknown>
+  const preparedBgm = Object.prototype.hasOwnProperty.call(backup, 'bgm') ? bgm.prepareBackupImport(backup.bgm) : null
   const providerConfig = await store.getConfig()
-  await store.importBackup(request.body)
-  const importedConfig = await store.getConfig()
-  await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+  const bgmTransaction = preparedBgm ? await bgm.beginPreparedBackupImport(preparedBgm) : null
+  try {
+    await commonTemplates.withExclusiveAccess(async () => {
+      await store.importBackup(request.body)
+      const importedConfig = await store.getConfig()
+      await store.saveConfig(reconcileImportedConfig(importedConfig, providerConfig, (name) => Boolean(secrets.get(name))))
+    })
+    if (bgmTransaction) {
+      let cleared = false
+      try {
+        await obs.clearBgm(providerConfig)
+        cleared = true
+      } catch (error) {
+        await logger.write('bgm.restore-clear-failed', { message: error instanceof Error ? error.message : String(error) })
+      }
+      await bgmTransaction.commit({ removePreviousFiles: cleared })
+    }
+  } catch (error) {
+    if (!bgmTransaction) throw error
+    try {
+      await bgmTransaction.rollback()
+    } catch (rollbackError) {
+      const primary = error instanceof Error ? error : new Error(String(error))
+      primary.message = `${primary.message} / BGMのロールバックにも失敗しました: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+      throw primary
+    }
+    throw error
+  }
   await obs.disconnect()
   await orchestrator.resetSelection('バックアップを復元しました。配信前にゲームを選び直してください')
   return { ok: true }
@@ -263,17 +407,37 @@ try {
 } catch { /* Vite serves the client during development */ }
 
 let started = false
+let automaticGameDetectionTimer: ReturnType<typeof setInterval> | null = null
+let automaticGameDetectionInFlight = false
+
+function runAutomaticGameDetection(): void {
+  if (automaticGameDetectionInFlight) return
+  automaticGameDetectionInFlight = true
+  void orchestrator.autoSelectRunningGame()
+    .catch((error) => logger.write('profile.auto_detection_failed', {
+      message: error instanceof Error ? error.message : String(error),
+    }).catch(() => undefined))
+    .finally(() => { automaticGameDetectionInFlight = false })
+}
 
 export async function startServer(): Promise<{ host: string; port: number; url: string }> {
   const host = '127.0.0.1'
   if (!started) {
     await app.listen({ port: listenPort, host })
     started = true
+    runAutomaticGameDetection()
+    automaticGameDetectionTimer = setInterval(runAutomaticGameDetection, 5_000)
+    automaticGameDetectionTimer.unref()
   }
   return { host, port: listenPort, url: `http://${host}:${listenPort}` }
 }
 
 export async function stopServer(): Promise<void> {
+  if (automaticGameDetectionTimer) {
+    clearInterval(automaticGameDetectionTimer)
+    automaticGameDetectionTimer = null
+  }
+  localObs.stop()
   await platforms.stopComments().catch(() => undefined)
   await obs.disconnect().catch(() => undefined)
   if (started) {

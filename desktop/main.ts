@@ -12,10 +12,14 @@ import {
   DesktopPreferenceStore,
   hasDesktopArgument,
   quitApplicationArgument,
+  registerWindowsCompanionExecutable,
+  runWindowsStartupTaskCommand,
   shouldShowWindowForSecondInstance,
   supportsWindowsLoginStart,
+  syncWindowsStartupRegistration,
   windowsAppId,
   type DesktopIntegrationSettings,
+  type WindowsStartupRegistration,
 } from './integration.js'
 import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
 import { createElectronUpdateAdapter, getUpdateBlockReason, ManualUpdateService } from './updater.js'
@@ -45,6 +49,27 @@ let quitRequested = false
 let shutdownStarted = false
 let shutdownComplete = false
 let closeNoticeShown = false
+let audioCalibrationWindow: BrowserWindow | null = null
+let audioCalibrationHideTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearAudioCalibrationWindow(window?: BrowserWindow): void {
+  if (window && audioCalibrationWindow !== window) return
+  if (audioCalibrationHideTimer) clearTimeout(audioCalibrationHideTimer)
+  audioCalibrationHideTimer = null
+  audioCalibrationWindow = null
+}
+
+async function applyWindowsStartupRegistration(startWithWindows: boolean): Promise<WindowsStartupRegistration> {
+  if (process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM === '1') return 'disabled'
+  const registration = await syncWindowsStartupRegistration(
+    startWithWindows,
+    process.execPath,
+    runWindowsStartupTaskCommand,
+    (settings) => app.setLoginItemSettings(settings),
+  )
+  await markLifecycle(`windows-startup-${registration}`).catch(() => undefined)
+  return registration
+}
 
 async function markLifecycle(stage: string): Promise<void> {
   const directory = process.env.OBS_STREAM_MANAGER_DATA_DIR?.trim()
@@ -121,12 +146,15 @@ async function installObsOutputPlugin(): Promise<'unavailable' | 'current' | 'in
   if (!app.isPackaged) return 'unavailable'
   const source = path.join(process.resourcesPath, 'obs-plugin', 'bin', '64bit', 'obs-stream-manager-output.dll')
   if (!existsSync(source)) return 'unavailable'
-  const legacyPluginRoot = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output')
-  await rm(legacyPluginRoot, { recursive: true, force: true }).catch(() => {
-    // A running OBS instance can keep the previous DLL locked. The installer also retries this migration.
-  })
+  const isolatedPluginRoot = process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_DIR?.trim()
+  if (!isolatedPluginRoot) {
+    const legacyPluginRoot = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output')
+    await rm(legacyPluginRoot, { recursive: true, force: true }).catch(() => {
+      // A running OBS instance can keep the previous DLL locked. The installer also retries this migration.
+    })
+  }
   const programData = process.env.PROGRAMDATA?.trim() || process.env.ProgramData?.trim() || 'C:\\ProgramData'
-  const pluginRoot = path.join(programData, 'obs-studio', 'plugins', 'obs-stream-manager-output')
+  const pluginRoot = isolatedPluginRoot || path.join(programData, 'obs-studio', 'plugins', 'obs-stream-manager-output')
   const targetDirectory = path.join(pluginRoot, 'bin', '64bit')
   const target = path.join(targetDirectory, 'obs-stream-manager-output.dll')
   const pending = path.join(targetDirectory, 'obs-stream-manager-output.pending.dll')
@@ -189,9 +217,7 @@ async function setStartWithWindows(startWithWindows: boolean): Promise<DesktopIn
   if (!preferences || !integrationSettings.supported) return integrationSettings
   await preferences.setStartWithWindows(startWithWindows)
   integrationSettings = { ...integrationSettings, startWithWindows }
-  if (process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM !== '1') {
-    app.setLoginItemSettings({ openAtLogin: startWithWindows, path: process.execPath, args: startWithWindows ? [backgroundLaunchArgument] : [] })
-  }
+  await applyWindowsStartupRegistration(startWithWindows)
   rebuildTrayMenu()
   return integrationSettings
 }
@@ -247,6 +273,11 @@ function createWindow(): BrowserWindow {
   window.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(dockUrl)) event.preventDefault()
   })
+  window.webContents.on('render-process-gone', () => {
+    if (audioCalibrationWindow !== window) return
+    clearAudioCalibrationWindow(window)
+    if (!window.isDestroyed()) window.show()
+  })
   window.once('ready-to-show', () => window.show())
   window.on('close', (event) => {
     if (quitRequested) return
@@ -261,7 +292,10 @@ function createWindow(): BrowserWindow {
       })
     }
   })
-  window.on('closed', () => { mainWindow = null })
+  window.on('closed', () => {
+    clearAudioCalibrationWindow(window)
+    mainWindow = null
+  })
   void window.loadURL(`${dockUrl}/?desktop=1`)
   return window
 }
@@ -297,6 +331,39 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('desktop:download-update', () => requireUpdateService().download())
   ipcMain.handle('desktop:install-update', () => requireUpdateService().install())
   ipcMain.handle('desktop:open-release-page', openReleasePage)
+  ipcMain.handle('desktop:begin-audio-calibration', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window.isDestroyed()) return false
+    clearAudioCalibrationWindow()
+    audioCalibrationWindow = window
+    if (tray && process.platform === 'win32') {
+      try { tray.displayBalloon({
+        title: '音声自動調整を待機しています',
+        content: 'ゲームへ戻り、ゲーム音を鳴らしながら普段どおり話してください。音を検出してから計測します。',
+        iconType: 'info',
+      }) } catch { /* A notification failure must not cancel calibration. */ }
+    }
+    audioCalibrationHideTimer = setTimeout(() => {
+      audioCalibrationHideTimer = null
+      if (audioCalibrationWindow === window && !window.isDestroyed()) window.hide()
+    }, 150)
+    return true
+  })
+  ipcMain.handle('desktop:end-audio-calibration', (event, succeeded: unknown) => {
+    if (typeof succeeded !== 'boolean') throw new Error('音声自動調整の完了状態が不正です')
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window !== audioCalibrationWindow) return false
+    clearAudioCalibrationWindow(window)
+    showMainWindow()
+    if (tray && process.platform === 'win32') {
+      try { tray.displayBalloon({
+        title: succeeded ? '音声自動調整が完了しました' : '音声自動調整を完了できませんでした',
+        content: succeeded ? 'ゲーム音とマイクの計測結果を確認してください。' : '画面に戻って詳細を確認してください。',
+        iconType: succeeded ? 'info' : 'warning',
+      }) } catch { /* The result remains visible in the restored window. */ }
+    }
+    return true
+  })
   ipcMain.handle('desktop:quit', requestApplicationQuit)
 
   app.on('before-quit', (event) => {
@@ -335,11 +402,17 @@ if (!app.requestSingleInstanceLock()) {
       preferences = new DesktopPreferenceStore(process.env.OBS_STREAM_MANAGER_DATA_DIR, loginItemSupported)
       const storedPreferences = await preferences.read()
       integrationSettings = { supported: loginItemSupported, startWithWindows: loginItemSupported && storedPreferences.startWithWindows }
-      if (loginItemSupported && process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM !== '1') {
-        app.setLoginItemSettings({ openAtLogin: integrationSettings.startWithWindows, path: process.execPath, args: integrationSettings.startWithWindows ? [backgroundLaunchArgument] : [] })
-      }
+      if (loginItemSupported) await applyWindowsStartupRegistration(integrationSettings.startWithWindows)
       const providerFile = await providerBundlePath()
       if (providerFile) process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE = providerFile
+      if (app.isPackaged && process.platform === 'win32') {
+        try {
+          await registerWindowsCompanionExecutable(process.execPath)
+          await markLifecycle('obs-companion-registered').catch(() => undefined)
+        } catch {
+          await markLifecycle('obs-companion-registration-unavailable').catch(() => undefined)
+        }
+      }
       const obsPluginState = await installObsOutputPlugin()
       process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_INSTALL_STATE = obsPluginState
       await markLifecycle(`obs-output-plugin-${obsPluginState}`).catch(() => undefined)

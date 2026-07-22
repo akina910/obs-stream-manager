@@ -38,6 +38,12 @@ describe('UI translations', () => {
     }
   })
 
+  it('contains the complete BGM stock controls', () => {
+    for (const key of ['BGMストック', 'BGMを追加', '再生', '一時停止', '停止中', 'BGMはまだ登録されていません']) {
+      expect(englishTranslations[key]).toBeTruthy()
+    }
+  })
+
   it('defaults legacy configs to Japanese and accepts persisted English', () => {
     const legacyConfig: Partial<typeof defaultConfig> = structuredClone(defaultConfig)
     delete legacyConfig.ui

@@ -14,6 +14,7 @@ export function createGameProfile(id: string, displayName: string, platformGroup
     platformGroup,
     favorite: false,
     hidden: false,
+    presentation: { templateLabel: '' },
     library: { gamePass: false, exception: platformGroup === 'exception', installed: false },
     capture: {
       preferred: capture,
@@ -32,8 +33,8 @@ export function createGameProfile(id: string, displayName: string, platformGroup
     },
     youtube: { enabled: true, titleTemplate: '{game}｜ゲーム配信', description: '', privacy: 'public', categoryId: '20' },
     twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: displayName, tags: ['日本語'] },
-    audio: { microphoneDb: -3, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
-    recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: true, verticalRecording: true },
+    audio: { microphoneDb: -3, microphoneBoostDb: 0, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
+    recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: false, verticalRecording: false },
     state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered', thumbnailLastAppliedAt: null, nextPartNumber: 1 },
   }
 }

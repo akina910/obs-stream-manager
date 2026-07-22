@@ -37,11 +37,418 @@ describe('ObsController stream events', () => {
   })
 })
 
+describe('ObsController BGM stock', () => {
+  it('creates one managed media input, adds it to every scene, and starts it at the requested volume', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSceneList') return {
+          currentProgramSceneName: '00_STARTING',
+          scenes: [{ sceneName: '20_TALK' }, { sceneName: '00_STARTING' }],
+        }
+        if (request === 'GetInputSettings') throw new Error('No source was found')
+        if (request === 'GetSceneItemId') throw new Error('No scene item was found')
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await controller.playBgm(structuredClone(defaultConfig), 'C:\\BGM\\stock.mp3', -21)
+
+    expect(calls.find(({ request }) => request === 'CreateInput')?.data).toMatchObject({
+      sceneName: '00_STARTING',
+      inputName: 'BGM Stock',
+      inputKind: 'ffmpeg_source',
+      inputSettings: { local_file: 'C:\\BGM\\stock.mp3', looping: true, restart_on_activate: false },
+    })
+    expect(calls.find(({ request }) => request === 'CreateSceneItem')?.data).toEqual({
+      sceneName: '20_TALK',
+      sourceName: 'BGM Stock',
+      sceneItemEnabled: true,
+    })
+    expect(calls.find(({ request }) => request === 'SetInputVolume')?.data).toEqual({ inputName: 'BGM Stock', inputVolumeDb: -21 })
+    expect(calls.find(({ request }) => request === 'SetInputAudioTracks')?.data).toEqual({
+      inputName: 'BGM Stock',
+      inputAudioTracks: { '1': true, '2': false, '3': false, '4': false, '5': true, '6': false },
+    })
+    expect(calls.find(({ request }) => request === 'TriggerMediaInputAction')?.data).toEqual({
+      inputName: 'BGM Stock',
+      mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART',
+    })
+  })
+
+  it('reports managed media playback without failing when OBS has no stock source', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetMediaInputStatus') return { mediaState: 'OBS_MEDIA_STATE_PAUSED', mediaCursor: 1_200, mediaDuration: 5_000 }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await expect(controller.bgmPlaybackStatus(structuredClone(defaultConfig))).resolves.toEqual({ state: 'paused', cursorMs: 1_200, durationMs: 5_000 })
+
+    fake.call.mockRejectedValueOnce(new Error('No source was found'))
+    await expect(controller.bgmPlaybackStatus(structuredClone(defaultConfig))).resolves.toEqual({ state: 'unavailable', cursorMs: null, durationMs: null })
+  })
+
+  it('removes the managed media input before deleting its selected file', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetSceneList') return { scenes: [{ sceneName: '00_STARTING' }, { sceneName: '20_TALK' }] }
+        if (request === 'GetSceneItemList') return { sceneItems: [{ sourceName: 'BGM Stock', sceneItemId: 7 }, { sourceName: 'Other', sceneItemId: 8 }] }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await controller.clearBgm(structuredClone(defaultConfig))
+
+    expect(fake.call.mock.calls).toEqual(expect.arrayContaining([
+      ['TriggerMediaInputAction', { inputName: 'BGM Stock', mediaAction: 'OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP' }],
+      ['RemoveSceneItem', { sceneName: '00_STARTING', sceneItemId: 7 }],
+      ['RemoveSceneItem', { sceneName: '20_TALK', sceneItemId: 7 }],
+      ['RemoveInput', { inputName: 'BGM Stock' }],
+    ]))
+  })
+})
+
 describe('ObsController recording fallbacks', () => {
+  it('switches a 4K profile to managed FHD before starting simultaneous outputs', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let streaming = false
+    let twitchActive = false
+    let videoSettings = { baseWidth: 3840, baseHeight: 2160, outputWidth: 3840, outputHeight: 2160, fpsNumerator: 60, fpsDenominator: 1 }
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '10_GAME_PC' }
+        if (request === 'GetInputList') return { inputs: [] }
+        if (request === 'GetVideoSettings') return videoSettings
+        if (request === 'SetVideoSettings') { videoSettings = structuredClone(data) as typeof videoSettings; return {} }
+        if (request === 'GetStreamStatus') return { outputActive: streaming }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetStreamServiceSettings') return { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
+        if (request === 'StartStream') { streaming = true; return {} }
+        if (request === 'StartRecord' || request === 'StartReplayBuffer') return {}
+        if (request === 'CallVendorRequest') {
+          const vendor = data as { vendorName: string; requestType: string }
+          if (vendor.vendorName === 'obs-stream-manager-output') {
+            if (vendor.requestType === 'start_twitch') twitchActive = true
+            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 2, outputActive: twitchActive, totalFrames: twitchActive ? 1 : 0, dedicatedEncoder: twitchActive, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
+          }
+          if (vendor.vendorName === 'aitum-vertical-canvas' && vendor.requestType === 'status') {
+            return { responseData: { success: true, backtrack: true } }
+          }
+          return { responseData: { success: true } }
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['youtube-stream-key', 'youtube-key'],
+      ['youtube-stream-server', 'rtmps://youtube.example/live2'],
+      ['twitch-stream-key', 'twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    config.obs.startDelaySeconds = 0
+    config.features.sourceRecord = true
+    config.features.verticalRecording = true
+    profile.recording.sourceRecord = true
+    profile.recording.verticalRecording = true
+
+    const warnings = await controller.start(config, profile, profile.capture.localSourceName)
+
+    expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['StartStream', 'StartRecord', 'StartReplayBuffer']))
+    expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { vendorName?: string; requestType?: string }).vendorName === 'source-record' && (data as { requestType?: string }).requestType === 'record_start')).toBe(true)
+    const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
+    expect(stopBacktrackIndex).toBe(-1)
+    expect(calls.find(({ request }) => request === 'SetVideoSettings')?.data).toMatchObject({
+      baseWidth: 1920,
+      baseHeight: 1080,
+      outputWidth: 1920,
+      outputHeight: 1080,
+      fpsNumerator: 60,
+      fpsDenominator: 1,
+    })
+    expect(calls.find(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'configure_stream')?.data).toMatchObject({
+      vendorName: 'obs-stream-manager-output',
+      requestType: 'configure_stream',
+      requestData: { videoBitrateKbps: 6_000, audioBitrateKbps: 160 },
+    })
+    expect(calls).toContainEqual({
+      request: 'SetProfileParameter',
+      data: { parameterCategory: 'AdvOut', parameterName: 'ApplyServiceSettings', parameterValue: 'false' },
+    })
+    expect(calls.map(({ request }) => request)).not.toContain('TriggerHotkeyByName')
+    expect(warnings.join(' ')).not.toContain('3840×2160')
+    expect(videoSettings).toMatchObject({ baseWidth: 1920, baseHeight: 1080, outputWidth: 1920, outputHeight: 1080 })
+  })
+
+  it('warns when any managed FHD profile parameter cannot be updated', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetVideoSettings') return { baseWidth: 3840, baseHeight: 2160, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 2, outputActive: false } }
+        if (request === 'SetProfileParameter' && (data as { parameterName?: string }).parameterName === 'ApplyServiceSettings') {
+          throw new Error('parameter is unavailable')
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const warnings: string[] = []
+
+    await (controller as unknown as { configureManagedOutput(warnings: string[]): Promise<void> }).configureManagedOutput(warnings)
+
+    expect(warnings).toEqual([expect.stringContaining('FHD配信プロファイル設定を一部更新できませんでした')])
+  })
+
+  it('keeps OBS-triggered Twitch output available when an older plugin cannot configure the encoder', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let twitchActive = false
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request !== 'CallVendorRequest') return {}
+        const vendor = data as { requestType: string }
+        if (vendor.requestType === 'configure_stream') return { responseData: { success: false, error: 'Unknown request type' } }
+        if (vendor.requestType === 'start_twitch') { twitchActive = true; return { responseData: { success: true, outputActive: true } } }
+        if (vendor.requestType === 'twitch_status') return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 2, outputActive: twitchActive, totalFrames: twitchActive ? 1 : 0, dedicatedEncoder: twitchActive, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
+        return { responseData: { success: true } }
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['twitch-stream-key', 'twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    config.features.youtube = true
+    config.features.twitch = true
+    profile.youtube.enabled = true
+    profile.twitch.enabled = true
+
+    await expect(controller.startSecondaryTwitchForObsStream(config, profile)).resolves.toEqual([
+      expect.stringContaining('CBR 6000 kbps'),
+    ])
+    expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'start_twitch')).toBe(true)
+  })
+
+  it('stops a Twitch secondary output that does not prove FHD 60fps encoding', async () => {
+    const vendorRequests: string[] = []
+    let twitchActive = false
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request !== 'CallVendorRequest') return {}
+        const vendor = data as { requestType: string }
+        vendorRequests.push(vendor.requestType)
+        if (vendor.requestType === 'start_twitch') twitchActive = true
+        if (vendor.requestType === 'stop_twitch') twitchActive = false
+        if (vendor.requestType === 'twitch_status') {
+          return {
+            responseData: {
+              success: true,
+              pluginVersion: '0.2.16',
+              apiVersion: 2,
+              outputActive: twitchActive,
+              totalFrames: twitchActive ? 1 : 0,
+              dedicatedEncoder: twitchActive,
+              videoWidth: 1920,
+              videoHeight: 1080,
+              fpsNumerator: 30,
+              fpsDenominator: 1,
+            },
+          }
+        }
+        return { responseData: { success: true, outputActive: twitchActive } }
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['twitch-stream-key', 'twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    config.features.youtube = true
+    config.features.twitch = true
+    profile.youtube.enabled = true
+    profile.twitch.enabled = true
+
+    await expect(controller.startSecondaryTwitchForObsStream(config, profile)).rejects.toThrow('フレームレートが30.00fps')
+    expect(twitchActive).toBe(false)
+    expect(vendorRequests).toContain('stop_twitch')
+  })
+
+  it('detects an empty Aitum Vertical scene before starting a black recording', async () => {
+    const fake = {
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'CallVendorRequest') {
+          expect(data).toMatchObject({ vendorName: 'aitum-vertical-canvas', requestType: 'current_scene' })
+          return { responseData: { success: true, scene: 'Vertical Scene' } }
+        }
+        if (request === 'GetSceneItemList') return { sceneItems: [] }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const result = await (controller as unknown as { verticalSceneReady(): Promise<{ ready: boolean; sceneName: string }> }).verticalSceneReady()
+
+    expect(result).toEqual({ ready: false, sceneName: 'Vertical Scene' })
+  })
+
+  it('warns but does not abort when Aitum Backtrack protection cannot be queried', async () => {
+    const fake = {
+      call: vi.fn(async () => { throw new Error('Unknown vendor request type') }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const warnings: string[] = []
+
+    await expect((controller as unknown as {
+      protectHighResolutionSimulcast(
+        protection: { protected: boolean; width: number; height: number },
+        warnings: string[],
+      ): Promise<void>
+    }).protectHighResolutionSimulcast({ protected: true, width: 3840, height: 2160 }, warnings)).resolves.toBeUndefined()
+
+    expect(warnings.join(' ')).toContain('Backtrackの停止を確認できませんでした')
+  })
+
+  it('routes isolated recording stems to A1-A5 and the simulcast mix to A6', async () => {
+    const tracks = new Map<string, Record<string, boolean>>()
+    const profileParameters: Array<Record<string, unknown>> = []
+    const inputs = [
+      ['GAME_PC', 'wasapi_output_capture'],
+      ['GAME_GFN', 'wasapi_output_capture'],
+      ['GAME_SWITCH', 'wasapi_output_capture'],
+      ['DISCORD', 'wasapi_output_capture'],
+      ['MIC', 'wasapi_input_capture'],
+      ['BGM', 'wasapi_output_capture'],
+      ['Desktop Audio', 'wasapi_output_capture'],
+      ['Mic/Aux', 'wasapi_input_capture'],
+      ['PC Game Capture', 'game_capture'],
+      ['Elgato Game Capture', 'dshow_input'],
+      ['Alerts', 'browser_source'],
+    ].map(([inputName, inputKind]) => ({ inputName, inputKind }))
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetInputSettings') throw new Error('not required')
+        if (request === 'GetInputList') return { inputs }
+        if (request === 'GetProfileParameter') return { parameterValue: 'Advanced' }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'MIC Ducking' }] }
+        if (request === 'SetInputAudioTracks') {
+          const value = data as { inputName: string; inputAudioTracks: Record<string, boolean> }
+          tracks.set(value.inputName, value.inputAudioTracks)
+        }
+        if (request === 'SetProfileParameter') profileParameters.push(data as Record<string, unknown>)
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+
+    expect(tracks.get('GAME_PC')).toEqual({ '1': true, '2': false, '3': false, '4': false, '5': false, '6': true })
+    expect(tracks.get('DISCORD')).toEqual({ '1': false, '2': true, '3': false, '4': false, '5': false, '6': true })
+    expect(tracks.get('MIC')).toEqual({ '1': false, '2': false, '3': true, '4': false, '5': false, '6': true })
+    expect(tracks.get('BGM')).toEqual({ '1': false, '2': false, '3': false, '4': true, '5': false, '6': true })
+    expect(tracks.get('Desktop Audio')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': false })
+    expect(tracks.get('Mic/Aux')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': false })
+    expect(tracks.get('PC Game Capture')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': false })
+    expect(tracks.get('Alerts')).toEqual({ '1': false, '2': false, '3': false, '4': false, '5': true, '6': true })
+    expect(profileParameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'TrackIndex', parameterValue: '6' }),
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'RecTracks', parameterValue: '31' }),
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'RecEncoder', parameterValue: 'none' }),
+      expect.objectContaining({ parameterCategory: 'AdvOut', parameterName: 'Track5Name', parameterValue: 'AUX CAPTURE' }),
+    ]))
+  })
+
+  it('uses the calibrated microphone in the starting scene and disables a duplicate default input', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetInputSettings') {
+          const inputName = (data as { inputName: string }).inputName
+          if (inputName === 'MIC') return { inputKind: 'wasapi_input_capture', inputSettings: { device_id: 'default' } }
+          if (inputName === '音声入力キャプチャ') return { inputKind: 'wasapi_input_capture', inputSettings: {} }
+          throw new Error('missing input')
+        }
+        if (request === 'GetSceneItemList') {
+          const sceneName = (data as { sceneName: string }).sceneName
+          return sceneName === '00_STARTING'
+            ? { sceneItems: [{ sourceName: '音声入力キャプチャ', sceneItemId: 11, sceneItemEnabled: true }] }
+            : { sceneItems: [{ sourceName: 'MIC', sceneItemId: 21, sceneItemEnabled: true }, { sourceName: '音声入力キャプチャ', sceneItemId: 22, sceneItemEnabled: true }] }
+        }
+        if (request === 'GetInputList') return { inputs: [] }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'MIC Ducking' }] }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const { warnings } = await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+
+    expect(calls).toContainEqual({ request: 'CreateSceneItem', data: { sceneName: '00_STARTING', sourceName: 'MIC', sceneItemEnabled: true } })
+    expect(calls).toContainEqual({ request: 'SetSceneItemEnabled', data: { sceneName: '00_STARTING', sceneItemId: 11, sceneItemEnabled: false } })
+    expect(calls).toContainEqual({ request: 'SetSceneItemEnabled', data: { sceneName: '10_GAME_PC', sceneItemId: 22, sceneItemEnabled: false } })
+    expect(warnings.join(' ')).toContain('二重取り込み')
+  })
+
   it('starts and stops a secure in-memory Twitch secondary output for simultaneous streaming', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
     let streaming = false
     let twitchActive = false
+    let twitchActiveStatusChecks = 0
     let service = { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
@@ -62,7 +469,8 @@ describe('ObsController recording fallbacks', () => {
           if (vendor.vendorName === 'obs-stream-manager-output') {
             if (vendor.requestType === 'start_twitch') twitchActive = true
             if (vendor.requestType === 'stop_twitch') twitchActive = false
-            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: twitchActive } }
+            if (vendor.requestType === 'twitch_status' && twitchActive) twitchActiveStatusChecks += 1
+            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 2, outputActive: twitchActive, totalFrames: twitchActiveStatusChecks >= 2 ? 1 : 0, dedicatedEncoder: twitchActive, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
           }
           return { responseData: { success: true } }
         }
@@ -75,7 +483,7 @@ describe('ObsController recording fallbacks', () => {
       ['twitch-stream-key', 'test-twitch-stream-key'],
       ['twitch-stream-server', 'rtmp://twitch.example/app'],
     ])
-    const controller = new ObsController(secrets, 50)
+    const controller = new ObsController(secrets, 600)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
@@ -87,6 +495,7 @@ describe('ObsController recording fallbacks', () => {
     config.features.verticalRecording = false
 
     await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
+    expect(twitchActiveStatusChecks).toBeGreaterThanOrEqual(2)
     const startTwitch = calls.find(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'start_twitch')
     expect(startTwitch?.data).toEqual({
       vendorName: 'obs-stream-manager-output',
@@ -122,6 +531,9 @@ describe('ObsController recording fallbacks', () => {
           outputSkippedFrames: 0,
           outputCongestion: 0,
         }
+        if (request === 'GetVideoSettings') return { baseWidth: 3840, baseHeight: 2160, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 2, outputActive: false } }
         if (request === 'GetStreamServiceSettings') return service
         if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
         if (request === 'StartStream') { streaming = true; return {} }
@@ -136,13 +548,34 @@ describe('ObsController recording fallbacks', () => {
     const controller = new ObsController(secrets, 50)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
 
-    await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0)).resolves.toEqual({
+    await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0, { includeSecondary: false })).resolves.toEqual({
       ok: true,
+      output: {
+        width: 1920,
+        height: 1080,
+        fpsNumerator: 60,
+        fpsDenominator: 1,
+        videoBitrateKbps: 6_000,
+        audioBitrateKbps: 160,
+        encoderConfigured: true,
+      },
       durationMs: 1_500,
       bytesSent: 2_000_000,
       totalFrames: 90,
       skippedFrames: 0,
       congestion: 0,
+      secondary: null,
+      recording: null,
+      replayBuffer: null,
+      obs: {
+        activeFps: 0,
+        renderTotalFrames: 0,
+        renderSkippedFrames: 0,
+        outputTotalFrames: 0,
+        outputSkippedFrames: 0,
+      },
+      verticalBacktrackStopped: false,
+      warnings: [],
     })
 
     const applied = calls.find(({ request }) => request === 'SetStreamServiceSettings')?.data as { streamServiceSettings: { key: string } }
@@ -152,6 +585,91 @@ describe('ObsController recording fallbacks', () => {
       streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
     })
     expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['StartStream', 'StopStream']))
+  })
+
+  it('stress-tests primary, secondary, recording, and replay outputs without going live', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let streaming = false
+    let secondary = false
+    let recording = false
+    let replay = false
+    let backtrack = true
+    let statsCalls = 0
+    let videoSettings = { baseWidth: 3840, baseHeight: 2160, outputWidth: 3840, outputHeight: 2160, fpsNumerator: 60, fpsDenominator: 1 }
+    let service = {
+      streamServiceType: 'rtmp_common',
+      streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
+    }
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetStreamStatus') return { outputActive: streaming, outputDuration: 1_500, outputBytes: 2_000_000, outputTotalFrames: 90, outputSkippedFrames: 0, outputCongestion: 0 }
+        if (request === 'GetRecordStatus') return { outputActive: recording, outputDuration: statsCalls ? 1_600 : 200, outputBytes: statsCalls ? 3_500_000 : 500_000, outputTotalFrames: statsCalls ? 94 : 10, outputSkippedFrames: 0 }
+        if (request === 'GetReplayBufferStatus') return { outputActive: replay, outputDuration: statsCalls ? 1_500 : 200, outputBytes: statsCalls ? 3_000_000 : 500_000, outputTotalFrames: statsCalls ? 88 : 10, outputSkippedFrames: 0 }
+        if (request === 'GetVideoSettings') return videoSettings
+        if (request === 'SetVideoSettings') { videoSettings = structuredClone(data) as typeof videoSettings; return {} }
+        if (request === 'GetStats') {
+          statsCalls += 1
+          return statsCalls === 1
+            ? { activeFps: 60, renderTotalFrames: 100, renderSkippedFrames: 1, outputTotalFrames: 100, outputSkippedFrames: 2 }
+            : { activeFps: 60, renderTotalFrames: 190, renderSkippedFrames: 1, outputTotalFrames: 190, outputSkippedFrames: 2 }
+        }
+        if (request === 'GetStreamServiceSettings') return service
+        if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
+        if (request === 'StartStream') { streaming = true; return {} }
+        if (request === 'StopStream') { streaming = false; return {} }
+        if (request === 'StartRecord') { recording = true; return {} }
+        if (request === 'StopRecord') { recording = false; return {} }
+        if (request === 'StartReplayBuffer') { replay = true; return {} }
+        if (request === 'StopReplayBuffer') { replay = false; return {} }
+        if (request === 'CallVendorRequest') {
+          const vendor = data as { vendorName: string; requestType: string }
+          if (vendor.vendorName === 'aitum-vertical-canvas') {
+            if (vendor.requestType === 'stop_backtrack') backtrack = false
+            return { responseData: { success: true, backtrack } }
+          }
+          if (vendor.vendorName === 'obs-stream-manager-output') {
+            if (vendor.requestType === 'start_twitch') secondary = true
+            if (vendor.requestType === 'stop_twitch') secondary = false
+            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 2, outputActive: secondary, bytesSent: statsCalls ? 2_100_000 : 200_000, totalFrames: statsCalls ? 99 : 10, skippedFrames: 0, dedicatedEncoder: secondary, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
+          }
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['twitch-stream-key', 'test-twitch-stream-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0, {
+      includeSecondary: true,
+      includeRecording: true,
+      includeReplayBuffer: true,
+    })).resolves.toMatchObject({
+      ok: true,
+      totalFrames: 90,
+      skippedFrames: 0,
+      secondary: { totalFrames: 89, skippedFrames: 0 },
+      recording: { totalFrames: 84, skippedFrames: 0 },
+      replayBuffer: { totalFrames: 78, skippedFrames: 0 },
+      obs: { activeFps: 60, renderTotalFrames: 90, renderSkippedFrames: 0, outputTotalFrames: 90, outputSkippedFrames: 0 },
+      verticalBacktrackStopped: false,
+      warnings: [],
+    })
+
+    const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
+    expect(stopBacktrackIndex).toBe(-1)
+    expect(videoSettings).toMatchObject({ baseWidth: 1920, baseHeight: 1080, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 })
+    expect(streaming).toBe(false)
+    expect(secondary).toBe(false)
+    expect(recording).toBe(false)
+    expect(replay).toBe(false)
+    expect(service).toEqual({ streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } })
   })
 
   it('reports OBS as connected when the replay buffer is unavailable', async () => {
@@ -220,10 +738,15 @@ describe('ObsController recording fallbacks', () => {
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
     config.features.twitch = false
+    config.features.sourceRecord = true
+    config.features.verticalRecording = true
+    profile.recording.sourceRecord = true
+    profile.recording.verticalRecording = true
     config.obs.startDelaySeconds = 0
     const warnings = await controller.start(config, profile, profile.capture.localSourceName)
     expect(calls).toContain('StartStream')
-    expect(warnings).toHaveLength(4)
+    expect(warnings).toHaveLength(5)
+    expect(warnings.join(' ')).toContain('CBR 6000 kbps')
     expect(warnings.join(' ')).toContain('通常録画')
     expect(warnings.join(' ')).toContain('Source Record')
     expect(warnings.join(' ')).toContain('Aitum Vertical')
@@ -402,6 +925,7 @@ describe('ObsController recording fallbacks', () => {
           if (vendorName === 'source-record') return { responseData: { success: false, error: 'no source found' } }
           throw new Error('No vendor was found by that name.')
         }
+        if (request === 'TriggerHotkeyByName') throw new Error('No hotkeys were found by that name.')
         return {}
       }),
     }
@@ -444,8 +968,12 @@ describe('ObsController recording fallbacks', () => {
     config.features.replayBuffer = false
     config.features.sourceRecord = false
     config.features.twitch = false
+    config.features.verticalRecording = true
+    profile.recording.verticalRecording = true
 
-    await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
+    await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([
+      expect.stringContaining('CBR 6000 kbps'),
+    ])
     expect(calls).toContainEqual({
       request: 'TriggerHotkeyByName',
       data: { hotkeyName: 'VerticalCanvasDockStartRecording' },
@@ -556,14 +1084,81 @@ describe('ObsController recording fallbacks', () => {
     expect(toggles.map(({ filterEnabled }) => filterEnabled)).toEqual([true, false])
   })
 
-  it('warns when no compatible OBS profile parameter can be updated', async () => {
+  it('reapplies calibrated per-source levels and does not force-unmute the microphone during background recovery', async () => {
+    const volumes: Array<{ inputName: string; inputVolumeDb: number }> = []
+    const mutes: Array<{ inputName: string; inputMuted: boolean }> = []
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking' }] }
+        if (request === 'GetRecordStatus') return { outputActive: false }
+        if (request === 'SetInputVolume') volumes.push(data as { inputName: string; inputVolumeDb: number })
+        if (request === 'SetInputMute') mutes.push(data as { inputName: string; inputMuted: boolean })
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const profile = structuredClone(starterProfiles[0])
+    profile.audio = { microphoneDb: 1, microphoneBoostDb: 0, gameDb: -11, discordDb: -19, bgmDb: -27, duckingDb: -6 }
+
+    const applied = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
+
+    expect(volumes).toEqual(expect.arrayContaining([
+      { inputName: 'MIC', inputVolumeDb: 1 },
+      { inputName: 'GAME_PC', inputVolumeDb: -11 },
+      { inputName: 'DISCORD', inputVolumeDb: -19 },
+      { inputName: 'BGM', inputVolumeDb: -27 },
+    ]))
+    expect(mutes).toEqual([
+      { inputName: 'MIC', inputMuted: false },
+      { inputName: 'GAME_PC', inputMuted: false },
+      { inputName: 'GAME_GFN', inputMuted: true },
+      { inputName: 'GAME_SWITCH', inputMuted: true },
+    ])
+    expect(applied.audioApplied).toBe(true)
+
+    mutes.length = 0
+    await controller.ensureProfileAudio(structuredClone(defaultConfig), profile, 'local')
+    expect(mutes).toEqual([])
+  })
+
+  it('reports that automatic microphone protection was not applied so reconnect recovery can retry it', async () => {
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
       on: vi.fn(),
       call: vi.fn(async (request: string) => {
         if (request === 'GetSourceActive') return { videoActive: true }
-        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking' }] }
+        if (request === 'GetSourceFilterList') return { filters: [] }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'CreateSourceFilter') throw new Error('filter create failed')
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const result = await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+
+    expect(result.audioApplied).toBe(false)
+    expect(result.warnings.join(' ')).toContain('マイクの自動音量保護を適用できませんでした')
+  })
+
+  it('warns when no compatible OBS profile parameter can be updated', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, changed: false, previousEnabled: true, enabled: true } }
+        if (request === 'GetSourceFilterList') return (data as { sourceName?: string })?.sourceName === 'MIC'
+          ? { filters: [] }
+          : { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking', filterEnabled: true, filterSettings: { sidechain_source: 'MIC' } }] }
         if (request === 'GetRecordStatus') return { outputActive: false }
         if (request === 'SetProfileParameter') throw new Error('unsupported parameter')
         return {}
@@ -574,9 +1169,10 @@ describe('ObsController recording fallbacks', () => {
     const profile = structuredClone(starterProfiles[0])
     profile.recording.directory = 'D:\\Recordings'
 
-    const warnings = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
+    const { warnings } = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
 
-    expect(warnings).toHaveLength(2)
+    expect(warnings).toHaveLength(3)
+    expect(warnings.join(' ')).toContain('FHD配信プロファイル')
     expect(warnings.join(' ')).toContain('録画保存先')
     expect(warnings.join(' ')).toContain('リプレイバッファ時間')
   })
@@ -593,7 +1189,7 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'GetStreamStatus') return { outputActive: false }
         if (request === 'GetStreamServiceSettings') return service
         if (request === 'SetStreamServiceSettings') { setService(data as typeof service); return {} }
-        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: false } }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 2, outputActive: false } }
         return {}
       }),
     }
@@ -632,7 +1228,7 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'GetReplayBufferStatus') return { outputActive: replayBuffer }
         if (request === 'StopRecord') { recording = false; return {} }
         if (request === 'StopReplayBuffer') { replayBuffer = false; return {} }
-        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: false } }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 2, outputActive: false } }
         return {}
       }),
     }

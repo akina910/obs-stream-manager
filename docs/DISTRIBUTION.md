@@ -8,6 +8,8 @@
 
 Google CloudでDesktop app OAuthクライアントを作成し、ダウンロードしたJSONをリポジトリ外のアクセス制限された場所へ保存します。YouTube接続はPKCE付きAuthorization Code Flowを使います。
 
+配布前にOAuth同意画面を本番公開し、YouTube Data APIの要求スコープについてGoogleの検証を完了してください。テスト公開のままでは、テストユーザーに追加されていない一般利用者に「デベロッパーに承認されていない」旨の画面が表示されます。クライアント情報をEXEへ同梱するだけでは、この公開承認の代わりになりません。
+
 GoogleがDesktop appクライアントに発行する `client_secret` はインストール済みアプリ内で秘匿できる認証要素ではありませんが、Googleのトークンエンドポイントへ渡す必要があります。実行時はWindows資格情報マネージャーへ取り込み、通常設定、バックアップ、ログへは保存しません。実値をソース、Issue、Pull Request、READMEへ記載しないでください。
 
 ### Twitch
@@ -46,7 +48,7 @@ npm run dist:win
 
 ## 成果物
 
-- `OBS Stream Manager-Setup-<version>-x64.exe`: ユーザー単位NSISインストーラー
+- `OBS Stream Manager-Setup-<version>-x64.exe`: 管理者確認後に自動完了する全ユーザー向けone-click NSISインストーラー
 - `OBS Stream Manager-Portable-<version>-x64.exe`: インストール不要のPortable EXE
 - `OBS Stream Manager-<version>-win.zip`: 展開して使うPortable ZIP
 
@@ -56,7 +58,7 @@ npm run dist:win
 npm run verify:package
 ```
 
-この検証はNode.jsをPATHから外した状態、新規データ領域、loopback限定待受、二重起動防止、終了時プロセス停止、設定復元、秘密情報を含まないバックアップ、同梱OBSプラグインの存在、固定されたGitHub更新先を確認します。
+この検証はNode.jsをPATHから外した状態、新規データ領域、loopback限定待受、二重起動防止、終了時プロセス停止、設定復元、秘密情報を含まないバックアップ、同梱OBSプラグインの存在、固定されたGitHub更新先を確認します。OBSの自動準備は実ユーザー設定を触らない隔離ディレクトリで別途検証します。
 
 配布用OAuth資格情報を持たない開発PCで、OAuth以外のローカル検証だけを行う場合は `scripts/verify-windows-package.ps1` に `-AllowMissingProviderOAuth` を指定できます。このスイッチはローカル診断専用です。GitHub Actionsと配布合否判定では使用せず、配布物にYouTube/Twitchのプロバイダー設定が同梱されていることを必須とします。
 

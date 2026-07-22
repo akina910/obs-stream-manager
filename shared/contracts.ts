@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { CommonTemplateConfigSchema, defaultCommonTemplateConfig } from './common-template.js'
 
 export const PlatformGroupSchema = z.enum(['pc', 'switch', 'exception'])
 export type PlatformGroup = z.infer<typeof PlatformGroupSchema>
@@ -10,6 +11,20 @@ export const ThumbnailApplyStatusSchema = z.enum(['not_registered', 'pending', '
 export type ThumbnailApplyStatus = z.infer<typeof ThumbnailApplyStatusSchema>
 
 export const GameIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9_-]*$/)
+export const AudioProfileSchema = z.object({
+  microphoneDb: z.number().min(-100).max(26).default(-3),
+  microphoneBoostDb: z.number().min(0).max(24).default(0),
+  gameDb: z.number().min(-100).max(26).default(-15),
+  discordDb: z.number().min(-100).max(26).default(-18),
+  bgmDb: z.number().min(-100).max(26).default(-25),
+  duckingDb: z.number().min(-30).max(0).default(-6),
+})
+export type AudioProfile = z.infer<typeof AudioProfileSchema>
+export const AudioCalibrationRequestSchema = z.object({
+  gameId: GameIdSchema,
+  audio: AudioProfileSchema,
+  durationMs: z.number().int().min(9_000).max(30_000).default(15_000),
+})
 export const ObsSceneNameSchema = z.string().trim().min(1).max(256)
 
 const ServiceConfigSchema = z.object({
@@ -23,6 +38,9 @@ export const GameProfileSchema = z.object({
   platformGroup: PlatformGroupSchema,
   favorite: z.boolean().default(false),
   hidden: z.boolean().default(false),
+  presentation: z.object({
+    templateLabel: z.string().trim().max(100).default(''),
+  }).default({ templateLabel: '' }),
   coverUrl: z.string().url().optional(),
   library: z.object({
     steamAppId: z.number().int().positive().optional(),
@@ -55,19 +73,13 @@ export const GameProfileSchema = z.object({
     categoryName: z.string().default(''),
     tags: z.array(z.string()).default(['日本語']),
   }),
-  audio: z.object({
-    microphoneDb: z.number().min(-100).max(26).default(-3),
-    gameDb: z.number().min(-100).max(26).default(-15),
-    discordDb: z.number().min(-100).max(26).default(-18),
-    bgmDb: z.number().min(-100).max(26).default(-25),
-    duckingDb: z.number().min(-30).max(0).default(-6),
-  }),
+  audio: AudioProfileSchema,
   recording: z.object({
     enabled: z.boolean().default(true),
     directory: z.string().default(''),
     replayBufferSeconds: z.number().int().min(5).max(1200).default(180),
-    sourceRecord: z.boolean().default(true),
-    verticalRecording: z.boolean().default(true),
+    sourceRecord: z.boolean().default(false),
+    verticalRecording: z.boolean().default(false),
   }),
   state: z.object({
     lastCaptureMethod: CaptureMethodSchema.optional(),
@@ -112,9 +124,10 @@ export const AppConfigSchema = z.object({
     twitch: z.boolean().default(true),
     recording: z.boolean().default(true),
     replayBuffer: z.boolean().default(true),
-    sourceRecord: z.boolean().default(true),
-    verticalRecording: z.boolean().default(true),
+    sourceRecord: z.boolean().default(false),
+    verticalRecording: z.boolean().default(false),
   }),
+  commonTemplate: CommonTemplateConfigSchema.default(defaultCommonTemplateConfig),
   steam: z.object({
     steamId64: z.string().default(''),
     apiKeyStored: z.boolean().default(false),
@@ -136,6 +149,52 @@ export const AppConfigSchema = z.object({
 })
 
 export type AppConfig = z.infer<typeof AppConfigSchema>
+
+export const BgmTrackSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1).max(180),
+  originalName: z.string().trim().min(1).max(255),
+  filename: z.string().regex(/^[0-9a-f-]+\.(mp3|wav|ogg|flac|m4a)$/),
+  mime: z.enum(['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/flac', 'audio/mp4']),
+  size: z.number().int().positive(),
+  addedAt: z.string().datetime(),
+})
+
+export type BgmTrack = z.infer<typeof BgmTrackSchema>
+
+export const BgmLibrarySchema = z.object({
+  version: z.literal(1).default(1),
+  tracks: z.array(BgmTrackSchema).default([]),
+  selectedTrackId: z.string().uuid().nullable().default(null),
+})
+
+export type BgmLibrary = z.infer<typeof BgmLibrarySchema>
+
+export type BgmBackup = {
+  version: 1
+  library: BgmLibrary
+  tracks: Record<string, { data: string }>
+}
+
+export const BgmPlaybackSchema = z.object({
+  state: z.enum(['playing', 'paused', 'stopped', 'unavailable']),
+  cursorMs: z.number().nonnegative().nullable(),
+  durationMs: z.number().nonnegative().nullable(),
+})
+
+export type BgmPlayback = z.infer<typeof BgmPlaybackSchema>
+export type BgmLibraryStatus = BgmLibrary & { playback: BgmPlayback }
+
+export const LocalObsSetupStatusSchema = z.object({
+  phase: z.enum(['ready', 'waiting_for_obs', 'restart_required', 'error']),
+  detail: z.string(),
+  dockConfigured: z.boolean(),
+  websocketConfigured: z.boolean(),
+})
+
+export type LocalObsSetupStatus = z.infer<typeof LocalObsSetupStatusSchema>
+
+const ViewerCountStateSchema = z.enum(['available', 'hidden', 'unavailable'])
 
 export const RuntimeStatusSchema = z.object({
   obsConnected: z.boolean(),
@@ -163,12 +222,16 @@ export const RuntimeStatusSchema = z.object({
       detail: z.string(),
       checkedAt: z.string().datetime().nullable(),
       viewerCount: z.number().int().nonnegative().nullable().optional(),
+      viewerCountState: ViewerCountStateSchema.optional(),
+      viewerCountDetail: z.string().optional(),
     }),
     twitch: z.object({
       state: z.enum(['disabled', 'unprepared', 'ready', 'starting', 'live', 'stopping', 'offline', 'error']),
       detail: z.string(),
       checkedAt: z.string().datetime().nullable(),
       viewerCount: z.number().int().nonnegative().nullable().optional(),
+      viewerCountState: ViewerCountStateSchema.optional(),
+      viewerCountDetail: z.string().optional(),
     }),
   }),
 })

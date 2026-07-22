@@ -4,7 +4,9 @@ import {
   Image as ImageIcon, LoaderCircle, LockKeyhole, Play, Plus, RefreshCw,
   Search, Settings, Star, Trash2, Upload, Users, X,
 } from 'lucide-react'
-import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, PlatformGroup, RuntimeStatus } from '../shared/contracts'
+import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, LocalObsSetupStatus, PlatformGroup, RuntimeStatus } from '../shared/contracts'
+import type { AudioCalibrationResult, AudioCalibrationRole } from '../shared/audio-calibration'
+import { defaultCommonTemplateConfig } from '../shared/common-template'
 import { createGameProfile } from '../shared/profile-factory'
 import { renderTitleTemplate, TITLE_TEMPLATE_VARIABLES } from '../shared/title-template'
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider, type SteamSyncResult } from './api'
@@ -12,10 +14,12 @@ import { createTranslator, I18nProvider, useI18n, type TranslationValues, type T
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
 import { getBroadcastStatus, getExternalDeliveryWarning, getRuntimeOutputs, type RuntimeOutputStatus } from './runtime-status'
 import { CommentsSection } from './CommentsSection'
+import { BgmLibrarySection } from './BgmLibrarySection'
+import { CommonTemplateEditor } from './CommonTemplateEditor'
 import { DesktopUpdateControl } from './DesktopUpdateControl'
 import { ServiceIcon } from './ServiceIcon'
 
-type Tab = PlatformGroup | 'settings'
+type Tab = PlatformGroup | 'bgm' | 'settings'
 type Toast = { kind: 'success' | 'error' | 'warning'; text: string; values?: TranslationValues }
 type OAuthProgress = Partial<Record<OAuthProvider, string>>
 type AddGameDraft = { name: string; platformGroup: PlatformGroup; captureMethod: CaptureMethod; steamAppId: string }
@@ -24,6 +28,7 @@ const groups: Array<{ id: Tab; label: string }> = [
   { id: 'pc', label: 'PC' },
   { id: 'switch', label: 'Switch' },
   { id: 'exception', label: '例外' },
+  { id: 'bgm', label: 'BGM' },
   { id: 'settings', label: '設定' },
 ]
 
@@ -116,12 +121,25 @@ function LiveElapsed({ milliseconds }: { milliseconds: number }) {
   return <>{[hours, minutes, remainder].map((value) => String(value).padStart(2, '0')).join(':')}</>
 }
 
-function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
+export function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
   const { t } = useI18n()
   const [recordingsOpen, setRecordingsOpen] = useState(false)
   const broadcast = getBroadcastStatus(status)
   const outputs = getRuntimeOutputs(status)
   const platformOutputs = outputs.slice(0, 3)
+  const obsOutput = platformOutputs[0]
+  const destinationOutputs = platformOutputs.slice(1)
+  const activeDestinations = destinationOutputs.filter((output) => output.active).length
+  const activeViewerPlatforms = destinationOutputs.flatMap((output) => output.active && (output.key === 'youtube' || output.key === 'twitch') ? [status.platforms[output.key]] : [])
+  const activeViewerCounts = activeViewerPlatforms.flatMap((platform) => platform.viewerCountState === 'available' && platform.viewerCount != null ? [platform.viewerCount] : [])
+  const combinedViewerCount = activeViewerCounts.reduce((total, count) => total + count, 0)
+  const viewerCountHidden = activeViewerPlatforms.some(({ viewerCountState }) => viewerCountState === 'hidden')
+  const viewerCountPending = activeViewerPlatforms.some(({ viewerCountState, viewerCount }) => viewerCountState !== 'hidden' && !(viewerCountState === 'available' && viewerCount != null))
+  const combinedViewerLabel = viewerCountHidden
+    ? activeViewerCounts.length ? t('確認済み {count}人・一部非表示', { count: combinedViewerCount.toLocaleString() }) : t('視聴者数は一部非表示')
+    : viewerCountPending
+      ? activeViewerCounts.length ? t('確認済み {count}人', { count: combinedViewerCount.toLocaleString() }) : t('視聴者数取得待ち')
+      : t('合計 {count}人', { count: combinedViewerCount.toLocaleString() })
   const recordingOutputs = outputs.slice(3)
   const activeRecordings = recordingOutputs.filter((output) => output.active).length
   const deliveryWarning = getExternalDeliveryWarning(status)
@@ -138,19 +156,31 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
         <span className="scene-label">SCENE: {status.currentScene ?? t('不明')}{live && <> · LIVE{status.streaming && status.streamElapsedMs !== undefined ? <> <LiveElapsed milliseconds={status.streamElapsedMs} /></> : null}</>}</span>
       </div>
       {deliveryWarning && <div className={`runtime-status-warning ${!status.streaming && status.platforms.youtube.state === 'live' || !status.streaming && status.platforms.twitch.state === 'live' ? 'danger' : ''}`} role="alert"><AlertTriangle size={14} /><span>{t(deliveryWarning)}</span></div>}
-      <div className="platform-grid">
-        {platformOutputs.map((output) => {
-          const viewerCount = output.key === 'youtube' || output.key === 'twitch' ? status.platforms[output.key].viewerCount : undefined
-          return <div className={`platform-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}`} title={output.detail ? t(output.detail) : undefined}>
-            <div><ServiceIcon service={output.key === 'youtube' ? 'youtube' : output.key === 'twitch' ? 'twitch' : 'obs'} /><span>{t(output.label)}</span></div>
-            <strong><StatusDot tone={output.tone} pulse={output.active} />{t(output.state)}</strong>
-            {(output.key === 'youtube' || output.key === 'twitch') && output.active && <span className={`viewer-count ${viewerCount == null ? 'unknown' : ''}`}><Users size={11} />{viewerCount == null ? t('視聴者数取得待ち') : t('同時視聴 {count}', { count: viewerCount })}</span>}
-          </div>
-        })}
+      <div className="delivery-map">
+        <div className={`platform-card delivery-source ${obsOutput.tone}`} aria-label={`${t(obsOutput.label)}: ${t(obsOutput.state)}`}>
+          <div><ServiceIcon service="obs" /><span>{t(obsOutput.label)}</span></div>
+          <strong><StatusDot tone={obsOutput.tone} pulse={obsOutput.active} />{t(obsOutput.state)}</strong>
+        </div>
+        <div className={`delivery-link ${activeDestinations > 0 ? 'active' : ''}`}><div><span>{t(activeDestinations === 2 ? '2/2 同時接続' : activeDestinations === 0 ? '2つの配信先' : '{active}/2 接続中', { active: activeDestinations })}</span><ChevronRight size={13} /></div>{activeDestinations > 0 && <strong className={viewerCountHidden ? 'hidden' : viewerCountPending && activeViewerCounts.length === 0 ? 'pending' : 'available'}><Users size={13} />{combinedViewerLabel}</strong>}</div>
+        <div className="destination-grid">
+          {destinationOutputs.map((output) => {
+            const platform = output.key === 'youtube' || output.key === 'twitch' ? status.platforms[output.key] : null
+            const viewerState = platform?.viewerCountState ?? (platform?.viewerCount != null ? 'available' : 'unavailable')
+            const viewerLabel = viewerState === 'hidden'
+              ? t('視聴者数は非表示')
+              : viewerState === 'available' && platform?.viewerCount != null
+                ? t('同時視聴 {count}', { count: platform.viewerCount })
+                : t('視聴者数取得待ち')
+            return <div className={`platform-card destination-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}; ${viewerLabel}`} title={output.detail ? t(output.detail) : undefined}>
+              <div className="destination-head"><span className="destination-name"><ServiceIcon service={output.key === 'youtube' ? 'youtube' : 'twitch'} />{t(output.label)}</span><strong><StatusDot tone={output.tone} pulse={output.active} />{t(output.state)}</strong></div>
+              {output.active && <span className={`viewer-count ${viewerState}`} title={platform?.viewerCountDetail}>{viewerState === 'available' && platform?.viewerCount != null ? <><Users size={14} /><small>{t('同時視聴')}</small><strong>{platform.viewerCount.toLocaleString()}</strong></> : <><Users size={13} /><span>{viewerLabel}</span></>}</span>}
+            </div>
+          })}
+        </div>
       </div>
       <div className="recording-status">
         <button className="recording-toggle" aria-expanded={recordingsOpen} onClick={() => setRecordingsOpen((current) => !current)}><ChevronRight size={12} /><span>{t('録画系ステータス')}</span><b>{activeRecordings}/{recordingOutputs.length} {t('稼働')}</b></button>
-        {recordingsOpen && <div className="recording-grid">{recordingOutputs.map((output) => <div className="recording-item" key={output.key}><StatusDot tone={output.tone} /><span>{t(output.label)}</span><strong>{t(output.active ? '稼働中' : '停止')}</strong></div>)}</div>}
+        {recordingsOpen && <div className="recording-grid">{recordingOutputs.map((output) => <div className="recording-item" key={output.key}><StatusDot tone={output.tone} /><span>{t(output.label)}</span><strong>{t(output.active ? output.key === 'replay' ? '動作中' : '録画中' : '停止')}</strong></div>)}</div>}
       </div>
     </section>
   )
@@ -274,9 +304,13 @@ function ThumbnailPreview({ profile }: { profile: GameProfile }) {
 
 function GameCard({ profile, selected, busy, onSelect, onEdit, onFavorite }: { profile: GameProfile; selected: boolean; busy: boolean; onSelect: () => void; onEdit: () => void; onFavorite: () => void }) {
   const { t } = useI18n()
-  const activate = () => { if (!busy) onSelect() }
+  const activate = () => {
+    if (busy) return
+    if (selected) onEdit()
+    else onSelect()
+  }
   return (
-    <article className={`game-card ${selected ? 'selected' : ''}`} role="button" tabIndex={busy ? -1 : 0} aria-disabled={busy} aria-current={selected ? 'true' : undefined} onClick={activate} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate() } }}>
+    <article className={`game-card ${selected ? 'selected' : ''}`} role="button" tabIndex={busy ? -1 : 0} aria-label={t(selected ? '{game}の設定を編集' : '{game}を選択', { game: profile.displayName })} aria-disabled={busy} aria-current={selected ? 'true' : undefined} onClick={activate} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate() } }}>
       <ProfileArtwork profile={profile} />
       <div className="game-copy">
         <div className="game-name-row"><strong>{profile.displayName}</strong>{selected && <span className="selected-badge"><Check size={11} strokeWidth={3} />{t('選択中')}</span>}</div>
@@ -290,13 +324,14 @@ function GameCard({ profile, selected, busy, onSelect, onEdit, onFavorite }: { p
   )
 }
 
-function SelectedGameBanner({ profile, status }: { profile: GameProfile; status: RuntimeStatus }) {
+function SelectedGameBanner({ profile, status, onEdit }: { profile: GameProfile; status: RuntimeStatus; onEdit: () => void }) {
   const { t } = useI18n()
   const captureMethod = status.captureMethod ?? profile.capture.preferred
   return <div className="selected-game-banner">
     <div className="selected-game-check" aria-hidden="true"><Check size={17} strokeWidth={3} /></div>
     <ProfileArtwork profile={profile} size="small" />
     <div className="selected-game-copy"><span>{t('現在選択中のゲーム')}</span><strong>{profile.displayName}</strong><small>{t(captureLabels[captureMethod])} · {t('このゲームが配信対象です')}</small></div>
+    <button type="button" className="selected-game-edit" onClick={onEdit}><Settings size={14} />{t('設定を編集')}</button>
   </div>
 }
 
@@ -318,9 +353,9 @@ function TitleTemplateField({ value, game, part, onChange }: { value: string; ga
   return <div className="template-field">
     <div className="field-label-with-help">
       <label htmlFor={inputId}>{t('タイトルテンプレート')}</label>
-      <details className="template-help">
+      <details className="template-help-inline">
         <summary aria-label={t('タイトルテンプレートの変数ヘルプ')}><CircleHelp size={14} /></summary>
-        <div className="template-help-popover">
+        <div className="template-help-content">
           <strong>{t('使用できる変数')}</strong>
           {TITLE_TEMPLATE_VARIABLES.map((variable) => <div key={variable}><code>{variable}</code><span>{descriptions[variable]}</span></div>)}
           <p>{t('「|」など、変数以外の文字はそのままタイトルに残ります。')}</p>
@@ -333,24 +368,34 @@ function TitleTemplateField({ value, game, part, onChange }: { value: string; ga
   </div>
 }
 
-function RangeField({ label, value, disabled, onChange }: { label: string; value: number; disabled: boolean; onChange: (value: number) => void }) {
-  return <label>{label}<div className="range-control"><input type="range" min="-30" max="6" step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} /><span>{value > 0 ? '+' : ''}{value} dB</span></div></label>
+function RangeField({ label, value, disabled, minimum = -30, maximum = 20, onChange }: { label: string; value: number; disabled: boolean; minimum?: number; maximum?: number; onChange: (value: number) => void }) {
+  return <label>{label}<div className="range-control"><input type="range" min={minimum} max={maximum} step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} /><span>{value > 0 ? '+' : ''}{value} dB</span></div></label>
 }
 
 function Toggle({ checked, disabled = false, label, onChange }: { checked: boolean; disabled?: boolean; label: string; onChange: (checked: boolean) => void }) {
   return <label className="toggle-row"><button type="button" role="switch" aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}><span /></button><span>{label}</span></label>
 }
 
-function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbnail, onDeleteThumbnail }: { profile: GameProfile; readOnly: boolean; onClose: () => void; onSave: (profile: GameProfile) => Promise<void>; onDelete: () => Promise<void>; onThumbnail: (file: File, draft: GameProfile) => Promise<void>; onDeleteThumbnail: (draft: GameProfile) => Promise<void> }) {
+const audioRoleLabels: Record<AudioCalibrationRole, string> = { microphone: 'マイク', game: 'ゲーム', discord: 'Discord', bgm: 'BGM' }
+const calibrationNeedsAttention = (result: AudioCalibrationResult) => result.readings.some(({ status }) => ['limited', 'no_signal', 'muted', 'missing'].includes(status))
+const calibrationStatusLabels: Record<AudioCalibrationResult['readings'][number]['status'], string> = {
+  adjusted: '調整済み', within_target: '調整不要', limited: '上限で制限', no_signal: '信号なし', muted: 'ミュート中', missing: 'ソースなし',
+}
+
+function ProfileEditor({ profile, readOnly, canAutoAdjust, autoAdjustReason, onClose, onSave, onDelete, onThumbnail, onDeleteThumbnail, onAutoAdjust }: { profile: GameProfile; readOnly: boolean; canAutoAdjust: boolean; autoAdjustReason: string | null; onClose: () => void; onSave: (profile: GameProfile) => Promise<void>; onDelete: () => Promise<void>; onThumbnail: (file: File, draft: GameProfile) => Promise<void>; onDeleteThumbnail: (draft: GameProfile) => Promise<void>; onAutoAdjust: (draft: GameProfile) => Promise<AudioCalibrationResult> }) {
   const { t } = useI18n()
   const [draft, setDraft] = useState(profile)
-  const [openSections, setOpenSections] = useState(() => new Set(['recording']))
+  const [openSections, setOpenSections] = useState(() => new Set(['basic']))
   const [saving, setSaving] = useState(false)
+  const [calibrating, setCalibrating] = useState(false)
+  const [calibration, setCalibration] = useState<AudioCalibrationResult | null>(null)
+  const [calibrationError, setCalibrationError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const savingRef = useRef(false)
   const modalRef = useRef<HTMLElement>(null)
   const locked = readOnly || saving
+  const calibrationAttention = calibration ? calibrationNeedsAttention(calibration) : false
   useEffect(() => { modalRef.current?.focus() }, [])
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !savingRef.current) onClose() }
@@ -369,6 +414,25 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
   const save = () => execute(async () => { await onSave(draft); onClose() })
   const upload = (file: File) => execute(() => onThumbnail(file, draft))
   const removeThumbnail = () => execute(() => onDeleteThumbnail(draft))
+  const autoAdjustAudio = async () => {
+    if (savingRef.current || readOnly || !canAutoAdjust) return
+    savingRef.current = true; setSaving(true); setCalibrating(true); setSaveError(null); setCalibration(null); setCalibrationError(null)
+    let desktopHidden = false
+    let succeeded = false
+    try {
+      desktopHidden = await window.obsStreamManagerDesktop?.beginAudioCalibration().catch(() => false) ?? false
+      const result = await onAutoAdjust(draft)
+      setDraft((current) => ({ ...current, audio: result.profile.audio }))
+      setCalibration(result)
+      succeeded = true
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      setCalibrationError(t('自動調整を完了できませんでした。変更が始まっていた場合は実行前の値へ戻しています。詳細: {error}', { error: detail }))
+    } finally {
+      if (desktopHidden) await window.obsStreamManagerDesktop?.endAudioCalibration(succeeded).catch(() => undefined)
+      savingRef.current = false; setSaving(false); setCalibrating(false)
+    }
+  }
   const browseFolder = () => execute(async () => {
     const result = await api.selectFolder(draft.recording.directory)
     if (result.path) patch('recording', { ...draft.recording, directory: result.path })
@@ -383,6 +447,7 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
           <AccordionSection title={t('基本')} summary={`${draft.platformGroup === 'pc' ? 'PC' : draft.platformGroup === 'switch' ? 'Switch' : t('例外')} · ${draft.displayName}`} open={openSections.has('basic')} onToggle={() => toggleSection('basic')}>
             <fieldset disabled={locked}>
               <label>{t('表示名')}<input value={draft.displayName} onChange={(event) => patch('displayName', event.target.value)} /></label>
+              <label>{t('テンプレート表示名')}<input value={draft.presentation.templateLabel} onChange={(event) => patch('presentation', { ...draft.presentation, templateLabel: event.target.value })} placeholder={draft.displayName} /><span className="field-hint">{t('空欄なら表示名を使います。例: ARK: Survival Ascended を ARK と表示')}</span></label>
               <div className="field-grid"><label>{t('分類')}<select value={draft.platformGroup} onChange={(event) => patch('platformGroup', event.target.value as PlatformGroup)}><option value="pc">PC</option><option value="switch">Switch</option><option value="exception">{t('例外')}</option></select></label><label>Steam App ID<NumericInput disabled={locked} allowEmpty value={draft.library.steamAppId} onValueChange={(value) => patch('library', { ...draft.library, steamAppId: value })} /></label></div>
               <label>{t('インストール先')}<input value={draft.library.installDirectory ?? ''} onChange={(event) => patch('library', { ...draft.library, installDirectory: event.target.value || undefined, installed: Boolean(event.target.value) })} /></label>
               <label>{t('次回のPart番号')}<NumericInput disabled={locked} value={draft.state.nextPartNumber} onValueChange={(value) => value !== undefined && patch('state', { ...draft.state, nextPartNumber: Math.max(1, Math.min(9999, Math.trunc(value))) })} /><span className="field-hint">{t('配信開始に成功したときだけ自動で1増えます')}</span></label>
@@ -405,10 +470,29 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
             <fieldset disabled={locked}><Toggle disabled={locked} checked={draft.twitch.enabled} label={t('このゲームで有効')} onChange={(value) => patch('twitch', { ...draft.twitch, enabled: value })} /><TitleTemplateField value={draft.twitch.titleTemplate} game={draft.displayName} part={draft.state.nextPartNumber} onChange={(value) => patch('twitch', { ...draft.twitch, titleTemplate: value })} /><div className="field-grid"><label>{t('カテゴリ')}<input value={draft.twitch.categoryName} onChange={(event) => patch('twitch', { ...draft.twitch, categoryName: event.target.value })} /></label><label>{t('タグ（カンマ区切り）')}<input value={draft.twitch.tags.join(', ')} onChange={(event) => patch('twitch', { ...draft.twitch, tags: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></label></div></fieldset>
           </AccordionSection>
           <AccordionSection title={t('音声')} summary={`${t('ゲーム')} ${draft.audio.gameDb > 0 ? '+' : ''}${draft.audio.gameDb} dB`} open={openSections.has('audio')} onToggle={() => toggleSection('audio')}>
-            <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /></fieldset>
+            <div className="audio-setup-guide">
+              <div><CircleHelp size={15} /><strong>{t('音声設定の使い方')}</strong></div>
+              <div className="audio-setup-options">
+                <section><strong>{t('自動で合わせる（おすすめ）')}</strong><p>{t(window.obsStreamManagerDesktop ? '開始すると設定画面を退避します。ゲームへ戻り、ゲーム音を鳴らしながら普段どおり話してください。ゲーム音とマイクを検出してから15秒間測定し、結果をこのゲームへ自動保存します。' : '開始後にOBSからゲームへ切り替え、ゲーム音を鳴らしながら普段どおり話してください。ゲーム音とマイクを検出してから15秒間測定し、結果をこのゲームへ自動保存します。')}</p></section>
+                <section><strong>{t('手動で合わせる')}</strong><p>{t('下のスライダーを変更して「保存」を押します。選択中のゲームを編集した場合は、保存後にゲームをもう一度選択するとOBSへ反映されます。')}</p></section>
+              </div>
+              <p className="audio-setup-note">{t('設定画面に居続ける必要はありません。音が出るまで最大60秒待機し、フェーダーだけで不足するマイクは追加ブーストも自動設定します。')}</p>
+            </div>
+            <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('マイク追加ブースト')} value={draft.audio.microphoneBoostDb} minimum={0} maximum={24} onChange={(value) => patch('audio', { ...draft.audio, microphoneBoostDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /><RangeField disabled={locked} label={t('発話中のゲーム音減衰')} value={draft.audio.duckingDb} minimum={-12} maximum={0} onChange={(value) => patch('audio', { ...draft.audio, duckingDb: value })} /></fieldset>
+            <div className="audio-auto-adjust">
+               <div className="audio-auto-adjust-heading"><div><strong>{t('ゲーム中の音声自動調整')}</strong><span className={`connection-label ${calibration ? calibrationAttention ? 'pending' : 'connected' : calibrating ? 'pending' : 'optional'}`}><StatusDot tone={calibration ? calibrationAttention ? 'pending' : 'live' : calibrating ? 'pending' : 'inactive'} />{t(calibration ? calibrationAttention ? '要確認' : '調整済み' : calibrating ? '音声待ち／測定中' : '未調整')}</span></div><p>{t('開始後はゲームへ戻ってください。ゲーム音とマイクを検出するまで待機し、検出後に15秒間の測定と再確認を行います。')}</p></div>
+               {!calibrating && <div className="audio-calibration-run"><button type="button" className="secondary-button" disabled={locked || !canAutoAdjust} onClick={() => void autoAdjustAudio()}><RefreshCw size={14} />{t(calibrationError ? 'もう一度実行' : '開始してゲームへ戻る')}</button>{!canAutoAdjust && autoAdjustReason && <span>{t(autoAdjustReason)}</span>}</div>}
+               {calibrating && <div className="audio-calibration-progress" role="status"><div className="audio-progress-track is-indeterminate"><span /></div><div><strong>{t('ゲーム音を鳴らしながら普段どおり話してください')}</strong><code>{t('音声検出後 15秒')}</code></div></div>}
+               {calibrationError && <div className="audio-calibration-failure" role="alert">{calibrationError}</div>}
+               {calibration && <div className="audio-calibration-result" role="status">
+                 <strong>{t(calibrationNeedsAttention(calibration) ? '一部の音声は確認が必要です' : '音声設定を自動調整しました')}</strong>
+                 <div>{calibration.readings.map((reading) => <div className={`audio-reading status-${reading.status}`} key={reading.role}><StatusDot tone={['adjusted', 'within_target'].includes(reading.status) ? 'live' : reading.status === 'missing' ? 'error' : 'pending'} /><span>{t(audioRoleLabels[reading.role])}</span><strong>{t(calibrationStatusLabels[reading.status])}</strong><code>{reading.adjustmentDb === undefined ? t('変更なし') : `${reading.adjustmentDb > 0 ? '+' : ''}${reading.adjustmentDb} dB`}</code></div>)}</div>
+                 {calibration.warnings.length > 0 && <p className="audio-calibration-note">{calibration.warnings.slice(0, 3).join(' / ')}</p>}
+              </div>}
+            </div>
           </AccordionSection>
           <AccordionSection title={t('録画')} summary={t('リプレイ {seconds}秒', { seconds: draft.recording.replayBufferSeconds })} open={openSections.has('recording')} onToggle={() => toggleSection('recording')}>
-            <fieldset disabled={locked}><label>{t('録画先')}<div className="folder-control"><span title={draft.recording.directory}>{draft.recording.directory || t('未設定')}</span><button type="button" disabled={locked} onClick={() => void browseFolder()}>{t('参照')}</button></div></label><label>{t('リプレイ秒数')}<NumericInput disabled={locked} value={draft.recording.replayBufferSeconds} onValueChange={(value) => value !== undefined && patch('recording', { ...draft.recording, replayBufferSeconds: value })} /></label><div className="toggle-grid"><Toggle disabled={locked} checked={draft.recording.enabled} label={t('通常録画')} onChange={(value) => patch('recording', { ...draft.recording, enabled: value })} /><Toggle disabled={locked} checked={draft.recording.sourceRecord} label="Source Record" onChange={(value) => patch('recording', { ...draft.recording, sourceRecord: value })} /><Toggle disabled={locked} checked={draft.recording.verticalRecording} label="Aitum Vertical" onChange={(value) => patch('recording', { ...draft.recording, verticalRecording: value })} /></div></fieldset>
+            <fieldset disabled={locked}><label>{t('録画先')}<div className="folder-control"><span title={draft.recording.directory}>{draft.recording.directory || t('未設定')}</span><button type="button" disabled={locked} onClick={() => void browseFolder()}>{t('参照')}</button></div></label><label>{t('リプレイ秒数')}<NumericInput disabled={locked} value={draft.recording.replayBufferSeconds} onValueChange={(value) => value !== undefined && patch('recording', { ...draft.recording, replayBufferSeconds: value })} /></label><div className="audio-track-map"><strong>{t('録画音声トラック')}</strong><div><span><b>A1</b>{t('ゲーム音')}</span><span><b>A2</b>Discord</span><span><b>A3</b>{t('マイク')}</span><span><b>A4</b>BGM</span><span><b>A5</b>AUX</span><span><b>A6</b>{t('配信用フルMIX')}</span></div></div><div className="toggle-grid"><Toggle disabled={locked} checked={draft.recording.enabled} label={t('通常録画')} onChange={(value) => patch('recording', { ...draft.recording, enabled: value })} /><Toggle disabled={locked} checked={draft.recording.sourceRecord} label="Source Record" onChange={(value) => patch('recording', { ...draft.recording, sourceRecord: value })} /><Toggle disabled={locked} checked={draft.recording.verticalRecording} label="Aitum Vertical" onChange={(value) => patch('recording', { ...draft.recording, verticalRecording: value })} /></div>{(draft.recording.sourceRecord || draft.recording.verticalRecording) && <p className="recording-performance-note">{t('4K・高FPSの同時配信では配信と通常録画を守るため、素材録画と縦録画を自動で停止する場合があります。')}</p>}</fieldset>
           </AccordionSection>
           <section className="thumbnail-section">
             <div className="thumbnail-heading"><strong>{t('YouTube用サムネイル')}</strong><span className={`thumbnail-status tone-${thumbnailTone(draft)}`}><StatusDot tone={thumbnailTone(draft)} />{thumbnailStatusLabel(draft, t)}</span></div>
@@ -416,7 +500,7 @@ function ProfileEditor({ profile, readOnly, onClose, onSave, onDelete, onThumbna
               <ThumbnailPreview profile={draft} />
               <div className="thumbnail-options">
                 {draft.state.thumbnailLastError && <div className="oauth-error">{draft.state.thumbnailLastError}</div>}
-                <div className="button-row"><button className="secondary-button" disabled={locked} onClick={() => fileRef.current?.click()}>{t(draft.state.thumbnailFilename ? '差し替え' : '画像を登録')}</button>{draft.state.thumbnailFilename && <button className="ghost-button" disabled={locked} onClick={() => void removeThumbnail()}>{t('削除')}</button>}</div>
+                <div className="button-row"><button className="secondary-button" disabled={locked} onClick={() => fileRef.current?.click()}>{t(draft.state.thumbnailFilename ? '画像を変更' : '画像を登録')}</button>{draft.state.thumbnailFilename && <button className="ghost-button" disabled={locked} onClick={() => void removeThumbnail()}>{t('削除')}</button>}</div>
                 <input ref={fileRef} hidden disabled={locked} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = '' }} />
                 <Toggle disabled={locked} checked={draft.state.thumbnailAutoApply} label={t('ゲーム選択時に自動適用')} onChange={(value) => patch('state', { ...draft.state, thumbnailAutoApply: value })} />
                 <p>{t('PNG / JPG / WEBP・最大4MB。初回登録後は毎回の選択は不要です。未登録でも配信は開始できます。')}</p>
@@ -451,7 +535,7 @@ function AddGameModal({ initialGroup, onClose, onCreate }: { initialGroup: Platf
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section ref={modalRef} className="modal add-game-modal" role="dialog" aria-modal="true" aria-labelledby="add-game-title" tabIndex={-1}><header className="modal-header"><div className="empty-tile"><Plus size={15} /></div><h2 id="add-game-title">{t('ゲームを追加')}</h2><button className="square-button" aria-label={t('閉じる')} onClick={onClose}><X size={15} /></button></header><div className="add-game-body"><label>{t('ゲーム名')}<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder={t('例: Elden Ring')} /></label><div className="field-grid"><label>{t('分類')}<select value={draft.platformGroup} onChange={(event) => setDraft({ ...draft, platformGroup: event.target.value as PlatformGroup })}><option value="pc">PC</option><option value="switch">Switch</option><option value="exception">{t('例外')}</option></select></label><label>{t('ソース')}<select value={draft.captureMethod} onChange={(event) => setDraft({ ...draft, captureMethod: event.target.value as CaptureMethod })}>{Object.entries(captureLabels).map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}</select></label></div><label>{t('Steam App ID（任意）')}<input inputMode="numeric" value={draft.steamAppId} onChange={(event) => setDraft({ ...draft, steamAppId: event.target.value })} placeholder={t('Steamのゲームのみ')} /></label><p>{t('追加後にゲーム設定が開き、キャプチャ方式・タイトル・サムネイルなどを編集できます。')}</p></div><footer className="modal-footer"><button className="primary-button" disabled={!draft.name.trim()} onClick={create}>{t('追加して設定を開く')}</button><button className="ghost-button close-button" onClick={onClose}>{t('キャンセル')}</button></footer></section></div>
 }
 
-function SettingsView({ config, status, oauthStatus, oauthProgress, steamScan, onSave, onBackup, onRestore, onSteamScan, onOAuthConnect, onTwitchOutputTest, onReconnect, onOpenSetup }: { config: AppConfig; status: RuntimeStatus; oauthStatus: OAuthConnectionStatuses; oauthProgress: OAuthProgress; steamScan: SteamSyncResult | null; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamScan: () => Promise<void>; onOAuthConnect: (provider: OAuthProvider) => Promise<void>; onTwitchOutputTest: () => Promise<void>; onReconnect: () => Promise<void>; onOpenSetup: () => void }) {
+function SettingsView({ config, profiles, status, obsSetup, oauthStatus, oauthProgress, steamScan, language, onLanguageChange, onSave, onProfileSave, onBackup, onRestore, onSteamScan, onOAuthConnect, onTwitchOutputTest, onReconnect, onOpenSetup, onTemplateChanged }: { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus; obsSetup: LocalObsSetupStatus; oauthStatus: OAuthConnectionStatuses; oauthProgress: OAuthProgress; steamScan: SteamSyncResult | null; language: UiLanguage; onLanguageChange: (language: UiLanguage) => Promise<void>; onSave: (config: AppConfig, secrets: Record<string, string>) => Promise<void>; onProfileSave: (profile: GameProfile) => Promise<void>; onBackup: () => Promise<void>; onRestore: (file: File) => Promise<void>; onSteamScan: () => Promise<void>; onOAuthConnect: (provider: OAuthProvider) => Promise<void>; onTwitchOutputTest: () => Promise<void>; onReconnect: () => Promise<void>; onOpenSetup: () => void; onTemplateChanged: (template: AppConfig['commonTemplate'], feedback: { kind: 'success' | 'warning'; text: string }) => void }) {
   const { t } = useI18n()
   const [draft, setDraft] = useState(config)
   const [secrets, setSecrets] = useState<Record<string, string>>({})
@@ -472,26 +556,33 @@ function SettingsView({ config, status, oauthStatus, oauthProgress, steamScan, o
   ]
   return <main className="settings-view">
     {settingsError && <div className="inline-warning error" role="alert"><AlertTriangle size={14} /><span>{settingsError}</span></div>}
-    <section className="settings-card obs-settings-card"><div className="card-title-row"><h2>OBS WebSocket</h2><span className={`connection-label ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} />OBS {t(status.obsConnected ? '接続中' : '未接続')}</span></div><div className="connection-actions"><code>{draft.obs.url}</code><button className="secondary-button" disabled={saving} onClick={() => void attempt(onReconnect)}>{t('再接続')}</button></div><details className="settings-details"><summary>{t('接続詳細を編集')}</summary><div className="settings-details-body"><label>{t('接続URL')}<input value={draft.obs.url} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, url: event.target.value } })} /></label><label>{t('パスワード')}<input type="password" autoComplete="off" placeholder={t(draft.obs.passwordStored ? '保存済み（変更時のみ入力）' : 'Windows資格情報へ保存')} value={secrets['obs-password'] ?? ''} onChange={(event) => secret('obs-password', event.target.value)} /></label><div className="field-grid"><label>{t('開始待機（秒）')}<input type="number" value={draft.obs.startDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, startDelaySeconds: Number(event.target.value) } })} /></label><label>{t('終了待機（秒）')}<input type="number" value={draft.obs.endDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, endDelaySeconds: Number(event.target.value) } })} /></label></div><button className="primary-button" disabled={saving} onClick={() => void save()}>{t('接続設定を保存')}</button></div></details></section>
+    <div className="settings-group-label">{t('接続設定')}</div>
+    <section className="settings-card obs-settings-card"><div className="card-title-row"><h2>{t('OBS連携')}</h2><span className={`connection-label ${status.obsConnected ? 'connected' : obsSetup.phase === 'error' ? 'error' : 'optional'}`}><StatusDot tone={status.obsConnected ? 'live' : obsSetup.phase === 'error' ? 'error' : 'pending'} />{t(status.obsConnected ? '接続中' : obsSetup.phase === 'ready' ? '起動待ち' : '準備中')}</span></div><p>{t(status.obsConnected ? 'OBSとの接続は完了しています。通常は変更不要です。' : obsSetup.detail)}</p><div className="connection-actions"><button className="secondary-button" disabled={saving} onClick={() => void attempt(onReconnect)}><RefreshCw size={14} />{t('状態を再確認')}</button></div><details className="settings-details"><summary>{t('高度な接続設定（通常は変更不要）')}</summary><div className="settings-details-body"><label>{t('接続URL')}<input value={draft.obs.url} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, url: event.target.value } })} /></label><label>{t('パスワード')}<input type="password" autoComplete="off" placeholder={t(draft.obs.passwordStored ? '保存済み（変更時のみ入力）' : 'Windows資格情報へ保存')} value={secrets['obs-password'] ?? ''} onChange={(event) => secret('obs-password', event.target.value)} /></label><div className="field-grid"><label>{t('開始待機（秒）')}<input type="number" value={draft.obs.startDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, startDelaySeconds: Number(event.target.value) } })} /></label><label>{t('終了待機（秒）')}<input type="number" value={draft.obs.endDelaySeconds} onChange={(event) => setDraft({ ...draft, obs: { ...draft.obs, endDelaySeconds: Number(event.target.value) } })} /></label></div><button className="primary-button" disabled={saving} onClick={() => void save()}>{t('接続設定を保存')}</button></div></details></section>
     <OAuthServiceCard status={oauthStatus.youtube} progress={oauthProgress.youtube} saving={saving} onConnect={() => void attempt(() => onOAuthConnect('youtube'))} />
     <OAuthServiceCard status={oauthStatus.twitch} progress={oauthProgress.twitch} saving={saving} onConnect={() => void attempt(() => onOAuthConnect('twitch'))} onTestOutput={() => void attempt(onTwitchOutputTest)} outputReady={status.twitchOutputPluginReady} />
     {config.features.twitch && !status.twitchOutputPluginReady && <div className="inline-warning"><AlertTriangle size={14} /><span>{t(status.twitchOutputPlugin?.detail ?? '同時配信用プラグインを反映するためOBSを再起動してください')}</span></div>}
+    <div className="settings-group-label">{t('配信画面')}</div>
+    <CommonTemplateEditor config={config.commonTemplate ?? defaultCommonTemplateConfig} profiles={profiles} disabled={saving || status.streaming} onChanged={onTemplateChanged} onProfileChanged={onProfileSave} />
+    <div className="settings-group-label">{t('機能')}</div>
     {window.obsStreamManagerDesktop && <section className="settings-card"><h2>{t('OBS連携と終了動作')}</h2><p>{t('EXEが同梱ローカルサーバーを自動起動します。利用者がNode.jsやサーバーを準備する必要はありません。画面の×は通知領域へ格納し、OBSドックを維持します。')}</p><div className="feature-list"><DesktopIntegrationControl /></div><button className="danger-outline" disabled={saving || status.streaming} onClick={() => { if (window.confirm(t('完全に終了するとOBSドックも停止します。終了しますか？'))) void window.obsStreamManagerDesktop?.quit() }}>{t('ドックも停止して完全に終了')}</button></section>}
     <DesktopUpdateControl status={status} />
     <section className="settings-card"><h2>{t('機能')}</h2><div className="feature-list">{featureRows.map((feature) => <div className="feature-row" key={feature.key}><div><strong>{feature.label}</strong><span>{feature.note}</span></div><Toggle disabled={saving || status.streaming} checked={draft.features[feature.key]} label={t(draft.features[feature.key] ? '有効' : '無効')} onChange={(value) => updateFeature(feature.key, value)} /></div>)}</div></section>
     <section className="settings-card"><h2>{t('OBS音声ソース名')}</h2><div className="source-chips">{Object.values(draft.sources).map((source) => <code key={source}>{source}</code>)}</div><details className="settings-details"><summary>{t('ソース名を編集')}</summary><div className="settings-details-body field-grid">{Object.entries(draft.sources).map(([key, value]) => <label key={key}>{key}<input value={value} onChange={(event) => setDraft({ ...draft, sources: { ...draft.sources, [key]: event.target.value } })} /></label>)}<button className="primary-button" disabled={saving} onClick={() => void save()}>{t('ソース名を保存')}</button></div></details></section>
+    <div className="settings-group-label">{t('ライブラリ')}</div>
     <section className="settings-card"><div className="card-title-row"><h2>{t('Steam ライブラリ同期')}</h2><span className={`connection-label ${steamScan?.libraries.length ? 'connected' : 'optional'}`}><StatusDot tone={steamScan?.libraries.length ? 'live' : steamScan ? 'inactive' : 'pending'} />{t(steamScan ? steamScan.libraries.length ? '検出済み' : 'Steam未使用' : status.streaming ? '配信後に確認' : 'スキャン中')}</span></div><p>{t('Steamクライアントにログイン済みのライブラリから、未インストールを含むゲームを自動追加します。SteamIDやAPIキーの入力は不要です。')}</p><div className="feature-list"><div className="feature-row"><div><strong>{steamScan ? steamScan.libraries.length ? t('所有{owned}本・ローカル{installed}本', { owned: steamScan.owned, installed: steamScan.installed }) : t('Steamなしで利用可能') : t(status.streaming ? '配信中は自動追加を停止' : 'Steamを確認しています')}</strong><span>{steamScan ? steamScan.libraries.length ? t('未インストールのゲームはGeForce NOW用として追加されます') : t('ゲーム一覧の追加ボタンから手動登録できます') : t(status.streaming ? '配信終了後の再読込または再スキャンで反映します' : 'Steamの所有ゲームキャッシュを確認します')}</span></div></div></div>{steamScan?.libraries.length ? <div className="source-chips">{steamScan.libraries.map((library) => <code key={library}>{library}</code>)}</div> : null}<button className="secondary-button" disabled={saving || status.streaming} onClick={() => void attempt(onSteamScan)}><RefreshCw size={14} />{t('Steamライブラリを同期')}</button></section>
+    <div className="settings-group-label">{t('データ')}</div>
     <section className="settings-card"><h2>{t('初期セットアップ')}</h2><p>{t('OBS、配信サービス、ゲーム検出の案内をもう一度開きます。Steamを利用しない設定にも対応しています。')}</p><button className="secondary-button" disabled={saving || status.streaming} onClick={onOpenSetup}><Settings size={14} />{t('セットアップを開く')}</button></section>
-    <section className="settings-card"><h2>{t('バックアップ / 復元')}</h2><p>{t('アプリ設定・ゲームプロファイル・サムネイルを書き出します。OBS本体の設定と、OAuthトークンなどの秘密情報は含まれません。')}</p><div className="button-row"><button className="secondary-button" disabled={saving} onClick={() => void attempt(onBackup)}><ArrowDownToLine size={14} />{t('書き出し')}</button><label className="ghost-button file-button"><Upload size={14} />{t('復元')}<input hidden type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void attempt(() => onRestore(file)); event.currentTarget.value = '' }} /></label></div></section>
+    <section className="settings-card"><h2>{t('バックアップ / 復元')}</h2><p>{t('アプリ設定・ゲームプロファイル・サムネイル・共通テンプレート・BGMを書き出します。OBS本体の設定と、OAuthトークンなどの秘密情報は含まれません。')}</p><div className="button-row"><button className="secondary-button" disabled={saving} onClick={() => void attempt(onBackup)}><ArrowDownToLine size={14} />{t('書き出し')}</button><label className="ghost-button file-button"><Upload size={14} />{t('復元')}<input hidden type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void attempt(() => onRestore(file)); event.currentTarget.value = '' }} /></label></div></section>
+    <section className="settings-card language-settings-card"><h2>{t('表示言語')}</h2><div className="language-segments" role="group" aria-label={t('表示言語')}><button className={language === 'ja' ? 'active' : ''} type="button" disabled={saving} onClick={() => void attempt(() => onLanguageChange('ja'))}>日本語</button><button className={language === 'en' ? 'active' : ''} type="button" disabled={saving} onClick={() => void attempt(() => onLanguageChange('en'))}>English</button></div></section>
   </main>
 }
 
 type FirstRunSetupProps = {
-  config: AppConfig
   status: RuntimeStatus
+  obsSetup: LocalObsSetupStatus
   oauthStatus: OAuthConnectionStatuses | null
   steamScan: SteamSyncResult | null
-  onSaveObs: (url: string, password: string) => Promise<void>
+  onPrepareObs: () => Promise<void>
   onConnect: (provider: OAuthProvider) => Promise<void>
   onSteamScan: () => Promise<void>
   onFinish: (openManualGame: boolean) => Promise<void>
@@ -499,29 +590,18 @@ type FirstRunSetupProps = {
   onDismiss: () => void
 }
 
-function FirstRunSetup({ config, status, oauthStatus, steamScan, onSaveObs, onConnect, onSteamScan, onFinish, onLanguageChange, onDismiss }: FirstRunSetupProps) {
+function FirstRunSetup({ status, obsSetup, oauthStatus, steamScan, onPrepareObs, onConnect, onSteamScan, onFinish, onLanguageChange, onDismiss }: FirstRunSetupProps) {
   const { t, language } = useI18n()
   const [step, setStep] = useState(0)
-  const [obsUrl, setObsUrl] = useState(config.obs.url)
-  const [obsPassword, setObsPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
-  const dockUrl = window.obsStreamManagerDesktop?.dockUrl ?? 'http://127.0.0.1:4317'
-  const steps = [t('ようこそ'), 'OBS', t('配信サービス'), t('ゲーム')]
+  const steps = ['OBS', t('配信サービス'), t('ゲーム')]
   const attempt = async (operation: () => Promise<void>) => {
     if (busy) return
     setBusy(true)
     setError(null)
     try { await operation() } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) }
   }
-  const copyDockUrl = async () => {
-    if (window.obsStreamManagerDesktop) await window.obsStreamManagerDesktop.copyDockUrl()
-    else await navigator.clipboard.writeText(dockUrl)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 2_000)
-  }
-  const saveObs = () => attempt(async () => { await onSaveObs(obsUrl, obsPassword); setObsPassword(''); setStep(2) })
   const finish = (openManualGame: boolean) => attempt(() => onFinish(openManualGame))
   const steamChecked = steamScan !== null
   const steamDetected = Boolean(steamScan?.libraries.length)
@@ -539,27 +619,21 @@ function FirstRunSetup({ config, status, oauthStatus, steamScan, onSaveObs, onCo
       <div className="setup-body">
         {error && <div className="inline-warning error" role="alert"><AlertTriangle size={14} /><span>{error}</span></div>}
         {step === 0 && <div className="setup-step">
-          <div className="setup-lead"><Gamepad2 size={28} /><div><h3>{t('配信準備を順番に確認します')}</h3><p>{t('Steamにログイン済みなら、未インストールを含む所有ゲームを自動追加します。Steamがなくても手動登録できます。')}</p></div></div>
-          <div className="setup-dock"><div><strong>{t('OBSブラウザドック URL')}</strong><code>{dockUrl}</code></div><button className="secondary-button" onClick={() => void attempt(copyDockUrl)}><Copy size={14} />{t(copied ? 'コピー済み' : 'コピー')}</button></div>
-          <p className="setup-note">{t('OBSの「ドック」→「カスタムブラウザドック」へ、このURLを登録してください。')}</p>
+          <div className="setup-lead">{obsSetup.phase === 'ready' ? <Check size={28} /> : obsSetup.phase === 'error' ? <AlertTriangle size={28} /> : <LoaderCircle className={busy ? 'spin' : ''} size={28} />}<div><h3>{t(status.obsConnected ? 'OBSとの接続は完了しています' : obsSetup.phase === 'ready' ? 'OBSを起動するだけで使えます' : 'OBS連携を自動で準備します')}</h3><p>{t(status.obsConnected ? 'このまま配信サービスとゲームの確認へ進めます。' : obsSetup.detail)}</p></div></div>
+          <div className="setup-status-row"><div><strong>{t('OBS連携')}</strong><span>{t('URLやパスワードの入力は不要です')}</span></div><span className={`connection-label ${status.obsConnected || obsSetup.phase === 'ready' ? 'connected' : obsSetup.phase === 'error' ? 'error' : 'optional'}`}><StatusDot tone={status.obsConnected || obsSetup.phase === 'ready' ? 'live' : obsSetup.phase === 'error' ? 'error' : 'pending'} />{t(status.obsConnected ? '接続済み' : obsSetup.phase === 'ready' ? '準備完了' : '準備中')}</span></div>
+          <button className="secondary-button setup-rescan" disabled={busy} onClick={() => void attempt(onPrepareObs)}><RefreshCw size={14} />{t('状態を再確認')}</button>
           <DesktopIntegrationControl setup />
         </div>}
         {step === 1 && <div className="setup-step">
-          <div className="setup-status-row"><div><strong>OBS WebSocket</strong><span>{t('OBS 30以降の「ツール」→「WebSocketサーバー設定」で有効化します。')}</span></div><span className={`connection-label ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} />{t(status.obsConnected ? '接続中' : '未接続')}</span></div>
-          <label>{t('接続URL')}<input value={obsUrl} onChange={(event) => setObsUrl(event.target.value)} /></label>
-          <label>{t('パスワード')}<input type="password" autoComplete="off" value={obsPassword} onChange={(event) => setObsPassword(event.target.value)} placeholder={t(config.obs.passwordStored ? '保存済み（変更しない場合は空欄）' : 'Windows資格情報へ保存')} /></label>
-          <p className="setup-note">{t('OBSをまだ起動していなくても保存して先へ進めます。')}</p>
-        </div>}
-        {step === 2 && <div className="setup-step">
           <p className="setup-note">{t('利用するサービスだけ接続できます。認証は後から設定画面でも行えます。')}</p>
           {(['youtube', 'twitch'] as const).map((provider) => {
             const connection = oauthStatus?.[provider]
             const label = provider === 'youtube' ? 'YouTube' : 'Twitch'
             const connected = connection?.stage === 'connected'
-            return <div className="setup-service" key={provider}><ServiceIcon service={provider} /><div><strong>{label}</strong><span>{t(connected ? '認証情報を保存済み' : connection?.appConfigured ? 'ブラウザで認証できます' : '配布パッケージ側の設定が必要です')}</span></div><button className={connected ? 'ghost-button' : 'primary-button'} disabled={busy || !connection?.appConfigured} onClick={() => void attempt(() => onConnect(provider))}>{t(connected ? '再認証' : '接続')}</button></div>
+            return <div className="setup-service" key={provider}><ServiceIcon service={provider} /><div><strong>{label}</strong><span>{t(connected ? '接続済み' : connection?.appConfigured ? 'ブラウザで接続できます' : 'この配布版では接続を準備できませんでした')}</span></div><button className={connected ? 'ghost-button' : 'primary-button'} disabled={busy || !connection?.appConfigured} onClick={() => void attempt(() => onConnect(provider))}>{t(connected ? '再接続' : '接続')}</button></div>
           })}
         </div>}
-        {step === 3 && <div className="setup-step">
+        {step === 2 && <div className="setup-step">
           <div className={`setup-steam-result ${steamDetected ? 'detected' : ''}`}><Gamepad2 size={24} /><div><strong>{steamDetected ? t('Steamの所有ゲームを{count}本検出', { count: steamScan?.owned ?? 0 }) : t(steamChecked ? 'Steamなしでも利用できます' : 'Steamをまだ確認していません')}</strong><span>{steamDetected ? t('ローカル{installed}本・クラウド利用{cloud}本を一覧へ反映しました', { installed: steamScan?.installed ?? 0, cloud: Math.max(0, (steamScan?.owned ?? 0) - (steamScan?.installed ?? 0)) }) : t(steamChecked ? 'Game Pass、GeForce NOW、Switch、単体EXEはセットアップ後に手動追加してください。' : '再スキャンするとSteamの有無を確認できます。Steamを使わず手動追加へ進むこともできます。')}</span></div></div>
           {steamScan?.warnings[0] && !steamDetected && <p className="setup-note">{t('Steam検出結果: {warning}', { warning: steamScan.warnings[0] })}</p>}
           <button className="secondary-button setup-rescan" disabled={busy} onClick={() => void attempt(onSteamScan)}><RefreshCw size={14} />{t('Steamを再スキャン')}</button>
@@ -569,9 +643,7 @@ function FirstRunSetup({ config, status, oauthStatus, steamScan, onSaveObs, onCo
       <footer className="modal-footer setup-footer">
         {step > 0 && <button className="ghost-button" disabled={busy} onClick={() => setStep((current) => current - 1)}>{t('戻る')}</button>}
         <button className="ghost-button close-button" disabled={busy} onClick={onDismiss}>{t('後で設定')}</button>
-        {step === 0 && <button className="primary-button" disabled={busy} onClick={() => setStep(1)}>{t('はじめる')}</button>}
-        {step === 1 && <button className="primary-button" disabled={busy || !obsUrl.trim()} onClick={saveObs}>{busy ? <LoaderCircle className="spin" size={14} /> : null}{t('保存して次へ')}</button>}
-        {step === 2 && <button className="primary-button" disabled={busy} onClick={() => setStep(3)}>{t('次へ')}</button>}
+        {step < 2 && <button className="primary-button" disabled={busy} onClick={() => setStep((current) => current + 1)}>{t('次へ')}</button>}
       </footer>
     </section>
   </div>
@@ -586,7 +658,7 @@ function ControlPanel({ status, selected, busy, onChooseGame, onStart, onStop, o
   const reason = !status.obsConnected ? t('OBSへ接続すると配信を開始できます') : !selected ? t('配信前にゲームを選択してください') : status.busy || busy ? t('処理が完了するまでお待ちください') : null
   return <aside className="control-panel" aria-label={t('配信操作')}>
     {restartDetected && <div className="control-warning"><AlertTriangle size={14} /><span>{t('アプリ再起動後の配信を検出しました。現在の配信を安全に終了できます。')}</span></div>}
-    {selected ? <div className="selection-summary has-selection"><ProfileArtwork profile={selected} size="small" /><div className="selection-summary-copy"><span className="selection-label"><Check size={11} strokeWidth={3} />{t('現在選択中')}</span><strong>{selected.displayName}</strong><span>{status.captureMethod ? t(captureLabels[status.captureMethod]) : t('未判定')} · {thumbnailStatusLabel(selected, t)}</span></div><b><Check size={12} strokeWidth={3} />{t('配信対象')}</b></div> : <button type="button" className="selection-summary empty-selection-action" onClick={onChooseGame}><div className="empty-tile"><Plus size={15} /></div><div className="selection-summary-copy"><strong>{t('配信するゲームを選んでください')}</strong><span>{t('ゲーム一覧でカードを押すと配信設定が適用されます')}</span></div><b>{t('ゲーム一覧へ')}<ChevronRight size={12} /></b></button>}
+    {selected ? <div className="selection-summary has-selection"><ProfileArtwork profile={selected} size="small" /><div className="selection-summary-copy"><span className="selection-label"><Check size={11} strokeWidth={3} />{t('現在選択中')}</span><strong>{selected.displayName}</strong><span>{status.captureMethod ? t(captureLabels[status.captureMethod]) : t('未判定')} · {thumbnailStatusLabel(selected, t)}</span></div><div className="selection-summary-actions"><b><Check size={12} strokeWidth={3} />{t('配信対象')}</b><button type="button" onClick={onEdit}><Settings size={12} />{t('設定を編集')}</button></div></div> : <button type="button" className="selection-summary empty-selection-action" onClick={onChooseGame}><div className="empty-tile"><Plus size={15} /></div><div className="selection-summary-copy"><strong>{t('配信するゲームを選んでください')}</strong><span>{t('ゲーム一覧でカードを押すと配信設定が適用されます')}</span></div><b>{t('ゲーム一覧へ')}<ChevronRight size={12} /></b></button>}
     {!restartDetected && selected && !selected.state.thumbnailFilename && !showStop && <button className="thumbnail-register-link" onClick={onEdit}><ImageIcon size={14} />{t('初回サムネイルを登録')}</button>}
     {status.warning && <div className="control-warning"><AlertTriangle size={14} /><span>{t(status.warning)}</span></div>}
     <div className="control-actions">{showStop ? <button className="stop-button" disabled={busy || status.busy} onClick={onStop}>{busy ? <LoaderCircle className="spin" size={15} /> : <CircleStop size={15} />}{t('配信終了')}</button> : <button className="start-button" disabled={disabled} onClick={onStart}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} fill="currentColor" />}{t('配信開始')}</button>}<button className="clip-button" disabled={!status.replayBuffer || busy} onClick={onReplay}><ArrowDownToLine size={14} />{t('クリップ保存')}</button></div>
@@ -599,6 +671,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<GameProfile[]>([])
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
+  const [obsSetup, setObsSetup] = useState<LocalObsSetupStatus | null>(null)
   const [oauthStatus, setOAuthStatus] = useState<OAuthConnectionStatuses | null>(null)
   const [oauthProgress, setOAuthProgress] = useState<OAuthProgress>({})
   const [search, setSearch] = useState('')
@@ -611,11 +684,15 @@ export default function App() {
   const [actionBusy, setActionBusy] = useState(false)
   const [comments, setComments] = useState<ChatMessage[]>([])
   const [steamScan, setSteamScan] = useState<SteamSyncResult | null>(null)
+  const [audioEnsureRetry, setAudioEnsureRetry] = useState(0)
   const actionLock = useRef(false)
   const oauthPopup = useRef<Window | null>(null)
   const oauthStatusRequest = useRef(0)
   const previousOAuthStatus = useRef<OAuthConnectionStatuses | null>(null)
   const selectedServiceResults = useRef<Array<{ service: OAuthProvider; ok: boolean; message: string }>>([])
+  const audioEnsureAttemptKey = useRef<string | null>(null)
+  const audioEnsureFailureCount = useRef(0)
+  const audioEnsureErrorShown = useRef(false)
   const language = config?.ui.language ?? 'ja'
   const t = useMemo(() => createTranslator(language), [language])
 
@@ -633,7 +710,7 @@ export default function App() {
     return connections
   }, [])
 
-  const refresh = async () => { const [data] = await Promise.all([api.bootstrap(), loadOAuthStatus()]); setProfiles(data.profiles); setConfig(data.config); setStatus(data.status); setLoading(false) }
+  const refresh = async () => { const [data] = await Promise.all([api.bootstrap(), loadOAuthStatus()]); setProfiles(data.profiles); setConfig(data.config); setStatus(data.status); setObsSetup(data.obsSetup); setLoading(false) }
   const refreshOAuth = async () => { const connections = await loadOAuthStatus(); if (!connections) return; setOAuthProgress((current) => ({ youtube: connections.youtube.authorizationInProgress ? current.youtube : undefined, twitch: connections.twitch.authorizationInProgress ? current.twitch : undefined })) }
   const oauthPollingInterval = oauthRefreshInterval(oauthStatus)
   useEffect(() => {
@@ -658,6 +735,7 @@ export default function App() {
         setProfiles(initialProfiles)
         setConfig(data.config)
         setStatus(data.status)
+        setObsSetup(data.obsSetup)
         setSetupOpen(!data.config.setup.completed)
         setLoading(false)
         void loadOAuthStatus().catch((error: Error) => setToast({ kind: 'error', text: 'OAuth接続状態を取得できません: {error}', values: { error: error.message } }))
@@ -670,7 +748,49 @@ export default function App() {
     void initialize()
     return () => { active = false }
   }, [loadOAuthStatus])
-  useEffect(() => { const timer = window.setInterval(() => void api.status().then(setStatus).catch(() => undefined), 2_000); return () => window.clearInterval(timer) }, [])
+  useEffect(() => { const timer = window.setInterval(() => void Promise.all([api.status(), api.obsSetup()]).then(([nextStatus, nextSetup]) => { setStatus(nextStatus); setObsSetup(nextSetup) }).catch(() => undefined), 2_000); return () => window.clearInterval(timer) }, [])
+  useEffect(() => {
+    if (!status?.obsConnected) {
+      audioEnsureAttemptKey.current = null
+      audioEnsureFailureCount.current = 0
+      audioEnsureErrorShown.current = false
+      return
+    }
+    const externalActive = [status.platforms.youtube.state, status.platforms.twitch.state].some((state) => ['starting', 'live', 'stopping'].includes(state))
+    if (!status.selectedGameId || !status.captureMethod || status.busy || status.streaming || status.recording || status.replayBuffer || externalActive) return
+    const connectionKey = `${status.selectedGameId}:${status.captureMethod}`
+    if (audioEnsureAttemptKey.current !== connectionKey) {
+      audioEnsureAttemptKey.current = connectionKey
+      audioEnsureFailureCount.current = 0
+      audioEnsureErrorShown.current = false
+    }
+    let cancelled = false
+    let retryTimer: number | undefined
+    const retry = (countFailure = true) => {
+      const failures = countFailure ? ++audioEnsureFailureCount.current : audioEnsureFailureCount.current
+      if (countFailure && failures > 6) return
+      const delayMs = countFailure ? Math.min(60_000, 5_000 * (2 ** (failures - 1))) : 5_000
+      retryTimer = window.setTimeout(() => setAudioEnsureRetry((revision) => revision + 1), delayMs)
+    }
+    void api.ensureAudio().then(({ applied, warnings }) => {
+      if (cancelled) return
+      if (applied) {
+        audioEnsureFailureCount.current = 0
+      } else retry(warnings.length > 0)
+      if (warnings[0] && !audioEnsureErrorShown.current) {
+        audioEnsureErrorShown.current = true
+        setToast({ kind: 'warning', text: warnings[0] })
+      }
+    }).catch((error) => {
+      if (cancelled) return
+      if (!audioEnsureErrorShown.current) {
+        audioEnsureErrorShown.current = true
+        setToast({ kind: 'warning', text: 'マイク音量の自動適用に失敗しました: {error}', values: { error: error instanceof Error ? error.message : String(error) } })
+      }
+      retry()
+    })
+    return () => { cancelled = true; if (retryTimer !== undefined) window.clearTimeout(retryTimer) }
+  }, [audioEnsureRetry, status?.busy, status?.captureMethod, status?.obsConnected, status?.platforms.twitch.state, status?.platforms.youtube.state, status?.recording, status?.replayBuffer, status?.selectedGameId, status?.streaming])
   useEffect(() => {
     const streaming = Boolean(status?.streaming)
     if (wasStreaming.current && !streaming) void api.profiles().then(setProfiles).catch(() => undefined)
@@ -696,7 +816,7 @@ export default function App() {
       let origin: URL
       try { origin = new URL(event.origin) } catch { return }
       const trustedLoopback = origin.protocol === 'http:' && (origin.hostname === '127.0.0.1' || origin.hostname === 'localhost')
-      if (event.source === oauthPopup.current && trustedLoopback && event.data?.type === 'oauth-complete') { oauthPopup.current = null; void Promise.all([api.bootstrap(), loadOAuthStatus()]).then(([data]) => { setConfig(data.config); setStatus(data.status) }) }
+      if (event.source === oauthPopup.current && trustedLoopback && event.data?.type === 'oauth-complete') { oauthPopup.current = null; void Promise.all([api.bootstrap(), loadOAuthStatus()]).then(([data]) => { setConfig(data.config); setStatus(data.status); setObsSetup(data.obsSetup) }) }
     }
     window.addEventListener('message', authenticated)
     return () => window.removeEventListener('message', authenticated)
@@ -816,10 +936,12 @@ export default function App() {
       values: result.libraries.length ? { owned: result.owned, installed: result.installed, created: result.created, warning: result.warnings[0] ? ` / ${result.warnings[0]}` : '' } : undefined,
     })
   }
-  const saveSetupObs = async (url: string, password: string) => {
-    if (!config) return
-    await saveAppConfig({ ...config, obs: { ...config.obs, url: url.trim() } }, password ? { 'obs-password': password } : {})
-    setStatus(await api.status())
+  const prepareObs = async () => {
+    setObsSetup(await api.prepareObs())
+    const data = await api.bootstrap()
+    setConfig(data.config)
+    setStatus(data.status)
+    setObsSetup(data.obsSetup)
   }
   const finishSetup = async (openManualGame: boolean) => {
     if (!config) return
@@ -843,25 +965,25 @@ export default function App() {
   }
   const deleteThumbnail = async (draft: GameProfile) => { if (!window.confirm(t('登録済みサムネイルを削除しますか？'))) return; const persisted = await api.saveProfile(draft); let saved: GameProfile; try { saved = await api.deleteThumbnail(persisted.id) } catch (error) { throw new Error(t('設定は保存されましたが、サムネイルの削除に失敗しました: {error}', { error: error instanceof Error ? error.message : String(error) })) }; setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setEditing(saved); const latest = await api.status().catch(() => null); if (latest) setStatus(latest); setToast({ kind: 'success', text: '設定を維持したままサムネイルを削除しました' }) }
 
-  if (loading || !config || !status) return <div className="loading-screen"><LoaderCircle className="spin" /><span>{t('ストリーム環境を読み込み中')}</span></div>
+  if (loading || !config || !status || !obsSetup) return <div className="loading-screen"><LoaderCircle className="spin" /><span>{t('ストリーム環境を読み込み中')}</span></div>
 
   return <I18nProvider language={language}><div className="app-frame"><div className="app-shell">
-    <header className="app-header"><div className="brand"><div className="brand-mark"><BrandGlyph /></div><strong>STREAM MANAGER</strong></div><div className="header-actions"><label className="language-picker"><span>{t('言語')}</span><select aria-label={t('言語を変更')} value={language} onChange={(event) => void run(() => changeLanguage(event.target.value as UiLanguage))}><option value="ja">日本語</option><option value="en">English</option></select></label><div className={`header-status ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} /><span>OBS {t(status.obsConnected ? '接続中' : '未接続')}</span></div></div></header>
+    <header className="app-header"><div className="brand"><div className="brand-mark"><BrandGlyph /></div><strong>STREAM MANAGER</strong></div><div className={`header-status ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} /><span>OBS {t(status.obsConnected ? '接続中' : '未接続')}</span></div></header>
     <DesktopLaunchNotice />
     <nav className="tabs">{groups.map(({ id, label }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{t(label)}</button>)}</nav>
     <RuntimeStatusBar status={status} />
     <CommentsSection comments={comments} language={language} streaming={status.streaming} t={t} />
-    {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} status={status} oauthStatus={oauthStatus} oauthProgress={oauthProgress} steamScan={steamScan} onOAuthConnect={connectOAuth} onTwitchOutputTest={async () => { setToast({ kind: 'warning', text: 'Twitchへ非公開の映像テストを15秒間送信しています' }); const result = await api.testTwitchOutput(); setToast({ kind: result.skippedFrames === 0 ? 'success' : 'warning', text: 'Twitch映像テスト成功: {seconds}秒・{megabytes}MB送信・欠落{skipped}フレーム', values: { seconds: Math.round(result.durationMs / 1000), megabytes: (result.bytesSent / 1_000_000).toFixed(1), skipped: result.skippedFrames } }); await refresh() }} onReconnect={async () => { await refresh(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { await saveAppConfig(next, secrets); setToast({ kind: 'success', text: '設定を保存しました' }) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamScan={scanSteam} onOpenSetup={() => setSetupOpen(true)} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>{t('OAuth接続状態を取得できません。OBS操作は利用できます。')}</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />{t('状態を再確認')}</button></main>) : <main className="library-view">
+    {tab === 'settings' ? (oauthStatus ? <SettingsView key={JSON.stringify(config)} config={config} profiles={profiles} status={status} obsSetup={obsSetup} oauthStatus={oauthStatus} oauthProgress={oauthProgress} steamScan={steamScan} language={language} onLanguageChange={changeLanguage} onOAuthConnect={connectOAuth} onTwitchOutputTest={async () => { setToast({ kind: 'warning', text: 'Twitchへ非公開の映像テストを15秒間送信しています' }); const result = await api.testTwitchOutput(); setToast({ kind: result.skippedFrames === 0 ? 'success' : 'warning', text: 'Twitch映像テスト成功: {seconds}秒・{megabytes}MB送信・欠落{skipped}フレーム', values: { seconds: Math.round(result.durationMs / 1000), megabytes: (result.bytesSent / 1_000_000).toFixed(1), skipped: result.skippedFrames } }); await refresh() }} onReconnect={async () => { await prepareObs(); setToast({ kind: 'success', text: 'OBS接続状態を再確認しました' }) }} onSave={async (next, secrets) => { await saveAppConfig(next, secrets); setToast({ kind: 'success', text: '設定を保存しました' }) }} onProfileSave={async (profile) => { const saved = await api.saveProfile(profile); setProfiles((current) => current.map((item) => item.id === saved.id ? saved : item)); setToast({ kind: 'success', text: '配信画面ラベルを保存しました' }) }} onTemplateChanged={(template, feedback) => { setConfig((current) => current ? { ...current, commonTemplate: template } : current); setToast(feedback) }} onBackup={async () => { const backup = await api.backup(); const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `obs-stream-manager-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 10_000) }} onRestore={async (file) => { await api.restore(JSON.parse(await file.text())); await refresh(); setToast({ kind: 'success', text: 'バックアップを復元しました' }) }} onSteamScan={scanSteam} onOpenSetup={() => setSetupOpen(true)} /> : <main className="settings-view"><div className="inline-warning error"><AlertTriangle size={14} /><span>{t('OAuth接続状態を取得できません。OBS操作は利用できます。')}</span></div><button className="secondary-button" onClick={() => void refreshOAuth()}><RefreshCw size={14} />{t('状態を再確認')}</button></main>) : tab === 'bgm' ? <BgmLibrarySection obsConnected={status.obsConnected} /> : <main className="library-view">
       <div className="search-row"><label className="search-box"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('ゲームを検索')} />{search && <button aria-label={t('検索をクリア')} onClick={() => setSearch('')}><X size={14} /></button>}</label><button className="add-button" disabled={activeOperation} onClick={() => setAdding(true)}><Plus size={14} />{t('追加')}</button></div>
-      {selected && <SelectedGameBanner profile={selected} status={status} />}
+      {selected && <SelectedGameBanner profile={selected} status={status} onEdit={() => setEditing(selected)} />}
       {tab === 'switch' && <p className="tab-note">{t('Switchはゲーム名を自動判定しません。配信するゲームを手動で選択してください。')}</p>}{tab === 'exception' && <p className="tab-note">{t('通常のライブラリ連携が難しいゲームを扱います。')}</p>}
-      {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>{t('お気に入り')}</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => <button key={profile.id} className={selected?.id === profile.id ? 'selected' : ''} aria-current={selected?.id === profile.id ? 'true' : undefined} disabled={actionBusy} onClick={() => selectGame(profile)}><ProfileArtwork profile={profile} size="favorite" /><strong>{profile.displayName}</strong>{selected?.id === profile.id && <span className="favorite-selected-label"><Check size={10} strokeWidth={3} />{t('選択中')}</span>}</button>)}</div></section>}
+      {filtered.some((profile) => profile.favorite) && !search && <section className="library-section favorites"><h2>{t('お気に入り')}</h2><div className="favorite-list">{filtered.filter((profile) => profile.favorite).map((profile) => { const isSelected = selected?.id === profile.id; return <button key={profile.id} className={isSelected ? 'selected' : ''} aria-label={t(isSelected ? '{game}の設定を編集' : '{game}を選択', { game: profile.displayName })} aria-current={isSelected ? 'true' : undefined} disabled={actionBusy} onClick={() => isSelected ? setEditing(profile) : selectGame(profile)}><ProfileArtwork profile={profile} size="favorite" /><strong>{profile.displayName}</strong>{isSelected && <span className="favorite-selected-label"><Settings size={10} />{t('設定')}</span>}</button> })}</div></section>}
       <section className="library-section"><div className="section-title"><h2>{t(platformTitles[tab])}</h2><span>{filtered.length} {t('件')}</span></div><div className="game-list">{filtered.map((profile) => <GameCard key={profile.id} profile={profile} selected={selected?.id === profile.id} busy={actionBusy} onSelect={() => selectGame(profile)} onEdit={() => setEditing(profile)} onFavorite={() => toggleFavorite(profile)} />)}{filtered.length === 0 && <div className="empty"><Gamepad2 size={24} /><strong>{t('ゲームがありません')}</strong><button onClick={() => setAdding(true)}>{t('ゲームを追加')}</button></div>}</div></section>
     </main>}
     <ControlPanel status={status} selected={selected} busy={actionBusy} onChooseGame={chooseGame} onStart={start} onStop={stop} onReplay={replay} onEdit={() => selected && setEditing(selected)} />
-    {setupOpen && <FirstRunSetup config={config} status={status} oauthStatus={oauthStatus} steamScan={steamScan} onSaveObs={saveSetupObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onLanguageChange={changeLanguage} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}
-    {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} readOnly={activeOperation} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(t('{game}を削除しますか？', { game: editing.displayName }))) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} />}
-    {adding && <AddGameModal initialGroup={tab === 'settings' ? 'pc' : tab} onClose={() => setAdding(false)} onCreate={(profile) => { setAdding(false); setEditing(profile) }} />}
+    {setupOpen && <FirstRunSetup status={status} obsSetup={obsSetup} oauthStatus={oauthStatus} steamScan={steamScan} onPrepareObs={prepareObs} onConnect={connectOAuth} onSteamScan={scanSteam} onFinish={finishSetup} onLanguageChange={changeLanguage} onDismiss={() => { setSetupOpen(false); setToast({ kind: 'success', text: '初期セットアップは次回起動時に再表示されます' }) }} />}
+    {editing && <ProfileEditor key={`${editing.id}:${editing.platformGroup}:${editing.state.thumbnailFilename ?? ''}:${editing.state.thumbnailUpdatedAt ?? ''}`} profile={editing} readOnly={activeOperation} canAutoAdjust={status.obsConnected && status.selectedGameId === editing.id && !activeOperation && !status.streaming && !status.recording && !status.replayBuffer} autoAdjustReason={!status.obsConnected ? 'OBSへ接続してください' : status.selectedGameId !== editing.id ? '先にこのゲームを選択してOBSへ適用してください' : status.streaming || status.recording || status.replayBuffer || activeOperation ? '配信・録画・リプレイを停止してから実行してください' : null} onClose={() => setEditing(null)} onSave={async (profile) => { const wasSelected = status.selectedGameId === profile.id; const saved = await api.saveProfile(profile); setProfiles((current) => [...current.filter((item) => item.id !== saved.id), saved]); setStatus(await api.status()); setToast({ kind: 'success', text: wasSelected ? 'ゲーム設定を保存しました。配信前にゲームを選び直してください' : 'ゲーム設定を保存しました' }) }} onDelete={async () => { if (!window.confirm(t('{game}を削除しますか？', { game: editing.displayName }))) return; await api.deleteProfile(editing.id); setProfiles((current) => current.filter((item) => item.id !== editing.id)); setEditing(null) }} onThumbnail={(file, draft) => uploadThumbnail(draft, file)} onDeleteThumbnail={deleteThumbnail} onAutoAdjust={async (profile) => { const result = await api.autoAdjustAudio(profile.id, profile.audio); setProfiles((current) => current.map((item) => item.id === result.profile.id ? result.profile : item)); setEditing(result.profile); setStatus(await api.status()); const needsAttention = calibrationNeedsAttention(result); setToast({ kind: needsAttention ? 'warning' : 'success', text: needsAttention ? result.warnings[0] ?? '一部の音声は確認が必要です' : '音声設定を自動調整しました' }); return result }} />}
+    {adding && <AddGameModal initialGroup={tab === 'settings' || tab === 'bgm' ? 'pc' : tab} onClose={() => setAdding(false)} onCreate={(profile) => { setAdding(false); setEditing(profile) }} />}
     <div className="toast-stack" aria-live="polite">{toast && <div className={`toast ${toast.kind}`}><StatusDot tone={toast.kind === 'success' ? 'live' : toast.kind === 'error' ? 'error' : 'pending'} /><span>{t(toast.text, toast.values)}</span><button aria-label={t('通知を閉じる')} onClick={() => setToast(null)}><X size={14} /></button></div>}</div>
   </div></div></I18nProvider>
 }

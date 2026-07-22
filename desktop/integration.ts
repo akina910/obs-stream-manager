@@ -1,9 +1,23 @@
+import { execFile } from 'node:child_process'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 export const backgroundLaunchArgument = '--background'
 export const quitApplicationArgument = '--quit'
 export const windowsAppId = 'io.github.akina910.obs-stream-manager'
+export const windowsStartupTaskName = 'OBS Stream Manager'
+export const windowsCompanionRegistryKey = 'HKCU\\Software\\OBS Stream Manager'
+
+export type WindowsStartupRegistration = 'disabled' | 'login-item' | 'task'
+
+type LoginItemSettings = {
+  openAtLogin: boolean
+  path: string
+  args: string[]
+}
+
+type StartupTaskRunner = (args: string[]) => Promise<void>
+type LoginItemSetter = (settings: LoginItemSettings) => void
 
 export type DesktopIntegrationSettings = {
   startWithWindows: boolean
@@ -25,6 +39,70 @@ export function shouldShowWindowForSecondInstance(args: string[]): boolean {
 
 export function supportsWindowsLoginStart(isPackaged: boolean, portableExecutableFile: string | undefined, installedMarkerExists: boolean): boolean {
   return isPackaged && !portableExecutableFile && installedMarkerExists
+}
+
+export function windowsStartupTaskArguments(enabled: boolean, executablePath: string): string[] {
+  if (!enabled) return ['/Delete', '/F', '/TN', windowsStartupTaskName]
+  if (/["\r\n]/.test(executablePath)) throw new Error('The application path cannot be registered as a Windows startup task')
+  return [
+    '/Create',
+    '/F',
+    '/SC',
+    'ONLOGON',
+    '/RL',
+    'LIMITED',
+    '/TN',
+    windowsStartupTaskName,
+    '/TR',
+    `"${executablePath}" ${backgroundLaunchArgument}`,
+  ]
+}
+
+export async function runWindowsStartupTaskCommand(args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    execFile('schtasks.exe', args, { timeout: 5_000, windowsHide: true }, (error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+  })
+}
+
+export function windowsCompanionRegistrationArguments(executablePath: string): string[] {
+  if (!executablePath.trim() || /[\r\n\0]/.test(executablePath)) throw new Error('The companion application path cannot be registered')
+  return ['ADD', windowsCompanionRegistryKey, '/v', 'ExecutablePath', '/t', 'REG_SZ', '/d', executablePath, '/f']
+}
+
+export async function registerWindowsCompanionExecutable(executablePath: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    execFile('reg.exe', windowsCompanionRegistrationArguments(executablePath), { timeout: 5_000, windowsHide: true }, (error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+  })
+}
+
+export async function syncWindowsStartupRegistration(
+  enabled: boolean,
+  executablePath: string,
+  runTask: StartupTaskRunner,
+  setLoginItem: LoginItemSetter,
+): Promise<WindowsStartupRegistration> {
+  if (!enabled) {
+    await runTask(windowsStartupTaskArguments(false, executablePath)).catch(() => undefined)
+    setLoginItem({ openAtLogin: false, path: executablePath, args: [] })
+    return 'disabled'
+  }
+
+  try {
+    await runTask(windowsStartupTaskArguments(true, executablePath))
+    // Task Scheduler starts ONLOGON tasks before Windows processes its delayed
+    // startup-app queue. Keep only one registration to avoid duplicate launches.
+    setLoginItem({ openAtLogin: false, path: executablePath, args: [] })
+    return 'task'
+  } catch {
+    setLoginItem({ openAtLogin: true, path: executablePath, args: [backgroundLaunchArgument] })
+    return 'login-item'
+  }
 }
 
 export function parseDesktopPreferences(value: unknown, defaultStartWithWindows: boolean): StoredDesktopPreferences {

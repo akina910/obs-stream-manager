@@ -1,12 +1,22 @@
-import type { ApplyResult, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import type { ApplyResult, AudioProfile, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
+import type { AudioCalibrationResult } from '../shared/audio-calibration.js'
 import { AppLogger } from './logger.js'
 import { CaptureDetector } from './capture.js'
 import { ObsController } from './obs.js'
 import { PlatformServices } from './platforms.js'
 import { DataStore } from './storage.js'
+import type { CommonTemplateService } from './common-template.js'
 
 export type SelectionResult = ApplyResult & {
   services: Array<{ service: 'youtube' | 'twitch'; ok: boolean; message: string }>
+}
+
+export type AutomaticGameDetectionResult = {
+  detected: boolean
+  applied: boolean
+  gameId?: string
+  executableName?: string
+  captureMethod?: CaptureMethod
 }
 
 export class StreamOrchestrator {
@@ -18,6 +28,8 @@ export class StreamOrchestrator {
   private observedObsStreaming: boolean | null = null
   private obsStreamStateRevision = 0
   private warning: string | null = null
+  private ensuredAudioKey: string | null = null
+  private backgroundAudioEnsure: Promise<{ applied: boolean; warnings: string[] }> | null = null
   private serviceFailures: string[] = []
   private readonly failedServices = new Set<'youtube' | 'twitch'>()
   private partAdvancedForCurrentStream = false
@@ -28,9 +40,12 @@ export class StreamOrchestrator {
     private readonly capture: CaptureDetector,
     private readonly platforms: PlatformServices,
     private readonly logger: AppLogger,
+    private readonly commonTemplates?: CommonTemplateService,
   ) {}
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.busy || this.externalSyncing) throw new Error('別の配信操作を処理中です')
+    if (this.backgroundAudioEnsure) await this.backgroundAudioEnsure.catch(() => undefined)
     if (this.busy || this.externalSyncing) throw new Error('別の配信操作を処理中です')
     this.busy = true
     try { return await operation() } finally {
@@ -88,13 +103,48 @@ export class StreamOrchestrator {
     this.platforms.invalidateLiveStatus()
   }
 
-  async select(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
+  async autoSelectRunningGame(): Promise<AutomaticGameDetectionResult> {
+    if (this.busy || this.externalSyncing || this.backgroundAudioEnsure) return { detected: false, applied: false }
+    const profiles = await this.store.listProfiles()
+    const match = await this.capture.detectRunningProfile(profiles, this.selected?.id)
+    if (!match) return { detected: false, applied: false }
+    if (this.selected?.id === match.profile.id && this.method === match.method) {
+      return { detected: true, applied: false, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
+    }
+
     return this.exclusive(async () => {
+      const config = await this.store.getConfig()
+      const status = await this.obs.status(config, this.selected?.id ?? null, this.method, true, this.warning)
+      if (!status.obsConnected || status.streaming || status.recording || status.replayBuffer) {
+        return { detected: true, applied: false, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
+      }
+
+      await this.applySelection(match.profile.id, match.method)
+      await this.logger.write('profile.auto_detected', {
+        gameId: match.profile.id,
+        executableName: match.executableName,
+        captureMethod: match.method,
+      }).catch(() => undefined)
+      return { detected: true, applied: true, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
+    })
+  }
+
+  private async applySelection(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
       const profile = await this.store.getProfile(gameId)
       if (!profile) throw new Error('ゲームプロファイルが見つかりません')
       const config = await this.store.getConfig()
       const detection = override && override !== 'auto' ? { method: override, warnings: [] } : await this.capture.detect(profile)
-      const obsWarnings = await this.obs.applyProfile(config, profile, detection.method)
+      const appliedProfile = await this.obs.applyProfile(config, profile, detection.method)
+      const obsWarnings = appliedProfile.warnings
+      this.ensuredAudioKey = appliedProfile.audioApplied ? `${profile.id}:${detection.method}:${JSON.stringify(profile.audio)}` : null
+      if (this.commonTemplates) {
+        try {
+          const renderedTemplate = await this.commonTemplates.renderProfile(profile)
+          if (renderedTemplate) await this.obs.applyCommonTemplate(config, renderedTemplate)
+        } catch (error) {
+          obsWarnings.push(error instanceof Error ? error.message : String(error))
+        }
+      }
       const services = await this.platforms.prepare(config, profile)
       const primaryService = config.features.youtube && profile.youtube.enabled
         ? 'youtube'
@@ -139,7 +189,10 @@ export class StreamOrchestrator {
       this.platforms.invalidateLiveStatus()
       await this.logger.write('profile.applied', { gameId, captureMethod: detection.method, warnings, services, thumbnail })
       return { profile: updated, captureMethod: detection.method, warnings, services }
-    })
+  }
+
+  async select(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
+    return this.exclusive(() => this.applySelection(gameId, override))
   }
 
   async start(allowServiceFailures = false): Promise<string[]> {
@@ -258,7 +311,7 @@ export class StreamOrchestrator {
   }
 
   private scheduleObsStreamStateSync(): void {
-    if (this.busy || this.externalSyncing || this.pendingObsStreamState === null) return
+    if (this.busy || this.externalSyncing || this.backgroundAudioEnsure || this.pendingObsStreamState === null) return
     void this.processObsStreamStateChanges()
   }
 
@@ -286,7 +339,9 @@ export class StreamOrchestrator {
     const warnings: string[] = []
     if (active) {
       if (this.selected) {
-        await this.obs.startSecondaryTwitchForObsStream(config, this.selected).catch((error) => {
+        await this.obs.startSecondaryTwitchForObsStream(config, this.selected).then((secondaryWarnings) => {
+          warnings.push(...secondaryWarnings)
+        }).catch((error) => {
           warnings.push(`Twitch副出力: ${error instanceof Error ? error.message : String(error)}`)
         })
         await this.platforms.startYouTubeBroadcast(config, this.selected).catch((error) => {
@@ -324,6 +379,7 @@ export class StreamOrchestrator {
       this.obs.status(config, this.selected?.id ?? null, this.method, this.busy || this.externalSyncing, this.warning),
       this.platforms.getLiveStatus(config, this.selected),
     ])
+    if (!obsStatus.obsConnected) this.ensuredAudioKey = null
     if (stateRevision === this.obsStreamStateRevision) {
       if (this.observedObsStreaming === null) {
         if (obsStatus.streaming) this.handleObsStreamStateChanged(true)
@@ -344,7 +400,7 @@ export class StreamOrchestrator {
     if (status.streaming || externalActive) throw Object.assign(new Error('配信中はゲーム・接続設定・バックアップを変更できません。先に配信を終了してください'), { statusCode: 409 })
   }
 
-  async testTwitchOutput() {
+  async testTwitchOutput(options: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } = {}) {
     return this.exclusive(async () => {
       const status = await this.getStatus()
       const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
@@ -353,7 +409,8 @@ export class StreamOrchestrator {
       }
       const config = await this.store.getConfig()
       try {
-        return await this.obs.testTwitchIngest(config)
+        const durationMs = Math.max(0, Math.min(30_000, options.durationMs ?? 15_000))
+        return await this.obs.testTwitchIngest(config, durationMs, options)
       } finally {
         const active = await this.obs.isStreaming(config).catch(() => null)
         if (active === null) {
@@ -367,12 +424,85 @@ export class StreamOrchestrator {
     })
   }
 
+  async autoAdjustAudio(gameId: string, durationMs = 15_000, audio?: AudioProfile): Promise<AudioCalibrationResult> {
+    return this.exclusive(async () => {
+      if (!this.selected || !this.method || this.selected.id !== gameId) {
+        throw Object.assign(new Error('音声を調整するゲームを先に選択して、OBSへプロファイルを適用してください'), { statusCode: 409 })
+      }
+      const status = await this.getStatus()
+      const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
+      if (status.streaming || status.recording || status.replayBuffer || externalActive) {
+        throw Object.assign(new Error('配信・録画・リプレイ中は音声を自動調整できません。すべて停止してから再実行してください'), { statusCode: 409 })
+      }
+      const config = await this.store.getConfig()
+      const previous = this.selected
+      const calibrationProfile = audio === undefined ? previous : { ...previous, audio }
+      const result = await this.obs.autoAdjustAudio(config, calibrationProfile, this.method, durationMs, (profile) => this.store.saveProfile(profile))
+      const saved = result.profile
+      this.selected = saved
+      this.warning = result.warnings[0] ?? null
+      await this.logger.write('audio.auto_adjusted', {
+        gameId,
+        captureMethod: this.method,
+        durationMs: result.durationMs,
+        readings: result.readings.map(({ role, sourceName, status: readingStatus, previousDb, previousBoostDb, appliedDb, appliedBoostDb, verifiedDb, verifiedPeakDb }) => ({
+          role,
+          sourceName,
+          status: readingStatus,
+          previousDb,
+          previousBoostDb,
+          appliedDb,
+          appliedBoostDb,
+          verifiedDb,
+          verifiedPeakDb,
+        })),
+        filters: result.filters.map(({ sourceName, filterName, filterKind, status: filterStatus }) => ({ sourceName, filterName, filterKind, status: filterStatus })),
+        warnings: result.warnings,
+      }).catch((error) => {
+        const warning = `音声自動調整の監査ログを保存できませんでした: ${error instanceof Error ? error.message : String(error)}`
+        result.warnings.push(warning)
+        this.warning ??= warning
+      })
+      return { ...result, profile: saved }
+    })
+  }
+
+  async ensureSelectedAudio(): Promise<{ applied: boolean; warnings: string[] }> {
+    if (this.busy || this.externalSyncing || this.backgroundAudioEnsure) return { applied: false, warnings: [] }
+    const operation = (async () => {
+      if (!this.selected || !this.method) return { applied: false, warnings: [] }
+      const selectedId = this.selected.id
+      const selectedMethod = this.method
+      const status = await this.getStatus()
+      const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
+      if (!status.obsConnected || status.streaming || status.recording || status.replayBuffer || externalActive) return { applied: false, warnings: [] }
+      if (this.selected?.id !== selectedId || this.method !== selectedMethod) return { applied: false, warnings: [] }
+      const config = await this.store.getConfig()
+      const latest = await this.store.getProfile(selectedId)
+      if (!latest) return { applied: false, warnings: [] }
+      const key = `${latest.id}:${selectedMethod}:${JSON.stringify(latest.audio)}`
+      if (this.ensuredAudioKey === key) return { applied: true, warnings: [] }
+      const warnings = await this.obs.ensureProfileAudio(config, latest, selectedMethod)
+      if (this.selected?.id !== selectedId || this.method !== selectedMethod) return { applied: false, warnings: [] }
+      this.ensuredAudioKey = key
+      this.selected = latest
+      await this.logger.write('audio.profile_ensured', { gameId: latest.id, captureMethod: selectedMethod, microphoneDb: latest.audio.microphoneDb, microphoneBoostDb: latest.audio.microphoneBoostDb, warnings }).catch(() => undefined)
+      return { applied: true, warnings }
+    })()
+    this.backgroundAudioEnsure = operation
+    try { return await operation } finally {
+      if (this.backgroundAudioEnsure === operation) this.backgroundAudioEnsure = null
+      void Promise.resolve().then(() => this.scheduleObsStreamStateSync())
+    }
+  }
+
   async invalidateProfile(gameId: string): Promise<void> {
     if (this.selected?.id !== gameId) return
     this.selected = null
     this.method = null
     this.serviceFailures = []
     this.warning = 'ゲーム設定を変更しました。配信前にゲームを選び直してください'
+    this.ensuredAudioKey = null
     await this.persistSelectedGame(null)
   }
 
@@ -381,6 +511,7 @@ export class StreamOrchestrator {
     this.method = null
     this.serviceFailures = []
     this.warning = message
+    this.ensuredAudioKey = null
     await this.persistSelectedGame(null)
   }
 }

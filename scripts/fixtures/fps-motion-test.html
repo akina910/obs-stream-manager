@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OBS Stream Manager FPS Motion Test</title>
+  <style>
+    html, body, canvas { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #05070c; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="motion" width="1920" height="1080"></canvas>
+  <script>
+    const canvas = document.querySelector('#motion')
+    const context = canvas.getContext('2d', { alpha: false })
+    let frame = 0
+
+    function draw(now) {
+      frame += 1
+      const seconds = now / 1000
+      const stripeOffset = (frame * 11) % 160
+      context.fillStyle = '#05070c'
+      context.fillRect(0, 0, canvas.width, canvas.height)
+
+      for (let x = -160 + stripeOffset; x < canvas.width + 160; x += 160) {
+        context.fillStyle = (Math.floor((x - stripeOffset) / 160) & 1) ? '#12395a' : '#0d2036'
+        context.fillRect(x, 0, 80, canvas.height)
+      }
+
+      const position = (frame * 17) % (canvas.width + 260) - 130
+      context.fillStyle = '#55f2c2'
+      context.fillRect(position, 120, 130, 760)
+      context.fillStyle = '#ff5d8f'
+      context.fillRect(canvas.width - position - 130, 220, 130, 660)
+
+      context.fillStyle = '#ffffff'
+      context.font = '700 72px monospace'
+      context.fillText(`FRAME ${String(frame).padStart(7, '0')}`, 64, 1000)
+      context.font = '500 38px monospace'
+      context.fillText(`${seconds.toFixed(3)} s`, 1450, 1000)
+      requestAnimationFrame(draw)
+    }
+
+    requestAnimationFrame(draw)
+  </script>
+</body>
+</html>
