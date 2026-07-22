@@ -78,6 +78,7 @@ Aitum Multistreamは不要です。Source RecordやAitum Verticalが無い場合
 - OBSシーン、キャプチャ、音量、録画、リプレイの連動
 - MP3／WAV／OGG／FLAC／M4AのBGMストック、全シーン共通のループ再生、一時停止・再開
 - OBS実メーターを使ったゲーム別音声自動調整、ピーク保護、マイク連動ダッキング
+- 起動中ゲームの常駐認識と、アイドル中のプロファイル／キャプチャ自動適用
 - 録画音声を A1=ゲーム、A2=Discord、A3=マイク、A4=BGM、A5=キャプチャ/AUX に分離し、A6をYouTube・Twitch共通MIXとして送信
 - 4K・高FPS同時配信では通常録画を配信エンコーダーと共有し、過負荷になるSource Record／縦録画だけを自動抑止
 - YouTube配信枠、タイトル、説明、公開範囲、ゲーム別サムネイルの自動適用

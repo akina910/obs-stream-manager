@@ -7,6 +7,7 @@ import { SecretStore } from '../server/secrets.js'
 const diagnosticScene = '__OSM_FPS_DIAGNOSTIC__'
 const diagnosticInput = '__OSM_FPS_MOTION__'
 const durationMs = Math.max(5_000, Math.min(60_000, Number(process.argv[2] ?? 20_000)))
+const warmupMs = 2_000
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fps-motion-test.html')
 
 type Bootstrap = {
@@ -136,7 +137,6 @@ async function main() {
 
     await obs.call('SetCurrentProgramScene', { sceneName: diagnosticScene })
     await wait(2_000)
-    const baseline = await obs.call('GetStats')
     await obs.call('StartRecord')
     recordingStarted = true
     const startedDeadline = Date.now() + 15_000
@@ -144,6 +144,11 @@ async function main() {
       if (Date.now() > startedDeadline) throw new Error('OBS recording did not start within 15 seconds')
       await wait(250)
     }
+    // Encoder initialization can legitimately reset or increment OBS's lifetime
+    // counters. Measure sustained output only after it has reached steady state;
+    // the file-level frame-gap/duplicate analysis below still covers the warmup.
+    await wait(warmupMs)
+    const baseline = await obs.call('GetStats')
     await wait(durationMs)
     const activeStatus = await obs.call('GetRecordStatus')
     const finalStats = await obs.call('GetStats')
@@ -177,6 +182,7 @@ async function main() {
       ok: failures.length === 0,
       failures,
       requestedDurationMs: durationMs,
+      warmupMs,
       outputDurationMs: activeStatus.outputDuration,
       outputBytes: activeStatus.outputBytes,
       obs: obsMetrics,

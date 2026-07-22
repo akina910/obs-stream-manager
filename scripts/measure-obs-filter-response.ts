@@ -114,6 +114,14 @@ async function main() {
     const baseline = await measurePass(obs, 'no filter')
     await obs.call('CreateSourceFilter', {
       sourceName: diagnosticInput,
+      filterName: 'Calibration Gain Test',
+      filterKind: 'gain_filter',
+      filterSettings: { db: 12 },
+    })
+    const gainOnly = await measurePass(obs, 'calibration gain +12 dB')
+    await obs.call('RemoveSourceFilter', { sourceName: diagnosticInput, filterName: 'Calibration Gain Test' })
+    await obs.call('CreateSourceFilter', {
+      sourceName: diagnosticInput,
       filterName: 'Upward Compressor Test',
       filterKind: 'upward_compressor_filter',
       filterSettings: { attack_time: 10, detector: 'RMS', knee_width: 10, output_gain: 0, ratio: 0.25, release_time: 100, threshold: -20 },
@@ -142,6 +150,7 @@ async function main() {
     const baselineMinus70 = step(baseline, -70)
     const baselineMinus60 = step(baseline, -60)
     const baselineMinus50 = step(baseline, -50)
+    const gainMinus50 = step(gainOnly, -50)
     const managedMinus70 = step(managedDynamics, -70)
     const managedMinus60 = step(managedDynamics, -60)
     const managedMinus50 = step(managedDynamics, -50)
@@ -150,6 +159,7 @@ async function main() {
       ['baseline -70 dB', baselineMinus70],
       ['baseline -60 dB', baselineMinus60],
       ['baseline -50 dB', baselineMinus50],
+      ['gain -50 dB', gainMinus50],
       ['managed -70 dB', managedMinus70],
       ['managed -60 dB', managedMinus60],
       ['managed -50 dB', managedMinus50],
@@ -164,10 +174,12 @@ async function main() {
         ? null : 'the managed chain did not suppress the -60 dB noise floor by at least 3 dB',
       valid(baselineMinus50) && valid(managedMinus50) && managedMinus50!.magnitudeP75Db >= baselineMinus50!.magnitudeP75Db + 8
         ? null : 'the managed chain did not raise the -50 dB quiet-speech step by at least 8 dB',
+      valid(baselineMinus50) && valid(gainMinus50) && gainMinus50!.magnitudeP75Db >= baselineMinus50!.magnitudeP75Db + 10
+        ? null : 'the managed calibration gain did not raise the -50 dB step by at least 10 dB',
       valid(managedMinus20) && managedMinus20!.peakP95Db <= -6
         ? null : 'the managed chain exceeded the -6 dB peak safety ceiling',
     ].filter((failure): failure is string => failure !== null)
-    console.log(JSON.stringify({ ok: failures.length === 0, failures, baseline, upwardQuarter, managedDynamics }, null, 2))
+    console.log(JSON.stringify({ ok: failures.length === 0, failures, baseline, gainOnly, upwardQuarter, managedDynamics }, null, 2))
     if (failures.length) throw new Error(`OBS audio filter response verification failed: ${failures.join('; ')}`)
   } finally {
     if (previousScene) await obs.call('SetCurrentProgramScene', { sceneName: previousScene }).catch(() => undefined)

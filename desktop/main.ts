@@ -49,6 +49,15 @@ let quitRequested = false
 let shutdownStarted = false
 let shutdownComplete = false
 let closeNoticeShown = false
+let audioCalibrationWindow: BrowserWindow | null = null
+let audioCalibrationHideTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearAudioCalibrationWindow(window?: BrowserWindow): void {
+  if (window && audioCalibrationWindow !== window) return
+  if (audioCalibrationHideTimer) clearTimeout(audioCalibrationHideTimer)
+  audioCalibrationHideTimer = null
+  audioCalibrationWindow = null
+}
 
 async function applyWindowsStartupRegistration(startWithWindows: boolean): Promise<WindowsStartupRegistration> {
   if (process.env.OBS_STREAM_MANAGER_DISABLE_LOGIN_ITEM === '1') return 'disabled'
@@ -264,6 +273,11 @@ function createWindow(): BrowserWindow {
   window.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(dockUrl)) event.preventDefault()
   })
+  window.webContents.on('render-process-gone', () => {
+    if (audioCalibrationWindow !== window) return
+    clearAudioCalibrationWindow(window)
+    if (!window.isDestroyed()) window.show()
+  })
   window.once('ready-to-show', () => window.show())
   window.on('close', (event) => {
     if (quitRequested) return
@@ -278,7 +292,10 @@ function createWindow(): BrowserWindow {
       })
     }
   })
-  window.on('closed', () => { mainWindow = null })
+  window.on('closed', () => {
+    clearAudioCalibrationWindow(window)
+    mainWindow = null
+  })
   void window.loadURL(`${dockUrl}/?desktop=1`)
   return window
 }
@@ -314,6 +331,39 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('desktop:download-update', () => requireUpdateService().download())
   ipcMain.handle('desktop:install-update', () => requireUpdateService().install())
   ipcMain.handle('desktop:open-release-page', openReleasePage)
+  ipcMain.handle('desktop:begin-audio-calibration', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window.isDestroyed()) return false
+    clearAudioCalibrationWindow()
+    audioCalibrationWindow = window
+    if (tray && process.platform === 'win32') {
+      try { tray.displayBalloon({
+        title: '音声自動調整を待機しています',
+        content: 'ゲームへ戻り、ゲーム音を鳴らしながら普段どおり話してください。音を検出してから計測します。',
+        iconType: 'info',
+      }) } catch { /* A notification failure must not cancel calibration. */ }
+    }
+    audioCalibrationHideTimer = setTimeout(() => {
+      audioCalibrationHideTimer = null
+      if (audioCalibrationWindow === window && !window.isDestroyed()) window.hide()
+    }, 150)
+    return true
+  })
+  ipcMain.handle('desktop:end-audio-calibration', (event, succeeded: unknown) => {
+    if (typeof succeeded !== 'boolean') throw new Error('音声自動調整の完了状態が不正です')
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window || window !== audioCalibrationWindow) return false
+    clearAudioCalibrationWindow(window)
+    showMainWindow()
+    if (tray && process.platform === 'win32') {
+      try { tray.displayBalloon({
+        title: succeeded ? '音声自動調整が完了しました' : '音声自動調整を完了できませんでした',
+        content: succeeded ? 'ゲーム音とマイクの計測結果を確認してください。' : '画面に戻って詳細を確認してください。',
+        iconType: succeeded ? 'info' : 'warning',
+      }) } catch { /* The result remains visible in the restored window. */ }
+    }
+    return true
+  })
   ipcMain.handle('desktop:quit', requestApplicationQuit)
 
   app.on('before-quit', (event) => {

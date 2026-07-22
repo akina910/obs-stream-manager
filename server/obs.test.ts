@@ -184,6 +184,8 @@ describe('ObsController recording fallbacks', () => {
     const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
     expect(stopBacktrackIndex).toBe(-1)
     expect(calls.find(({ request }) => request === 'SetVideoSettings')?.data).toMatchObject({
+      baseWidth: 1920,
+      baseHeight: 1080,
       outputWidth: 1920,
       outputHeight: 1080,
       fpsNumerator: 60,
@@ -200,7 +202,7 @@ describe('ObsController recording fallbacks', () => {
     })
     expect(calls.map(({ request }) => request)).not.toContain('TriggerHotkeyByName')
     expect(warnings.join(' ')).not.toContain('3840×2160')
-    expect(videoSettings).toMatchObject({ outputWidth: 1920, outputHeight: 1080 })
+    expect(videoSettings).toMatchObject({ baseWidth: 1920, baseHeight: 1080, outputWidth: 1920, outputHeight: 1080 })
   })
 
   it('warns when any managed FHD profile parameter cannot be updated', async () => {
@@ -613,7 +615,7 @@ describe('ObsController recording fallbacks', () => {
 
     const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
     expect(stopBacktrackIndex).toBe(-1)
-    expect(videoSettings).toMatchObject({ outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 })
+    expect(videoSettings).toMatchObject({ baseWidth: 1920, baseHeight: 1080, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 })
     expect(streaming).toBe(false)
     expect(secondary).toBe(false)
     expect(recording).toBe(false)
@@ -1052,7 +1054,7 @@ describe('ObsController recording fallbacks', () => {
     const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
-    profile.audio = { microphoneDb: 1, gameDb: -11, discordDb: -19, bgmDb: -27, duckingDb: -6 }
+    profile.audio = { microphoneDb: 1, microphoneBoostDb: 0, gameDb: -11, discordDb: -19, bgmDb: -27, duckingDb: -6 }
 
     const applied = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
 

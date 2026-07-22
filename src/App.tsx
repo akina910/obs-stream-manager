@@ -389,7 +389,6 @@ function ProfileEditor({ profile, readOnly, canAutoAdjust, autoAdjustReason, onC
   const [saving, setSaving] = useState(false)
   const [calibrating, setCalibrating] = useState(false)
   const [calibration, setCalibration] = useState<AudioCalibrationResult | null>(null)
-  const [calibrationRemaining, setCalibrationRemaining] = useState<number | null>(null)
   const [calibrationError, setCalibrationError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -417,19 +416,21 @@ function ProfileEditor({ profile, readOnly, canAutoAdjust, autoAdjustReason, onC
   const removeThumbnail = () => execute(() => onDeleteThumbnail(draft))
   const autoAdjustAudio = async () => {
     if (savingRef.current || readOnly || !canAutoAdjust) return
-    savingRef.current = true; setSaving(true); setCalibrating(true); setSaveError(null); setCalibration(null); setCalibrationError(null); setCalibrationRemaining(15)
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => setCalibrationRemaining(Math.max(0, 15 - Math.floor((Date.now() - startedAt) / 1_000))), 250)
+    savingRef.current = true; setSaving(true); setCalibrating(true); setSaveError(null); setCalibration(null); setCalibrationError(null)
+    let desktopHidden = false
+    let succeeded = false
     try {
+      desktopHidden = await window.obsStreamManagerDesktop?.beginAudioCalibration().catch(() => false) ?? false
       const result = await onAutoAdjust(draft)
       setDraft((current) => ({ ...current, audio: result.profile.audio }))
       setCalibration(result)
+      succeeded = true
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      setCalibrationError(t('計測に失敗しました。フィルタとゲインは実行前の値へ戻しました（ロールバック済み）。詳細: {error}', { error: detail }))
+      setCalibrationError(t('自動調整を完了できませんでした。変更が始まっていた場合は実行前の値へ戻しています。詳細: {error}', { error: detail }))
     } finally {
-      window.clearInterval(timer)
-      savingRef.current = false; setSaving(false); setCalibrating(false); setCalibrationRemaining(null)
+      if (desktopHidden) await window.obsStreamManagerDesktop?.endAudioCalibration(succeeded).catch(() => undefined)
+      savingRef.current = false; setSaving(false); setCalibrating(false)
     }
   }
   const browseFolder = () => execute(async () => {
@@ -472,16 +473,16 @@ function ProfileEditor({ profile, readOnly, canAutoAdjust, autoAdjustReason, onC
             <div className="audio-setup-guide">
               <div><CircleHelp size={15} /><strong>{t('音声設定の使い方')}</strong></div>
               <div className="audio-setup-options">
-                <section><strong>{t('自動で合わせる（おすすめ）')}</strong><p>{t('OBSでこのゲームを選択中にし、配信・録画・リプレイをすべて停止します。マイクへ普段どおり話しながら、調整したいゲーム音・Discord・BGMを15秒間ずっと鳴らして「計測して自動調整」を押してください。結果はこのゲームへ自動保存されます。')}</p></section>
+                <section><strong>{t('自動で合わせる（おすすめ）')}</strong><p>{t(window.obsStreamManagerDesktop ? '開始すると設定画面を退避します。ゲームへ戻り、ゲーム音を鳴らしながら普段どおり話してください。ゲーム音とマイクを検出してから15秒間測定し、結果をこのゲームへ自動保存します。' : '開始後にOBSからゲームへ切り替え、ゲーム音を鳴らしながら普段どおり話してください。ゲーム音とマイクを検出してから15秒間測定し、結果をこのゲームへ自動保存します。')}</p></section>
                 <section><strong>{t('手動で合わせる')}</strong><p>{t('下のスライダーを変更して「保存」を押します。選択中のゲームを編集した場合は、保存後にゲームをもう一度選択するとOBSへ反映されます。')}</p></section>
               </div>
-              <p className="audio-setup-note">{t('マイクとゲーム音は必須です。DiscordとBGMは、15秒間に音が出ている場合だけ調整します。')}</p>
+              <p className="audio-setup-note">{t('設定画面に居続ける必要はありません。音が出るまで最大60秒待機し、フェーダーだけで不足するマイクは追加ブーストも自動設定します。')}</p>
             </div>
-            <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /><RangeField disabled={locked} label={t('発話中のゲーム音減衰')} value={draft.audio.duckingDb} minimum={-12} maximum={0} onChange={(value) => patch('audio', { ...draft.audio, duckingDb: value })} /></fieldset>
+            <fieldset disabled={locked} className="field-grid"><RangeField disabled={locked} label={t('マイク')} value={draft.audio.microphoneDb} onChange={(value) => patch('audio', { ...draft.audio, microphoneDb: value })} /><RangeField disabled={locked} label={t('マイク追加ブースト')} value={draft.audio.microphoneBoostDb} minimum={0} maximum={24} onChange={(value) => patch('audio', { ...draft.audio, microphoneBoostDb: value })} /><RangeField disabled={locked} label={t('ゲーム')} value={draft.audio.gameDb} onChange={(value) => patch('audio', { ...draft.audio, gameDb: value })} /><RangeField disabled={locked} label="Discord" value={draft.audio.discordDb} onChange={(value) => patch('audio', { ...draft.audio, discordDb: value })} /><RangeField disabled={locked} label="BGM" value={draft.audio.bgmDb} onChange={(value) => patch('audio', { ...draft.audio, bgmDb: value })} /><RangeField disabled={locked} label={t('発話中のゲーム音減衰')} value={draft.audio.duckingDb} minimum={-12} maximum={0} onChange={(value) => patch('audio', { ...draft.audio, duckingDb: value })} /></fieldset>
             <div className="audio-auto-adjust">
-               <div className="audio-auto-adjust-heading"><div><strong>{t('15秒音声自動調整')}</strong><span className={`connection-label ${calibration ? calibrationAttention ? 'pending' : 'connected' : calibrating ? 'pending' : 'optional'}`}><StatusDot tone={calibration ? calibrationAttention ? 'pending' : 'live' : calibrating ? 'pending' : 'inactive'} />{t(calibration ? calibrationAttention ? '要確認' : '調整済み' : calibrating ? '測定中' : '未調整')}</span></div><p>{t('15秒間、実際の音声メーターを測定します。測定中は普段どおり話し、調整したいゲーム音・Discord・BGMを鳴らし続けてください。')}</p></div>
-               {!calibrating && <div className="audio-calibration-run"><button type="button" className="secondary-button" disabled={locked || !canAutoAdjust} onClick={() => void autoAdjustAudio()}><RefreshCw size={14} />{t(calibrationError ? 'もう一度実行' : '計測して自動調整')}</button>{!canAutoAdjust && autoAdjustReason && <span>{t(autoAdjustReason)}</span>}</div>}
-               {calibrating && calibrationRemaining !== null && <div className="audio-calibration-progress" role="status"><div className="audio-progress-track"><span style={{ width: `${Math.max(0, Math.min(100, (15 - calibrationRemaining) / 15 * 100))}%` }} /></div><div><strong>{t('マイクへ話しながら、調整したい音をすべて鳴らし続けてください')}</strong><code>{t('残り {seconds}秒', { seconds: calibrationRemaining })}</code></div></div>}
+               <div className="audio-auto-adjust-heading"><div><strong>{t('ゲーム中の音声自動調整')}</strong><span className={`connection-label ${calibration ? calibrationAttention ? 'pending' : 'connected' : calibrating ? 'pending' : 'optional'}`}><StatusDot tone={calibration ? calibrationAttention ? 'pending' : 'live' : calibrating ? 'pending' : 'inactive'} />{t(calibration ? calibrationAttention ? '要確認' : '調整済み' : calibrating ? '音声待ち／測定中' : '未調整')}</span></div><p>{t('開始後はゲームへ戻ってください。ゲーム音とマイクを検出するまで待機し、検出後に15秒間の測定と再確認を行います。')}</p></div>
+               {!calibrating && <div className="audio-calibration-run"><button type="button" className="secondary-button" disabled={locked || !canAutoAdjust} onClick={() => void autoAdjustAudio()}><RefreshCw size={14} />{t(calibrationError ? 'もう一度実行' : '開始してゲームへ戻る')}</button>{!canAutoAdjust && autoAdjustReason && <span>{t(autoAdjustReason)}</span>}</div>}
+               {calibrating && <div className="audio-calibration-progress" role="status"><div className="audio-progress-track is-indeterminate"><span /></div><div><strong>{t('ゲーム音を鳴らしながら普段どおり話してください')}</strong><code>{t('音声検出後 15秒')}</code></div></div>}
                {calibrationError && <div className="audio-calibration-failure" role="alert">{calibrationError}</div>}
                {calibration && <div className="audio-calibration-result" role="status">
                  <strong>{t(calibrationNeedsAttention(calibration) ? '一部の音声は確認が必要です' : '音声設定を自動調整しました')}</strong>

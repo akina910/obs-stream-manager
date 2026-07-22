@@ -24,6 +24,12 @@ type CaptureDetectorOptions = {
   executableCacheMs?: number
 }
 
+export type RunningGameMatch = {
+  profile: GameProfile
+  method: CaptureMethod
+  executableName: string
+}
+
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -75,6 +81,49 @@ export class CaptureDetector {
       localRunning: configuredRunning || installedRunning,
       gfnRunning: [...processes].some((name) => name.includes('geforcenow') || name.includes('geforce now')),
     }
+  }
+
+  async detectRunningProfile(profiles: GameProfile[], preferredProfileId?: string | null): Promise<RunningGameMatch | null> {
+    const processes = new Set((await this.runningProcesses()).map((name) => name.trim().toLowerCase()).filter(Boolean))
+    const candidates: Array<RunningGameMatch & { score: number }> = []
+    const eligible = profiles.filter(({ hidden, platformGroup }) => !hidden && platformGroup !== 'switch')
+
+    for (const profile of eligible) {
+      const configured = profile.capture.executableNames
+        .map((name) => name.trim().toLowerCase())
+        .find((name) => name && processes.has(name))
+      if (!configured) continue
+      const method = profile.capture.preferred === 'auto' ? 'local' : profile.capture.preferred
+      candidates.push({
+        profile,
+        method,
+        executableName: configured,
+        score: 100 + (profile.id === preferredProfileId ? 1_000 : 0) + (profile.favorite ? 10 : 0),
+      })
+    }
+
+    if (!candidates.length) {
+      for (const profile of eligible.filter(({ library }) => Boolean(library.installDirectory))) {
+        const installed = (await this.installedExecutableNames(profile).catch(() => []))
+          .map((name) => name.trim().toLowerCase())
+          .filter(Boolean)
+          .find((name) => processes.has(name))
+        if (!installed) continue
+        const method = profile.capture.preferred === 'auto' ? 'local' : profile.capture.preferred
+        candidates.push({
+          profile,
+          method,
+          executableName: installed,
+          score: 50 + (profile.id === preferredProfileId ? 1_000 : 0) + (profile.favorite ? 10 : 0),
+        })
+      }
+    }
+
+    const selected = candidates.sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score
+      return (right.profile.state.lastUsedAt ?? '').localeCompare(left.profile.state.lastUsedAt ?? '')
+    })[0]
+    return selected ? { profile: selected.profile, method: selected.method, executableName: selected.executableName } : null
   }
 
   async detect(profile: GameProfile): Promise<{ method: CaptureMethod; warnings: string[] }> {

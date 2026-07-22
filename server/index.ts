@@ -407,17 +407,36 @@ try {
 } catch { /* Vite serves the client during development */ }
 
 let started = false
+let automaticGameDetectionTimer: ReturnType<typeof setInterval> | null = null
+let automaticGameDetectionInFlight = false
+
+function runAutomaticGameDetection(): void {
+  if (automaticGameDetectionInFlight) return
+  automaticGameDetectionInFlight = true
+  void orchestrator.autoSelectRunningGame()
+    .catch((error) => logger.write('profile.auto_detection_failed', {
+      message: error instanceof Error ? error.message : String(error),
+    }).catch(() => undefined))
+    .finally(() => { automaticGameDetectionInFlight = false })
+}
 
 export async function startServer(): Promise<{ host: string; port: number; url: string }> {
   const host = '127.0.0.1'
   if (!started) {
     await app.listen({ port: listenPort, host })
     started = true
+    runAutomaticGameDetection()
+    automaticGameDetectionTimer = setInterval(runAutomaticGameDetection, 5_000)
+    automaticGameDetectionTimer.unref()
   }
   return { host, port: listenPort, url: `http://${host}:${listenPort}` }
 }
 
 export async function stopServer(): Promise<void> {
+  if (automaticGameDetectionTimer) {
+    clearInterval(automaticGameDetectionTimer)
+    automaticGameDetectionTimer = null
+  }
   localObs.stop()
   await platforms.stopComments().catch(() => undefined)
   await obs.disconnect().catch(() => undefined)

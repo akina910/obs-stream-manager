@@ -11,6 +11,14 @@ export type SelectionResult = ApplyResult & {
   services: Array<{ service: 'youtube' | 'twitch'; ok: boolean; message: string }>
 }
 
+export type AutomaticGameDetectionResult = {
+  detected: boolean
+  applied: boolean
+  gameId?: string
+  executableName?: string
+  captureMethod?: CaptureMethod
+}
+
 export class StreamOrchestrator {
   private selected: GameProfile | null = null
   private method: CaptureMethod | null = null
@@ -95,8 +103,33 @@ export class StreamOrchestrator {
     this.platforms.invalidateLiveStatus()
   }
 
-  async select(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
+  async autoSelectRunningGame(): Promise<AutomaticGameDetectionResult> {
+    if (this.busy || this.externalSyncing || this.backgroundAudioEnsure) return { detected: false, applied: false }
+    const profiles = await this.store.listProfiles()
+    const match = await this.capture.detectRunningProfile(profiles, this.selected?.id)
+    if (!match) return { detected: false, applied: false }
+    if (this.selected?.id === match.profile.id && this.method === match.method) {
+      return { detected: true, applied: false, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
+    }
+
     return this.exclusive(async () => {
+      const config = await this.store.getConfig()
+      const status = await this.obs.status(config, this.selected?.id ?? null, this.method, true, this.warning)
+      if (!status.obsConnected || status.streaming || status.recording || status.replayBuffer) {
+        return { detected: true, applied: false, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
+      }
+
+      await this.applySelection(match.profile.id, match.method)
+      await this.logger.write('profile.auto_detected', {
+        gameId: match.profile.id,
+        executableName: match.executableName,
+        captureMethod: match.method,
+      }).catch(() => undefined)
+      return { detected: true, applied: true, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
+    })
+  }
+
+  private async applySelection(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
       const profile = await this.store.getProfile(gameId)
       if (!profile) throw new Error('ゲームプロファイルが見つかりません')
       const config = await this.store.getConfig()
@@ -156,7 +189,10 @@ export class StreamOrchestrator {
       this.platforms.invalidateLiveStatus()
       await this.logger.write('profile.applied', { gameId, captureMethod: detection.method, warnings, services, thumbnail })
       return { profile: updated, captureMethod: detection.method, warnings, services }
-    })
+  }
+
+  async select(gameId: string, override?: CaptureMethod): Promise<SelectionResult> {
+    return this.exclusive(() => this.applySelection(gameId, override))
   }
 
   async start(allowServiceFailures = false): Promise<string[]> {
@@ -409,12 +445,14 @@ export class StreamOrchestrator {
         gameId,
         captureMethod: this.method,
         durationMs: result.durationMs,
-        readings: result.readings.map(({ role, sourceName, status: readingStatus, previousDb, appliedDb, verifiedDb, verifiedPeakDb }) => ({
+        readings: result.readings.map(({ role, sourceName, status: readingStatus, previousDb, previousBoostDb, appliedDb, appliedBoostDb, verifiedDb, verifiedPeakDb }) => ({
           role,
           sourceName,
           status: readingStatus,
           previousDb,
+          previousBoostDb,
           appliedDb,
+          appliedBoostDb,
           verifiedDb,
           verifiedPeakDb,
         })),
@@ -448,7 +486,7 @@ export class StreamOrchestrator {
       if (this.selected?.id !== selectedId || this.method !== selectedMethod) return { applied: false, warnings: [] }
       this.ensuredAudioKey = key
       this.selected = latest
-      await this.logger.write('audio.profile_ensured', { gameId: latest.id, captureMethod: selectedMethod, microphoneDb: latest.audio.microphoneDb, warnings }).catch(() => undefined)
+      await this.logger.write('audio.profile_ensured', { gameId: latest.id, captureMethod: selectedMethod, microphoneDb: latest.audio.microphoneDb, microphoneBoostDb: latest.audio.microphoneBoostDb, warnings }).catch(() => undefined)
       return { applied: true, warnings }
     })()
     this.backgroundAudioEnsure = operation

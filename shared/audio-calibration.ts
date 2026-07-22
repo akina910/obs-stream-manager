@@ -37,6 +37,13 @@ export type AudioGainRecommendation = {
   withinTarget: boolean
 }
 
+export type AudioMicrophoneGainRecommendation = AudioGainRecommendation & {
+  appliedBoostDb: number
+  faderAdjustmentDb: number
+  boostAdjustmentDb: number
+  constrainedByBoost: boolean
+}
+
 export type AudioCalibrationReadingStatus = 'adjusted' | 'within_target' | 'limited' | 'no_signal' | 'muted' | 'missing'
 
 export type AudioCalibrationReading = {
@@ -47,8 +54,11 @@ export type AudioCalibrationReading = {
   targetDb: number
   peakCeilingDb: number
   previousDb?: number
+  previousBoostDb?: number
   appliedDb?: number
+  appliedBoostDb?: number
   adjustmentDb?: number
+  boostAdjustmentDb?: number
   measuredDb?: number
   measuredPeakDb?: number
   verifiedDb?: number
@@ -133,6 +143,78 @@ export function recommendInputVolume(
     adjustmentDb,
     constrainedByPeak: peakSafeDifference < levelDifference,
     constrainedByFader: appliedDb !== unclampedFader,
+    withinTarget: false,
+  }
+}
+
+export function recommendMicrophoneGain(
+  currentDb: number,
+  currentBoostDb: number,
+  measurement: AudioMeasurement,
+  target: AudioCalibrationTarget,
+  maximumAdjustmentDb = 30,
+): AudioMicrophoneGainRecommendation {
+  const levelDifference = target.referenceDb - measurement.referenceDb
+  const peakHeadroom = target.peakCeilingDb - measurement.peakDb
+  const alreadyWithinTarget = Math.abs(levelDifference) <= target.toleranceDb && peakHeadroom >= -1
+  const roundedCurrentDb = roundHalfDb(currentDb)
+  const roundedCurrentBoostDb = roundHalfDb(currentBoostDb)
+  const normalizedDb = roundHalfDb(clamp(roundedCurrentDb, -30, 20))
+  const faderOverflowDb = roundHalfDb(roundedCurrentDb - normalizedDb)
+  const requestedNormalizedBoostDb = roundedCurrentBoostDb + faderOverflowDb
+  const normalizedBoostDb = roundHalfDb(clamp(requestedNormalizedBoostDb, 0, 24))
+  const normalizationFaderAdjustmentDb = roundHalfDb(normalizedDb - roundedCurrentDb)
+  const normalizationBoostAdjustmentDb = roundHalfDb(normalizedBoostDb - roundedCurrentBoostDb)
+  if (alreadyWithinTarget) {
+    return {
+      appliedDb: normalizedDb,
+      appliedBoostDb: normalizedBoostDb,
+      adjustmentDb: roundHalfDb(normalizationFaderAdjustmentDb + normalizationBoostAdjustmentDb),
+      faderAdjustmentDb: normalizationFaderAdjustmentDb,
+      boostAdjustmentDb: normalizationBoostAdjustmentDb,
+      constrainedByPeak: false,
+      constrainedByFader: normalizationFaderAdjustmentDb !== 0,
+      constrainedByBoost: requestedNormalizedBoostDb !== normalizedBoostDb,
+      withinTarget: true,
+    }
+  }
+
+  const peakSafeDifference = Math.min(levelDifference, peakHeadroom)
+  const requestedAdjustment = roundHalfDb(clamp(peakSafeDifference, -maximumAdjustmentDb, maximumAdjustmentDb))
+  let nextDb = normalizedDb
+  let nextBoostDb = normalizedBoostDb
+  let constrainedByFader = normalizationFaderAdjustmentDb !== 0
+  let constrainedByBoost = requestedNormalizedBoostDb !== normalizedBoostDb
+
+  if (requestedAdjustment > 0) {
+    const faderIncrease = Math.min(requestedAdjustment, Math.max(0, 20 - nextDb))
+    nextDb = roundHalfDb(nextDb + faderIncrease)
+    const remaining = roundHalfDb(requestedAdjustment - faderIncrease)
+    constrainedByFader ||= remaining > 0
+    const requestedBoostDb = nextBoostDb + remaining
+    constrainedByBoost ||= requestedBoostDb > 24
+    nextBoostDb = roundHalfDb(Math.min(24, requestedBoostDb))
+  } else if (requestedAdjustment < 0) {
+    const boostReduction = Math.max(requestedAdjustment, -nextBoostDb)
+    nextBoostDb = roundHalfDb(nextBoostDb + boostReduction)
+    const remaining = roundHalfDb(requestedAdjustment - boostReduction)
+    const requestedFaderDb = nextDb + remaining
+    constrainedByFader ||= requestedFaderDb < -30
+    nextDb = roundHalfDb(clamp(requestedFaderDb, -30, 20))
+  }
+
+  const faderAdjustmentDb = roundHalfDb(nextDb - roundedCurrentDb)
+  const boostAdjustmentDb = roundHalfDb(nextBoostDb - roundedCurrentBoostDb)
+  const adjustmentDb = roundHalfDb(faderAdjustmentDb + boostAdjustmentDb)
+  return {
+    appliedDb: nextDb,
+    appliedBoostDb: nextBoostDb,
+    adjustmentDb,
+    faderAdjustmentDb,
+    boostAdjustmentDb,
+    constrainedByPeak: peakSafeDifference < levelDifference,
+    constrainedByFader,
+    constrainedByBoost,
     withinTarget: false,
   }
 }

@@ -45,4 +45,28 @@ describe('CaptureDetector', () => {
     await expect(detector.detect(profile)).resolves.toEqual({ method: 'local', warnings: [] })
     expect(processes).toHaveBeenCalledTimes(2)
   })
+
+  it('recognizes a running profile without requiring the user to select its card', async () => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['arkascended.exe'])
+
+    await expect(detector.detectRunningProfile(structuredClone(starterProfiles))).resolves.toMatchObject({
+      profile: { id: 'ark_survival_ascended' },
+      method: 'local',
+      executableName: 'arkascended.exe',
+    })
+  })
+
+  it('keeps the currently selected running game when more than one known game is open', async () => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['arkascended.exe', 'robloxplayerbeta.exe'])
+    const profiles = structuredClone(starterProfiles)
+    const roblox = profiles.find(({ id }) => id === 'roblox')
+    expect(roblox).toBeDefined()
+
+    await expect(detector.detectRunningProfile(profiles, roblox?.id)).resolves.toMatchObject({
+      profile: { id: roblox?.id },
+      executableName: 'robloxplayerbeta.exe',
+    })
+  })
 })

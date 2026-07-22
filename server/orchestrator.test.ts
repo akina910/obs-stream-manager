@@ -9,6 +9,68 @@ import type { PlatformServices } from './platforms.js'
 import type { DataStore } from './storage.js'
 
 describe('StreamOrchestrator operation exclusion', () => {
+  it('applies a running game profile automatically while OBS is idle', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      listProfiles: vi.fn().mockResolvedValue([profile]),
+      getProfile: vi.fn().mockResolvedValue(profile),
+      getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value),
+      saveConfig: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({ obsConnected: true, streaming: false, recording: false, replayBuffer: false }),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
+      preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ObsController
+    const capture = {
+      detectRunningProfile: vi.fn().mockResolvedValue({ profile, method: 'local', executableName: 'arkascended.exe' }),
+    } as unknown as CaptureDetector
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue([
+        { service: 'youtube', ok: true, message: 'ok' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ]),
+      invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, capture, platforms, logger)
+
+    await expect(orchestrator.autoSelectRunningGame()).resolves.toMatchObject({
+      detected: true,
+      applied: true,
+      gameId: profile.id,
+      executableName: 'arkascended.exe',
+      captureMethod: 'local',
+    })
+    expect(obs.applyProfile).toHaveBeenCalledWith(config, profile, 'local')
+    expect(store.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ ui: expect.objectContaining({ lastSelectedGameId: profile.id }) }))
+    expect(logger.write).toHaveBeenCalledWith('profile.auto_detected', expect.objectContaining({ gameId: profile.id }))
+  })
+
+  it('rechecks OBS inside the exclusive section and never auto-applies during an active output', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      listProfiles: vi.fn().mockResolvedValue([profile]),
+      getConfig: vi.fn().mockResolvedValue(config),
+    } as unknown as DataStore
+    const obs = {
+      status: vi.fn().mockResolvedValue({ obsConnected: true, streaming: true, recording: false, replayBuffer: false }),
+      applyProfile: vi.fn(),
+    } as unknown as ObsController
+    const capture = {
+      detectRunningProfile: vi.fn().mockResolvedValue({ profile, method: 'local', executableName: 'arkascended.exe' }),
+    } as unknown as CaptureDetector
+    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
+    const orchestrator = new StreamOrchestrator(store, obs, capture, {} as PlatformServices, logger)
+
+    await expect(orchestrator.autoSelectRunningGame()).resolves.toMatchObject({ detected: true, applied: false, gameId: profile.id })
+    expect(obs.status).toHaveBeenCalledWith(config, null, null, true, null)
+    expect(obs.applyProfile).not.toHaveBeenCalled()
+  })
+
   it('keeps a Twitch bandwidth test mutually exclusive with normal stream startup', async () => {
     let releaseTest!: () => void
     const testBlocked = new Promise<never>((resolve) => { releaseTest = resolve as () => void })

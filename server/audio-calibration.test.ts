@@ -138,7 +138,7 @@ describe('AudioCalibrationService', () => {
 
     const result = await service.applyManagedMicrophoneFilters(fake as unknown as OBSWebSocket, 'MIC')
 
-    expect(result.filters).toHaveLength(5)
+    expect(result.filters).toHaveLength(6)
     expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName === 'OBS Stream Manager - Compressor')?.filterSettings).toMatchObject({ output_gain: 6 })
     expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Upward Compressor'))?.filterSettings).toMatchObject({ ratio: 0.25, threshold: -20 })
     expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Expander'))?.filterSettings).toMatchObject({ ratio: 2, threshold: -45 })
@@ -163,6 +163,7 @@ describe('AudioCalibrationService', () => {
     expect(fake.filters.get('MIC')?.map(({ filterName }) => filterName)).toEqual([
       'User EQ',
       'OBS Stream Manager - Noise Suppression',
+      'OBS Stream Manager - Calibration Gain',
       'OBS Stream Manager - Upward Compressor',
       'OBS Stream Manager - Compressor',
       'OBS Stream Manager - Expander',
@@ -219,6 +220,7 @@ describe('AudioCalibrationService', () => {
     expect(result.readings.find(({ role }) => role === 'game')).toMatchObject({ status: 'adjusted', verifiedDb: -24, verifiedPeakDb: -10 })
     expect(fake.filters.get('MIC')?.map(({ filterKind }) => filterKind)).toEqual([
       'noise_suppress_filter_v2',
+      'gain_filter',
       'upward_compressor_filter',
       'compressor_filter',
       'expander_filter',
@@ -269,6 +271,69 @@ describe('AudioCalibrationService', () => {
       .rejects.toThrow('ゲーム音「GAME_PC」')
     expect(fake.calls.some(({ request }) => request === 'SetInputVolume')).toBe(false)
     expect(fake.calls.some(({ request }) => request === 'CreateSourceFilter')).toBe(false)
+  })
+
+  it('waits for the game to become active before spending the calibration window', async () => {
+    const fake = new FakeAudioObs()
+    let waitCount = 0
+    const service = new AudioCalibrationService(
+      () => fake as unknown as OBSWebSocket,
+      async () => {
+        waitCount += 1
+        if (waitCount < 3) fake.emit({ MIC: { magnitudeDb: -20, peakDb: -8 } }, 8)
+        else fake.emit({ MIC: { magnitudeDb: -18, peakDb: -6 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 20)
+      },
+    )
+
+    await expect(service.calibrate(structuredClone(defaultConfig), undefined, structuredClone(starterProfiles[0]), 'local'))
+      .resolves.toBeDefined()
+    expect(waitCount).toBe(6)
+    expect(fake.calls.some(({ request }) => request === 'CreateSourceFilter')).toBe(true)
+  })
+
+  it('adds managed microphone boost when the OBS fader is already at its ceiling', async () => {
+    const fake = new FakeAudioObs()
+    fake.volumes.set('MIC', 20)
+    let phase = 0
+    const service = new AudioCalibrationService(
+      () => fake as unknown as OBSWebSocket,
+      async () => {
+        if (phase <= 1) fake.emit({ MIC: { magnitudeDb: -40, peakDb: -26 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 20)
+        else fake.emit({ MIC: { magnitudeDb: -18, peakDb: -6 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 20)
+        phase += 1
+      },
+    )
+
+    const result = await service.calibrate(structuredClone(defaultConfig), undefined, structuredClone(starterProfiles[0]), 'local')
+
+    expect(result.profile.audio.microphoneDb).toBe(20)
+    expect(result.profile.audio.microphoneBoostDb).toBe(20)
+    expect(result.readings.find(({ role }) => role === 'microphone')).toMatchObject({
+      appliedDb: 20,
+      appliedBoostDb: 20,
+      boostAdjustmentDb: 20,
+      verifiedDb: -18,
+      status: 'adjusted',
+    })
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName === 'OBS Stream Manager - Calibration Gain')?.filterSettings).toEqual({ db: 20 })
+    expect(result.warnings.some((warning) => warning.includes('フェーダーだけでは不足'))).toBe(true)
+  })
+
+  it('measures the game with managed ducking disabled and restores it afterwards', async () => {
+    const fake = new FakeAudioObs()
+    const duckingStates: boolean[] = []
+    const service = new AudioCalibrationService(
+      () => fake as unknown as OBSWebSocket,
+      async () => {
+        duckingStates.push(fake.filters.get('GAME_PC')?.find(({ filterName }) => filterName === 'MIC Ducking')?.filterEnabled ?? false)
+        fake.emit({ MIC: { magnitudeDb: -18, peakDb: -6 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 20)
+      },
+    )
+
+    await service.calibrate(structuredClone(defaultConfig), undefined, structuredClone(starterProfiles[0]), 'local')
+
+    expect(duckingStates).toEqual([true, false, false, false])
+    expect(fake.filters.get('GAME_PC')?.find(({ filterName }) => filterName === 'MIC Ducking')?.filterEnabled).toBe(true)
   })
 
   it('rolls back filters when OBS rejects a required managed filter', async () => {
@@ -472,5 +537,40 @@ describe('AudioCalibrationService', () => {
     expect(fake.volumes.get('GAME_PC')).toBe(-15)
     expect(fake.filters.get('MIC')).toEqual([])
     expect(fake.filters.get('GAME_PC')).toEqual(originalGameFilter)
+  })
+
+  it('restores an existing managed boost exactly when profile persistence fails', async () => {
+    const fake = new FakeAudioObs()
+    fake.volumes.set('MIC', 20)
+    fake.filters.set('MIC', [{
+      filterName: 'OBS Stream Manager - Calibration Gain',
+      filterKind: 'gain_filter',
+      filterEnabled: true,
+      filterSettings: { db: 5 },
+    }])
+    let phase = 0
+    const service = new AudioCalibrationService(
+      () => fake as unknown as OBSWebSocket,
+      async () => {
+        if (phase <= 1) fake.emit({ MIC: { magnitudeDb: -40, peakDb: -26 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 20)
+        else fake.emit({ MIC: { magnitudeDb: -18, peakDb: -6 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 20)
+        phase += 1
+      },
+    )
+
+    await expect(service.calibrate(
+      structuredClone(defaultConfig),
+      undefined,
+      structuredClone(starterProfiles[0]),
+      'local',
+      15_000,
+      async () => { throw new Error('profile save failed') },
+    )).rejects.toThrow('profile save failed')
+
+    expect(fake.volumes.get('MIC')).toBe(20)
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName === 'OBS Stream Manager - Calibration Gain')).toMatchObject({
+      filterEnabled: true,
+      filterSettings: { db: 5 },
+    })
   })
 })

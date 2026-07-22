@@ -7,6 +7,7 @@ import {
   analyzeAudioSamples,
   audioFieldForRole,
   recommendInputVolume,
+  recommendMicrophoneGain,
   type AudioCalibrationReading,
   type AudioCalibrationResult,
   type AudioCalibrationRole,
@@ -56,6 +57,10 @@ type RollbackAction = {
 
 const sleep: Sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 const asStatusError = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode })
+const microphoneBoostFilterName = 'OBS Stream Manager - Calibration Gain'
+const gameDuckingFilterNames = ['OBS Stream Manager - Ducking', 'MIC Ducking', 'Game Ducking']
+const signalWaitTimeoutMs = 60_000
+const signalPollIntervalMs = 1_000
 
 function activeGameSource(config: AppConfig, method: CaptureMethod): string {
   if (method === 'geforce_now') return config.sources.geforceNow
@@ -183,6 +188,41 @@ export class AudioCalibrationService {
     return analyzeAudioSamples(samples ?? [], Math.max(4, Math.floor(durationMs / 500)))
   }
 
+  private async waitForRequiredSignals(
+    client: AudioObsClient,
+    sources: AudioSource[],
+    timeoutMs = signalWaitTimeoutMs,
+  ): Promise<Map<AudioCalibrationRole, AudioMeasurement | null>> {
+    const samples = new Map(sources.map(({ sourceName }) => [sourceName, [] as AudioMeterSample[]]))
+    const sourceNames = new Set(samples.keys())
+    const listener = ({ inputs }: { inputs: unknown[] }) => {
+      if (!Array.isArray(inputs)) return
+      for (const entry of inputs) {
+        const parsed = sampleFromMeterEntry(entry)
+        if (parsed && sourceNames.has(parsed.sourceName)) samples.get(parsed.sourceName)?.push(parsed.sample)
+      }
+    }
+    client.on('InputVolumeMeters', listener)
+    let elapsedMs = 0
+    try {
+      while (elapsedMs < timeoutMs) {
+        const intervalMs = Math.min(signalPollIntervalMs, timeoutMs - elapsedMs)
+        await this.wait(intervalMs)
+        elapsedMs += intervalMs
+        const measurements = new Map<AudioCalibrationRole, AudioMeasurement | null>()
+        for (const source of sources) measurements.set(source.role, analyzeAudioSamples(samples.get(source.sourceName) ?? [], 4))
+        if (sources.filter(({ required }) => required).every(({ role }) => measurements.get(role))) return measurements
+      }
+    } finally {
+      client.off('InputVolumeMeters', listener)
+    }
+
+    const missing = sources
+      .filter(({ required, sourceName }) => required && !analyzeAudioSamples(samples.get(sourceName) ?? [], 4))
+      .map(({ role, sourceName }) => `${role === 'microphone' ? 'マイク' : 'ゲーム音'}「${sourceName}」`)
+    throw asStatusError(`${missing.join('と')}を検出できませんでした。調整はまだ開始していないため音量は変更していません。ゲームへ戻ってゲーム音を鳴らし、普段どおり話してください`, 422)
+  }
+
   async assertOutputsInactive(client: AudioObsClient): Promise<void> {
     const replayStatusRequest = client.call('GetReplayBufferStatus').catch((error: unknown) => {
       const code = typeof error === 'object' && error !== null && 'code' in error ? Number(error.code) : null
@@ -308,15 +348,28 @@ export class AudioCalibrationService {
         if (compatible?.filterEnabled) warnings.push(`${spec.sourceName}のカスタム${filterLabel(compatible.filterKind)}「${compatible.filterName}」は管理対象外のため無効化していません`)
         return null
       }
-      if (!target.filterEnabled) {
-        return { sourceName: spec.sourceName, filterName: target.filterName, filterKind: target.filterKind, status: 'disabled', message: `${target.filterName}は無効です` }
-      }
-      await client.call('SetSourceFilterEnabled', { sourceName: spec.sourceName, filterName: target.filterName, filterEnabled: false })
-      rollbacks.push({
-        label: `${spec.sourceName}/${target.filterName}の有効状態`,
-        run: () => client.call('SetSourceFilterEnabled', { sourceName: spec.sourceName, filterName: target.filterName, filterEnabled: target.filterEnabled }),
+      await client.call('SetSourceFilterSettings', {
+        sourceName: spec.sourceName,
+        filterName: target.filterName,
+        filterSettings: spec.filterSettings,
+        overlay: false,
       })
-      return { sourceName: spec.sourceName, filterName: target.filterName, filterKind: target.filterKind, status: 'disabled', message: `${target.filterName}を無効化しました` }
+      if (target.filterEnabled) await client.call('SetSourceFilterEnabled', { sourceName: spec.sourceName, filterName: target.filterName, filterEnabled: false })
+      rollbacks.push({
+        label: `${spec.sourceName}/${target.filterName}の設定と有効状態`,
+        run: async () => {
+          await Promise.all([
+            client.call('SetSourceFilterSettings', {
+              sourceName: spec.sourceName,
+              filterName: target.filterName,
+              filterSettings: target.filterSettings,
+              overlay: false,
+            }),
+            client.call('SetSourceFilterEnabled', { sourceName: spec.sourceName, filterName: target.filterName, filterEnabled: target.filterEnabled }),
+          ])
+        },
+      })
+      return { sourceName: spec.sourceName, filterName: target.filterName, filterKind: target.filterKind, status: 'disabled', message: target.filterEnabled ? `${target.filterName}を測定中だけ無効化しました` : `${target.filterName}は無効です` }
     }
 
     if (managed || legacy) {
@@ -366,7 +419,7 @@ export class AudioCalibrationService {
     return { sourceName: spec.sourceName, filterName: spec.filterName, filterKind: spec.filterKind, status: 'created', message: `${spec.filterName}を追加しました` }
   }
 
-  private microphoneFilterSpecs(sourceName: string): ManagedFilterSpec[] {
+  private microphoneFilterSpecs(sourceName: string, boostDb = 0): ManagedFilterSpec[] {
     return [
       {
         sourceName,
@@ -374,6 +427,13 @@ export class AudioCalibrationService {
         filterKind: 'noise_suppress_filter_v2',
         filterSettings: { method: 'rnnoise', suppress_level: -30 },
         compatible: ({ filterKind }) => filterKind === 'noise_suppress_filter_v2' || filterKind === 'noise_suppress_filter',
+      },
+      {
+        sourceName,
+        filterName: microphoneBoostFilterName,
+        filterKind: 'gain_filter',
+        filterSettings: { db: Math.max(0, Math.min(24, boostDb)) },
+        compatible: () => false,
       },
       {
         sourceName,
@@ -406,8 +466,8 @@ export class AudioCalibrationService {
     ]
   }
 
-  private gameFilterSpecs(sourceName: string, microphoneSource: string, duckingDb: number): ManagedFilterSpec[] {
-    const duckingEnabled = duckingDb < 0
+  private gameFilterSpecs(sourceName: string, microphoneSource: string, duckingDb: number, calibrationMode = false): ManagedFilterSpec[] {
+    const duckingEnabled = duckingDb < 0 && !calibrationMode
     const duckingThreshold = Math.max(-36, Math.min(-18, AUDIO_CALIBRATION_TARGETS.microphone.referenceDb - Math.abs(duckingDb)))
     return [
       {
@@ -440,14 +500,33 @@ export class AudioCalibrationService {
     }
   }
 
-  async applyManagedMicrophoneFilters(client: AudioObsClient, sourceName: string): Promise<{ filters: AudioManagedFilterResult[]; warnings: string[] }> {
+  private async setManagedMicrophoneBoost(client: AudioObsClient, sourceName: string, boostDb: number): Promise<void> {
+    await client.call('SetSourceFilterSettings', {
+      sourceName,
+      filterName: microphoneBoostFilterName,
+      filterSettings: { db: Math.max(0, Math.min(24, boostDb)) },
+      overlay: false,
+    })
+  }
+
+  private async restoreConfiguredDucking(client: AudioObsClient, sourceName: string, enabled: boolean, rollbacks: RollbackAction[]): Promise<void> {
+    const filter = (await this.filterList(client, sourceName)).find(({ filterName }) => gameDuckingFilterNames.includes(filterName))
+    if (!filter || filter.filterEnabled === enabled) return
+    await client.call('SetSourceFilterEnabled', { sourceName, filterName: filter.filterName, filterEnabled: enabled })
+    rollbacks.push({
+      label: `${sourceName}/${filter.filterName}の有効状態`,
+      run: () => client.call('SetSourceFilterEnabled', { sourceName, filterName: filter.filterName, filterEnabled: filter.filterEnabled }),
+    })
+  }
+
+  async applyManagedMicrophoneFilters(client: AudioObsClient, sourceName: string, boostDb = 0): Promise<{ filters: AudioManagedFilterResult[]; warnings: string[] }> {
     await this.assertOutputsInactive(client)
     const filters: AudioManagedFilterResult[] = []
     const warnings: string[] = []
     const rollbacks: RollbackAction[] = []
     try {
       await this.ensureMicrophoneMono(client, sourceName, rollbacks, warnings)
-      for (const spec of this.microphoneFilterSpecs(sourceName)) {
+      for (const spec of this.microphoneFilterSpecs(sourceName, boostDb)) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, spec, rollbacks, warnings)
         if (result) filters.push(result)
@@ -487,10 +566,9 @@ export class AudioCalibrationService {
   ): Promise<AudioCalibrationResult> {
     const startedAt = new Date()
     const durationMs = Math.max(9_000, Math.min(30_000, Math.round(requestedDurationMs)))
-    const preflightDurationMs = Math.floor(durationMs * 0.18)
-    const baselineDurationMs = Math.floor(durationMs * 0.38)
+    const baselineDurationMs = Math.floor(durationMs * 0.5)
     const firstVerificationDurationMs = Math.floor(durationMs * 0.25)
-    const finalVerificationDurationMs = durationMs - preflightDurationMs - baselineDurationMs - firstVerificationDurationMs
+    const finalVerificationDurationMs = durationMs - baselineDurationMs - firstVerificationDurationMs
     const configuredSources = sourceMap(config, method)
     const client = this.clientFactory()
     const warnings: string[] = []
@@ -512,19 +590,12 @@ export class AudioCalibrationService {
         throw asStatusError(`${detail}。OBSで音声ソースを有効にしてから再実行してください`, 422)
       }
 
-      const preflightSamples = await this.measure(client, sourceNames, preflightDurationMs)
-      const preflight = new Map<AudioCalibrationRole, AudioMeasurement | null>()
-      for (const source of sources) preflight.set(source.role, this.analyze(preflightSamples.get(source.sourceName), preflightDurationMs))
-      const silentRequired = sources.filter(({ role, required }) => required && !preflight.get(role))
-      if (silentRequired.length) {
-        const names = silentRequired.map(({ role, sourceName }) => `${role === 'microphone' ? 'マイク' : 'ゲーム音'}「${sourceName}」`).join('と')
-        throw asStatusError(`${names}の音声を測定できませんでした。普段の声量で話しながらゲーム音を鳴らし、もう一度実行してください`, 422)
-      }
+      const preflight = await this.waitForRequiredSignals(client, sources)
 
       await this.assertOutputsInactive(client)
 
       await this.ensureMicrophoneMono(client, config.sources.microphone, rollbacks, warnings)
-      for (const spec of this.microphoneFilterSpecs(config.sources.microphone)) {
+      for (const spec of this.microphoneFilterSpecs(config.sources.microphone, profile.audio.microphoneBoostDb)) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, spec, rollbacks, warnings)
         if (result) filterResults.push(result)
@@ -532,7 +603,7 @@ export class AudioCalibrationService {
       await this.orderManagedFilters(client, config.sources.microphone, filterResults
         .filter(({ sourceName }) => sourceName === config.sources.microphone)
         .map(({ filterName }) => filterName), rollbacks)
-      for (const spec of this.gameFilterSpecs(activeGameSource(config, method), config.sources.microphone, profile.audio.duckingDb)) {
+      for (const spec of this.gameFilterSpecs(activeGameSource(config, method), config.sources.microphone, profile.audio.duckingDb, true)) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, spec, rollbacks, warnings)
         if (result) filterResults.push(result)
@@ -573,7 +644,10 @@ export class AudioCalibrationService {
           warnings.push(`${source.sourceName}は無音だったため現在の音量を維持しました`)
           continue
         }
-        const recommendation = recommendInputVolume(source.currentDb, measurement, target)
+        const microphoneRecommendation = role === 'microphone'
+          ? recommendMicrophoneGain(source.currentDb, nextAudio.microphoneBoostDb, measurement, target)
+          : null
+        const recommendation = microphoneRecommendation ?? recommendInputVolume(source.currentDb, measurement, target)
         await this.assertOutputsInactive(client)
         await client.call('SetInputVolume', { inputName: source.sourceName, inputVolumeDb: recommendation.appliedDb })
         rollbacks.push({
@@ -581,8 +655,14 @@ export class AudioCalibrationService {
           run: () => client.call('SetInputVolume', { inputName: source.sourceName, inputVolumeDb: source.currentDb as number }),
         })
         nextAudio[audioFieldForRole(role)] = recommendation.appliedDb
+        if (microphoneRecommendation) {
+          nextAudio.microphoneBoostDb = microphoneRecommendation.appliedBoostDb
+          if (microphoneRecommendation.boostAdjustmentDb !== 0) await this.setManagedMicrophoneBoost(client, source.sourceName, microphoneRecommendation.appliedBoostDb)
+          if (microphoneRecommendation.boostAdjustmentDb > 0) warnings.push(`${source.sourceName}はフェーダーだけでは不足するため管理ゲインを+${microphoneRecommendation.appliedBoostDb} dBへ調整しました`)
+          if (microphoneRecommendation.constrainedByBoost) warnings.push(`${source.sourceName}はピーク保護と最大ブーストの範囲内で調整しました`)
+        }
         if (recommendation.constrainedByPeak) warnings.push(`${source.sourceName}はピーク超過を防ぐため増幅量を制限しました`)
-        if (recommendation.constrainedByFader) warnings.push(`${source.sourceName}は安全なフェーダー範囲内で調整しました`)
+        if (recommendation.constrainedByFader && role !== 'microphone') warnings.push(`${source.sourceName}は安全なフェーダー範囲内で調整しました`)
         readings.push({
           role,
           sourceName: source.sourceName,
@@ -591,8 +671,11 @@ export class AudioCalibrationService {
           targetDb: target.referenceDb,
           peakCeilingDb: target.peakCeilingDb,
           previousDb: source.currentDb,
+          previousBoostDb: role === 'microphone' ? profile.audio.microphoneBoostDb : undefined,
           appliedDb: recommendation.appliedDb,
+          appliedBoostDb: microphoneRecommendation?.appliedBoostDb,
           adjustmentDb: recommendation.adjustmentDb,
+          boostAdjustmentDb: microphoneRecommendation?.boostAdjustmentDb,
           measuredDb: measurement.referenceDb,
           measuredPeakDb: measurement.peakDb,
           sampleCount: measurement.activeSampleCount,
@@ -608,6 +691,21 @@ export class AudioCalibrationService {
           continue
         }
         const target = AUDIO_CALIBRATION_TARGETS[reading.role]
+        if (reading.role === 'microphone') {
+          const correction = recommendMicrophoneGain(reading.appliedDb, reading.appliedBoostDb ?? 0, measurement, target, 3)
+          if (correction.adjustmentDb !== 0) {
+            await this.assertOutputsInactive(client)
+            await client.call('SetInputVolume', { inputName: reading.sourceName, inputVolumeDb: correction.appliedDb })
+            nextAudio.microphoneDb = correction.appliedDb
+            nextAudio.microphoneBoostDb = correction.appliedBoostDb
+            if (correction.boostAdjustmentDb !== 0) await this.setManagedMicrophoneBoost(client, reading.sourceName, correction.appliedBoostDb)
+            reading.appliedDb = correction.appliedDb
+            reading.appliedBoostDb = correction.appliedBoostDb
+            reading.boostAdjustmentDb = Math.round(((reading.boostAdjustmentDb ?? 0) + correction.boostAdjustmentDb) * 2) / 2
+            reading.adjustmentDb = Math.round(((reading.adjustmentDb ?? 0) + correction.adjustmentDb) * 2) / 2
+          }
+          continue
+        }
         const correction = recommendInputVolume(reading.appliedDb, measurement, target, 3)
         if (correction.adjustmentDb !== 0) {
           await this.assertOutputsInactive(client)
@@ -637,6 +735,21 @@ export class AudioCalibrationService {
           : `${reading.message}。音源の変動が大きいため安全範囲で確定しました`
         if (!verified) warnings.push(`${reading.sourceName}は音源の変動が大きく、目標付近の安全値で確定しました`)
       }
+
+      const verifiedMicrophone = readings.find(({ role }) => role === 'microphone')
+      const verifiedGame = readings.find(({ role }) => role === 'game')
+      if (verifiedMicrophone?.verifiedDb !== undefined && verifiedGame?.verifiedDb !== undefined) {
+        const targetDifferenceDb = AUDIO_CALIBRATION_TARGETS.microphone.referenceDb - AUDIO_CALIBRATION_TARGETS.game.referenceDb
+        const measuredDifferenceDb = verifiedMicrophone.verifiedDb - verifiedGame.verifiedDb
+        if (Math.abs(measuredDifferenceDb - targetDifferenceDb) > 4) {
+          verifiedMicrophone.status = 'limited'
+          verifiedGame.status = 'limited'
+          warnings.push(`マイクとゲーム音の差が${measuredDifferenceDb >= 0 ? '+' : ''}${measuredDifferenceDb} dBのため、目標差+${targetDifferenceDb} dBへ十分に収束しませんでした`)
+        }
+      }
+
+      await this.assertOutputsInactive(client)
+      await this.restoreConfiguredDucking(client, activeGameSource(config, method), profile.audio.duckingDb < 0, rollbacks)
 
       const updatedProfile = { ...profile, audio: nextAudio }
       const result: AudioCalibrationResult = {

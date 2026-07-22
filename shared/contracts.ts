@@ -13,6 +13,7 @@ export type ThumbnailApplyStatus = z.infer<typeof ThumbnailApplyStatusSchema>
 export const GameIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9_-]*$/)
 export const AudioProfileSchema = z.object({
   microphoneDb: z.number().min(-100).max(26).default(-3),
+  microphoneBoostDb: z.number().min(0).max(24).default(0),
   gameDb: z.number().min(-100).max(26).default(-15),
   discordDb: z.number().min(-100).max(26).default(-18),
   bgmDb: z.number().min(-100).max(26).default(-25),

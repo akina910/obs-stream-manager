@@ -310,14 +310,16 @@ export class ObsController {
 
     const video = await this.obs.call('GetVideoSettings').catch(() => null)
     if (video) {
-      const needsVideoUpdate = video.outputWidth !== managedOutputPreset.width
+      const needsVideoUpdate = video.baseWidth !== managedOutputPreset.width
+        || video.baseHeight !== managedOutputPreset.height
+        || video.outputWidth !== managedOutputPreset.width
         || video.outputHeight !== managedOutputPreset.height
         || video.fpsNumerator !== managedOutputPreset.fpsNumerator
         || video.fpsDenominator !== managedOutputPreset.fpsDenominator
       if (needsVideoUpdate) {
         await this.obs.call('SetVideoSettings', {
-          baseWidth: video.baseWidth || managedOutputPreset.width,
-          baseHeight: video.baseHeight || managedOutputPreset.height,
+          baseWidth: managedOutputPreset.width,
+          baseHeight: managedOutputPreset.height,
           outputWidth: managedOutputPreset.width,
           outputHeight: managedOutputPreset.height,
           fpsNumerator: managedOutputPreset.fpsNumerator,
@@ -977,7 +979,7 @@ export class ObsController {
     await this.setMuted(config.sources.microphone, false)
     let audioApplied = true
     try {
-      const managed = await this.audioCalibration.applyManagedMicrophoneFilters(this.obs, config.sources.microphone)
+      const managed = await this.audioCalibration.applyManagedMicrophoneFilters(this.obs, config.sources.microphone, profile.audio.microphoneBoostDb)
       warnings.push(...managed.warnings)
     } catch (error) {
       audioApplied = false
@@ -1025,7 +1027,7 @@ export class ObsController {
     await this.connect(config)
     const warnings: string[] = []
     const activeGame = method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame
-    const managed = await this.audioCalibration.applyManagedMicrophoneFilters(this.obs, config.sources.microphone)
+    const managed = await this.audioCalibration.applyManagedMicrophoneFilters(this.obs, config.sources.microphone, profile.audio.microphoneBoostDb)
     warnings.push(...managed.warnings)
     const volumes: Array<[string, number]> = [
       [config.sources.microphone, profile.audio.microphoneDb],
