@@ -15,7 +15,7 @@ import {
   type AudioMeterSample,
 } from '../shared/audio-calibration.js'
 
-type AudioObsClient = Pick<OBSWebSocket, 'call' | 'connect' | 'disconnect' | 'on' | 'off'>
+export type AudioObsClient = Pick<OBSWebSocket, 'call' | 'connect' | 'disconnect' | 'on' | 'off'>
 type AudioClientFactory = () => AudioObsClient
 type Sleep = (milliseconds: number) => Promise<void>
 
@@ -133,7 +133,7 @@ function rawFilters(value: unknown): RawFilter[] {
     return [{
       filterName: filter.filterName,
       filterKind: filter.filterKind,
-      filterEnabled: filter.filterEnabled === true,
+      filterEnabled: filter.filterEnabled !== false,
       filterSettings: settings,
     }]
   })
@@ -181,7 +181,7 @@ export class AudioCalibrationService {
     return analyzeAudioSamples(samples ?? [], Math.max(4, Math.floor(durationMs / 500)))
   }
 
-  private async assertOutputsInactive(client: AudioObsClient): Promise<void> {
+  async assertOutputsInactive(client: AudioObsClient): Promise<void> {
     const replayStatusRequest = client.call('GetReplayBufferStatus').catch((error: unknown) => {
       const code = typeof error === 'object' && error !== null && 'code' in error ? Number(error.code) : null
       if (code === 604 || code === 703) return { outputActive: false }
@@ -220,7 +220,7 @@ export class AudioCalibrationService {
 
   private async filterList(client: AudioObsClient, sourceName: string): Promise<RawFilter[]> {
     const response = await client.call('GetSourceFilterList', { sourceName })
-    return rawFilters(response.filters)
+    return rawFilters(response?.filters)
   }
 
   private async ensureFilter(
@@ -319,7 +319,7 @@ export class AudioCalibrationService {
         sourceName,
         filterName: 'OBS Stream Manager - Compressor',
         filterKind: 'compressor_filter',
-        filterSettings: { attack_time: 6, output_gain: 4, ratio: 3, release_time: 60, sidechain_source: 'none', threshold: -18 },
+        filterSettings: { attack_time: 6, output_gain: 6, ratio: 3, release_time: 60, sidechain_source: 'none', threshold: -18 },
         compatible: ({ filterKind, filterSettings }) => filterKind === 'compressor_filter' && (!filterSettings.sidechain_source || filterSettings.sidechain_source === 'none'),
       },
       {
@@ -363,6 +363,24 @@ export class AudioCalibrationService {
       filterKind: 'limiter_filter',
       filterSettings: { release_time: 60, threshold: -3 },
       compatible: ({ filterKind }) => filterKind === 'limiter_filter',
+    }
+  }
+
+  async applyManagedMicrophoneFilters(client: AudioObsClient, sourceName: string): Promise<{ filters: AudioManagedFilterResult[]; warnings: string[] }> {
+    await this.assertOutputsInactive(client)
+    const filters: AudioManagedFilterResult[] = []
+    const warnings: string[] = []
+    const rollbacks: RollbackAction[] = []
+    try {
+      for (const spec of this.microphoneFilterSpecs(sourceName)) {
+        await this.assertOutputsInactive(client)
+        const result = await this.ensureFilter(client, spec, rollbacks, warnings)
+        if (result) filters.push(result)
+      }
+      return { filters, warnings }
+    } catch (error) {
+      for (const rollback of [...rollbacks].reverse()) await rollback.run().catch(() => undefined)
+      throw error
     }
   }
 

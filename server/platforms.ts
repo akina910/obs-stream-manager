@@ -71,6 +71,8 @@ export class PlatformServices {
   private platformStatusCache: { key: string; value: PlatformRuntimeStatuses; expiresAt: number } | null = null
   private platformStatusRefresh: { key: string; promise: Promise<PlatformRuntimeStatuses> } | null = null
   private platformStatusGeneration = 0
+  private youtubeConfiguredBroadcastCache: { broadcastId: string; value: YouTubeBroadcast; expiresAt: number } | null = null
+  private youtubeObservedActive: { configuredBroadcastId: string; activeBroadcastId: string } | null = null
 
   constructor(private readonly secrets: SecretStore, private readonly store: DataStore, youtubeLifecyclePolling: YouTubeLifecyclePolling = {}) {
     this.youtubeLifecyclePolling = { ...defaultYouTubeLifecyclePolling, ...youtubeLifecyclePolling }
@@ -80,6 +82,8 @@ export class PlatformServices {
     this.platformStatusGeneration += 1
     this.platformStatusCache = null
     this.platformStatusRefresh = null
+    this.youtubeConfiguredBroadcastCache = null
+    this.youtubeObservedActive = null
   }
 
   private statusKey(config: AppConfig, profile: GameProfile | null): string {
@@ -91,23 +95,69 @@ export class PlatformServices {
 
   private async youtubeLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatus> {
     if (!config.features.youtube || profile?.youtube.enabled === false) return { state: 'disabled', detail: 'YouTube配信は無効です', checkedAt: null }
-    if (!config.youtube.clientId || !config.youtube.refreshTokenStored || !config.youtube.broadcastId) return { state: 'unprepared', detail: '配信枠が準備されていません', checkedAt: null }
+    if (!config.youtube.clientId || !config.youtube.refreshTokenStored) return { state: 'unprepared', detail: 'YouTube接続が完了していません', checkedAt: null }
     const checkedAt = new Date().toISOString()
     try {
       const accessToken = await this.youtubeAccessToken(config)
-      const url = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
-      url.search = new URLSearchParams({ part: 'id,status,contentDetails', id: config.youtube.broadcastId }).toString()
-      const result = await apiJson<{ items: YouTubeBroadcast[] }>(url.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
-      const broadcast = result.items[0]
+      const headers = { authorization: `Bearer ${accessToken}` }
+      const loadBroadcast = async (broadcastId: string): Promise<YouTubeBroadcast | undefined> => {
+        const url = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
+        url.search = new URLSearchParams({ part: 'id,status,contentDetails', id: broadcastId }).toString()
+        const result = await apiJson<{ items: YouTubeBroadcast[] }>(url.toString(), { headers })
+        return result.items[0]
+      }
+      let broadcast: YouTubeBroadcast | undefined
+      const observedActiveId = this.youtubeObservedActive?.configuredBroadcastId === config.youtube.broadcastId
+        ? this.youtubeObservedActive.activeBroadcastId
+        : null
+      if (observedActiveId) {
+        broadcast = await loadBroadcast(observedActiveId)
+        const observedLifeCycle = String(broadcast?.status.lifeCycleStatus ?? '')
+        if (!['live', 'liveStarting', 'testing', 'testStarting'].includes(observedLifeCycle)) {
+          this.youtubeObservedActive = null
+          broadcast = undefined
+        }
+      }
+      if (!broadcast && config.youtube.broadcastId) {
+        if (this.youtubeConfiguredBroadcastCache?.broadcastId === config.youtube.broadcastId && this.youtubeConfiguredBroadcastCache.expiresAt > Date.now()) {
+          broadcast = this.youtubeConfiguredBroadcastCache.value
+        } else {
+          broadcast = await loadBroadcast(config.youtube.broadcastId)
+          const lifeCycle = String(broadcast?.status.lifeCycleStatus ?? '')
+          this.youtubeConfiguredBroadcastCache = broadcast && !['live', 'liveStarting', 'testing', 'testStarting'].includes(lifeCycle)
+            ? { broadcastId: config.youtube.broadcastId, value: broadcast, expiresAt: Date.now() + 5 * 60_000 }
+            : null
+        }
+      }
+      const configuredLifeCycle = String(broadcast?.status.lifeCycleStatus ?? '')
+      if (!['live', 'liveStarting', 'testing', 'testStarting'].includes(configuredLifeCycle)) {
+        const activeUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
+        activeUrl.search = new URLSearchParams({ part: 'id,status,contentDetails', broadcastStatus: 'active', maxResults: '50' }).toString()
+        const active = await apiJson<{ items: YouTubeBroadcast[] }>(activeUrl.toString(), { headers })
+        const configuredStreamId = config.youtube.broadcastId && broadcast?.id === config.youtube.broadcastId && typeof broadcast.contentDetails.boundStreamId === 'string'
+          ? broadcast.contentDetails.boundStreamId
+          : ''
+        const activeBroadcast = active.items.find((candidate) => !config.youtube.broadcastId
+          || candidate.id === config.youtube.broadcastId
+          || Boolean(configuredStreamId && candidate.contentDetails.boundStreamId === configuredStreamId))
+        if (!config.youtube.broadcastId && active.items.length > 1) {
+          return { state: 'error', detail: 'YouTubeで複数の公開配信を検出しました。使用する配信枠をゲーム設定から選び直してください', checkedAt }
+        }
+        if (activeBroadcast) {
+          broadcast = activeBroadcast
+          this.youtubeObservedActive = { configuredBroadcastId: config.youtube.broadcastId, activeBroadcastId: activeBroadcast.id }
+        }
+      }
       if (!broadcast) return { state: 'unprepared', detail: '準備済みの配信枠が見つかりません', checkedAt }
       const lifeCycle = String(broadcast.status.lifeCycleStatus ?? '')
       if (lifeCycle === 'live') {
         let viewerCount: number | null = null
         let viewerCountState: 'available' | 'hidden' | 'unavailable' = 'unavailable'
+        let viewerCountDetail: string | undefined
         try {
           const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
           videoUrl.search = new URLSearchParams({ part: 'liveStreamingDetails,status', id: broadcast.id }).toString()
-          const video = await apiJson<{ items: Array<{ liveStreamingDetails?: { concurrentViewers?: string }; status?: { publicStatsViewable?: boolean } }> }>(videoUrl.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
+          const video = await apiJson<{ items: Array<{ liveStreamingDetails?: { concurrentViewers?: string }; status?: { publicStatsViewable?: boolean } }> }>(videoUrl.toString(), { headers })
           const item = video.items[0]
           const parsed = parseViewerCount(item?.liveStreamingDetails?.concurrentViewers)
           if (parsed !== null) {
@@ -119,9 +169,13 @@ export class PlatformServices {
             // YouTube omits concurrentViewers when the current audience is zero.
             viewerCount = 0
             viewerCountState = 'available'
+          } else {
+            viewerCountDetail = 'YouTubeがライブ視聴統計をまだ返していません。10秒ごとに再取得します'
           }
-        } catch { /* Viewer metrics must not downgrade a confirmed live broadcast. */ }
-        return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt, viewerCount, viewerCountState }
+        } catch (error) {
+          viewerCountDetail = `YouTube視聴者数の取得に失敗しました。10秒ごとに再取得します: ${error instanceof Error ? error.message : String(error)}`
+        }
+        return { state: 'live', detail: 'YouTubeで公開配信中', checkedAt, viewerCount, viewerCountState, viewerCountDetail }
       }
       if (lifeCycle === 'liveStarting') return { state: 'starting', detail: 'YouTubeで公開開始処理中', checkedAt }
       if (lifeCycle === 'testing' || lifeCycle === 'testStarting') return { state: 'starting', detail: 'YouTubeテスト配信中（視聴者には未公開）', checkedAt }
@@ -161,8 +215,8 @@ export class PlatformServices {
     const promise = Promise.all([this.youtubeLiveStatus(config, profile), this.twitchLiveStatus(config, profile)]).then(([youtube, twitch]) => {
       const value = { youtube, twitch }
       if (generation !== this.platformStatusGeneration) return this.getLiveStatus(config, profile)
-      const active = [youtube.state, twitch.state].some((state) => ['ready', 'starting', 'live', 'stopping'].includes(state))
-      this.platformStatusCache = { key, value, expiresAt: Date.now() + (active ? 10_000 : 30_000) }
+      const realtime = [youtube.state, twitch.state].some((state) => ['starting', 'live', 'stopping'].includes(state))
+      this.platformStatusCache = { key, value, expiresAt: Date.now() + (realtime ? 10_000 : 60_000) }
       return value
     })
     this.platformStatusRefresh = { key, promise }
@@ -534,7 +588,7 @@ export class PlatformServices {
     if (this.commentsGeneration !== generation) return 5000
     const headers = { authorization: `Bearer ${token}` }
     const broadcastsUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
-    broadcastsUrl.search = new URLSearchParams({ part: 'snippet', mine: 'true', broadcastStatus: 'active', maxResults: '1' }).toString()
+    broadcastsUrl.search = new URLSearchParams({ part: 'snippet', broadcastStatus: 'active', maxResults: '1' }).toString()
     const broadcasts = await apiJson<{ items: Array<{ snippet: { liveChatId?: string } }> }>(broadcastsUrl.toString(), { headers })
     if (this.commentsGeneration !== generation) return 5000
     const liveChatId = broadcasts.items[0]?.snippet.liveChatId

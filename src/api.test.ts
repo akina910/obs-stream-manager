@@ -27,4 +27,13 @@ describe('API request headers', () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(new Headers(init.headers).get('content-type')).toBe('application/json')
   })
+
+  it('requests automatic profile audio setup without user input', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, applied: true, warnings: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.ensureAudio()
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/audio/ensure', expect.objectContaining({ method: 'POST', body: '{}' }))
+  })
 })

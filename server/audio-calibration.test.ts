@@ -111,6 +111,24 @@ class FakeAudioObs {
 }
 
 describe('AudioCalibrationService', () => {
+  it('applies the managed microphone safety chain without requiring a calibration run', async () => {
+    const fake = new FakeAudioObs()
+    fake.filters.set('MIC', [{
+      filterName: 'OBS Stream Manager - Compressor',
+      filterKind: 'compressor_filter',
+      filterEnabled: true,
+      filterSettings: { attack_time: 6, output_gain: 0, ratio: 3, release_time: 60, sidechain_source: 'none', threshold: -18 },
+    }])
+    const service = new AudioCalibrationService()
+
+    const result = await service.applyManagedMicrophoneFilters(fake as unknown as OBSWebSocket, 'MIC')
+
+    expect(result.filters).toHaveLength(4)
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Compressor'))?.filterSettings).toMatchObject({ output_gain: 6 })
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Expander'))?.filterSettings).toMatchObject({ ratio: 1.5, threshold: -50 })
+    expect(fake.calls.filter(({ request }) => request === 'GetStreamStatus').length).toBeGreaterThan(1)
+  })
+
   it('measures, applies, verifies, and installs the managed safety filters', async () => {
     const fake = new FakeAudioObs()
     let phase = 0

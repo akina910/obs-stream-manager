@@ -385,7 +385,7 @@ describe('ObsController recording fallbacks', () => {
     const controller = new ObsController(memorySecrets())
     ;(controller as unknown as { obs: typeof fake }).obs = fake
 
-    const warnings = await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+    const { warnings } = await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
 
     expect(calls).toContainEqual({ request: 'CreateSceneItem', data: { sceneName: '00_STARTING', sourceName: 'MIC', sceneItemEnabled: true } })
     expect(calls).toContainEqual({ request: 'SetSceneItemEnabled', data: { sceneName: '00_STARTING', sceneItemId: 11, sceneItemEnabled: false } })
@@ -1033,7 +1033,7 @@ describe('ObsController recording fallbacks', () => {
     expect(toggles.map(({ filterEnabled }) => filterEnabled)).toEqual([true, false])
   })
 
-  it('reapplies calibrated per-source levels and keeps only the active game audio unmuted', async () => {
+  it('reapplies calibrated per-source levels and does not force-unmute the microphone during background recovery', async () => {
     const volumes: Array<{ inputName: string; inputVolumeDb: number }> = []
     const mutes: Array<{ inputName: string; inputMuted: boolean }> = []
     const fake = {
@@ -1054,7 +1054,7 @@ describe('ObsController recording fallbacks', () => {
     const profile = structuredClone(starterProfiles[0])
     profile.audio = { microphoneDb: 1, gameDb: -11, discordDb: -19, bgmDb: -27, duckingDb: -6 }
 
-    await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
+    const applied = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
 
     expect(volumes).toEqual(expect.arrayContaining([
       { inputName: 'MIC', inputVolumeDb: 1 },
@@ -1068,6 +1068,33 @@ describe('ObsController recording fallbacks', () => {
       { inputName: 'GAME_GFN', inputMuted: true },
       { inputName: 'GAME_SWITCH', inputMuted: true },
     ])
+    expect(applied.audioApplied).toBe(true)
+
+    mutes.length = 0
+    await controller.ensureProfileAudio(structuredClone(defaultConfig), profile, 'local')
+    expect(mutes).toEqual([])
+  })
+
+  it('reports that automatic microphone protection was not applied so reconnect recovery can retry it', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string) => {
+        if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'GetSourceFilterList') return { filters: [] }
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'CreateSourceFilter') throw new Error('filter create failed')
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    const result = await controller.applyProfile(structuredClone(defaultConfig), structuredClone(starterProfiles[0]), 'local')
+
+    expect(result.audioApplied).toBe(false)
+    expect(result.warnings.join(' ')).toContain('マイクの自動音量保護を適用できませんでした')
   })
 
   it('warns when no compatible OBS profile parameter can be updated', async () => {
@@ -1075,9 +1102,11 @@ describe('ObsController recording fallbacks', () => {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
       on: vi.fn(),
-      call: vi.fn(async (request: string) => {
+      call: vi.fn(async (request: string, data?: unknown) => {
         if (request === 'GetSourceActive') return { videoActive: true }
-        if (request === 'GetSourceFilterList') return { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking' }] }
+        if (request === 'GetSourceFilterList') return (data as { sourceName?: string })?.sourceName === 'MIC'
+          ? { filters: [] }
+          : { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking', filterEnabled: true, filterSettings: { sidechain_source: 'MIC' } }] }
         if (request === 'GetRecordStatus') return { outputActive: false }
         if (request === 'SetProfileParameter') throw new Error('unsupported parameter')
         return {}
@@ -1088,7 +1117,7 @@ describe('ObsController recording fallbacks', () => {
     const profile = structuredClone(starterProfiles[0])
     profile.recording.directory = 'D:\\Recordings'
 
-    const warnings = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
+    const { warnings } = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
 
     expect(warnings).toHaveLength(3)
     expect(warnings.join(' ')).toContain('FHD配信プロファイル')

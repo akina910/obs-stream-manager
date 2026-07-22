@@ -18,7 +18,7 @@ function dependencies(templateResult: object | Error) {
     saveConfig: vi.fn(async (value) => value),
   } as unknown as DataStore
   const obs = {
-    applyProfile: vi.fn().mockResolvedValue([]),
+    applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
     applyCommonTemplate: vi.fn().mockResolvedValue(undefined),
     preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
   } as unknown as ObsController

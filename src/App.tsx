@@ -121,7 +121,7 @@ function LiveElapsed({ milliseconds }: { milliseconds: number }) {
   return <>{[hours, minutes, remainder].map((value) => String(value).padStart(2, '0')).join(':')}</>
 }
 
-function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
+export function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
   const { t } = useI18n()
   const [recordingsOpen, setRecordingsOpen] = useState(false)
   const broadcast = getBroadcastStatus(status)
@@ -130,6 +130,16 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
   const obsOutput = platformOutputs[0]
   const destinationOutputs = platformOutputs.slice(1)
   const activeDestinations = destinationOutputs.filter((output) => output.active).length
+  const activeViewerPlatforms = destinationOutputs.flatMap((output) => output.active && (output.key === 'youtube' || output.key === 'twitch') ? [status.platforms[output.key]] : [])
+  const activeViewerCounts = activeViewerPlatforms.flatMap((platform) => platform.viewerCountState === 'available' && platform.viewerCount != null ? [platform.viewerCount] : [])
+  const combinedViewerCount = activeViewerCounts.reduce((total, count) => total + count, 0)
+  const viewerCountHidden = activeViewerPlatforms.some(({ viewerCountState }) => viewerCountState === 'hidden')
+  const viewerCountPending = activeViewerPlatforms.some(({ viewerCountState, viewerCount }) => viewerCountState !== 'hidden' && !(viewerCountState === 'available' && viewerCount != null))
+  const combinedViewerLabel = viewerCountHidden
+    ? activeViewerCounts.length ? t('確認済み {count}人・一部非表示', { count: combinedViewerCount.toLocaleString() }) : t('視聴者数は一部非表示')
+    : viewerCountPending
+      ? activeViewerCounts.length ? t('確認済み {count}人', { count: combinedViewerCount.toLocaleString() }) : t('視聴者数取得待ち')
+      : t('合計 {count}人', { count: combinedViewerCount.toLocaleString() })
   const recordingOutputs = outputs.slice(3)
   const activeRecordings = recordingOutputs.filter((output) => output.active).length
   const deliveryWarning = getExternalDeliveryWarning(status)
@@ -151,7 +161,7 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
           <div><ServiceIcon service="obs" /><span>{t(obsOutput.label)}</span></div>
           <strong><StatusDot tone={obsOutput.tone} pulse={obsOutput.active} />{t(obsOutput.state)}</strong>
         </div>
-        <div className={`delivery-link ${activeDestinations > 0 ? 'active' : ''}`}><span>{t(activeDestinations === 2 ? '同時配信中' : activeDestinations === 0 ? '2つの配信先' : '{active}/2 配信中', { active: activeDestinations })}</span><ChevronRight size={13} /></div>
+        <div className={`delivery-link ${activeDestinations > 0 ? 'active' : ''}`}><div><span>{t(activeDestinations === 2 ? '2/2 同時接続' : activeDestinations === 0 ? '2つの配信先' : '{active}/2 接続中', { active: activeDestinations })}</span><ChevronRight size={13} /></div>{activeDestinations > 0 && <strong className={viewerCountHidden ? 'hidden' : viewerCountPending && activeViewerCounts.length === 0 ? 'pending' : 'available'}><Users size={13} />{combinedViewerLabel}</strong>}</div>
         <div className="destination-grid">
           {destinationOutputs.map((output) => {
             const platform = output.key === 'youtube' || output.key === 'twitch' ? status.platforms[output.key] : null
@@ -160,10 +170,10 @@ function RuntimeStatusBar({ status }: { status: RuntimeStatus }) {
               ? t('視聴者数は非表示')
               : viewerState === 'available' && platform?.viewerCount != null
                 ? t('同時視聴 {count}', { count: platform.viewerCount })
-                : t('視聴者数を取得できません')
+                : t('視聴者数取得待ち')
             return <div className={`platform-card destination-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}; ${viewerLabel}`} title={output.detail ? t(output.detail) : undefined}>
               <div className="destination-head"><span className="destination-name"><ServiceIcon service={output.key === 'youtube' ? 'youtube' : 'twitch'} />{t(output.label)}</span><strong><StatusDot tone={output.tone} pulse={output.active} />{t(output.state)}</strong></div>
-              {output.active && <span className={`viewer-count ${viewerState}`}><Users size={12} />{viewerLabel}</span>}
+              {output.active && <span className={`viewer-count ${viewerState}`} title={platform?.viewerCountDetail}>{viewerState === 'available' && platform?.viewerCount != null ? <><Users size={14} /><small>{t('同時視聴')}</small><strong>{platform.viewerCount.toLocaleString()}</strong></> : <><Users size={13} /><span>{viewerLabel}</span></>}</span>}
             </div>
           })}
         </div>
@@ -673,11 +683,15 @@ export default function App() {
   const [actionBusy, setActionBusy] = useState(false)
   const [comments, setComments] = useState<ChatMessage[]>([])
   const [steamScan, setSteamScan] = useState<SteamSyncResult | null>(null)
+  const [audioEnsureRetry, setAudioEnsureRetry] = useState(0)
   const actionLock = useRef(false)
   const oauthPopup = useRef<Window | null>(null)
   const oauthStatusRequest = useRef(0)
   const previousOAuthStatus = useRef<OAuthConnectionStatuses | null>(null)
   const selectedServiceResults = useRef<Array<{ service: OAuthProvider; ok: boolean; message: string }>>([])
+  const audioEnsureAttemptKey = useRef<string | null>(null)
+  const audioEnsureFailureCount = useRef(0)
+  const audioEnsureErrorShown = useRef(false)
   const language = config?.ui.language ?? 'ja'
   const t = useMemo(() => createTranslator(language), [language])
 
@@ -734,6 +748,48 @@ export default function App() {
     return () => { active = false }
   }, [loadOAuthStatus])
   useEffect(() => { const timer = window.setInterval(() => void Promise.all([api.status(), api.obsSetup()]).then(([nextStatus, nextSetup]) => { setStatus(nextStatus); setObsSetup(nextSetup) }).catch(() => undefined), 2_000); return () => window.clearInterval(timer) }, [])
+  useEffect(() => {
+    if (!status?.obsConnected) {
+      audioEnsureAttemptKey.current = null
+      audioEnsureFailureCount.current = 0
+      audioEnsureErrorShown.current = false
+      return
+    }
+    const externalActive = [status.platforms.youtube.state, status.platforms.twitch.state].some((state) => ['starting', 'live', 'stopping'].includes(state))
+    if (!status.selectedGameId || !status.captureMethod || status.busy || status.streaming || status.recording || status.replayBuffer || externalActive) return
+    const connectionKey = `${status.selectedGameId}:${status.captureMethod}`
+    if (audioEnsureAttemptKey.current !== connectionKey) {
+      audioEnsureAttemptKey.current = connectionKey
+      audioEnsureFailureCount.current = 0
+      audioEnsureErrorShown.current = false
+    }
+    let cancelled = false
+    let retryTimer: number | undefined
+    const retry = (countFailure = true) => {
+      const failures = countFailure ? ++audioEnsureFailureCount.current : audioEnsureFailureCount.current
+      if (countFailure && failures > 6) return
+      const delayMs = countFailure ? Math.min(60_000, 5_000 * (2 ** (failures - 1))) : 5_000
+      retryTimer = window.setTimeout(() => setAudioEnsureRetry((revision) => revision + 1), delayMs)
+    }
+    void api.ensureAudio().then(({ applied, warnings }) => {
+      if (cancelled) return
+      if (applied) {
+        audioEnsureFailureCount.current = 0
+      } else retry(warnings.length > 0)
+      if (warnings[0] && !audioEnsureErrorShown.current) {
+        audioEnsureErrorShown.current = true
+        setToast({ kind: 'warning', text: warnings[0] })
+      }
+    }).catch((error) => {
+      if (cancelled) return
+      if (!audioEnsureErrorShown.current) {
+        audioEnsureErrorShown.current = true
+        setToast({ kind: 'warning', text: 'マイク音量の自動適用に失敗しました: {error}', values: { error: error instanceof Error ? error.message : String(error) } })
+      }
+      retry()
+    })
+    return () => { cancelled = true; if (retryTimer !== undefined) window.clearTimeout(retryTimer) }
+  }, [audioEnsureRetry, status?.busy, status?.captureMethod, status?.obsConnected, status?.platforms.twitch.state, status?.platforms.youtube.state, status?.recording, status?.replayBuffer, status?.selectedGameId, status?.streaming])
   useEffect(() => {
     const streaming = Boolean(status?.streaming)
     if (wasStreaming.current && !streaming) void api.profiles().then(setProfiles).catch(() => undefined)

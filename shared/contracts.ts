@@ -222,6 +222,7 @@ export const RuntimeStatusSchema = z.object({
       checkedAt: z.string().datetime().nullable(),
       viewerCount: z.number().int().nonnegative().nullable().optional(),
       viewerCountState: ViewerCountStateSchema.optional(),
+      viewerCountDetail: z.string().optional(),
     }),
     twitch: z.object({
       state: z.enum(['disabled', 'unprepared', 'ready', 'starting', 'live', 'stopping', 'offline', 'error']),
@@ -229,6 +230,7 @@ export const RuntimeStatusSchema = z.object({
       checkedAt: z.string().datetime().nullable(),
       viewerCount: z.number().int().nonnegative().nullable().optional(),
       viewerCountState: ViewerCountStateSchema.optional(),
+      viewerCountDetail: z.string().optional(),
     }),
   }),
 })

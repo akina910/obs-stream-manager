@@ -77,6 +77,7 @@ export const api = {
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
   testTwitchOutput: (options: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } = {}) => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: JSON.stringify(options) }),
   autoAdjustAudio: (gameId: string, audio: GameProfile['audio'], durationMs = 15_000) => request<AudioCalibrationResult>('/api/audio/auto-adjust', { method: 'POST', body: JSON.stringify({ gameId, audio, durationMs }) }),
+  ensureAudio: () => request<{ ok: true; applied: boolean; warnings: string[] }>('/api/audio/ensure', { method: 'POST', body: '{}' }),
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),
   selectFolder: (initialPath: string) => request<{ path: string | null }>('/api/folders/select', { method: 'POST', body: JSON.stringify({ initialPath }) }),

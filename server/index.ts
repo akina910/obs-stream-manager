@@ -273,6 +273,7 @@ app.post('/api/audio/auto-adjust', async (request) => {
   const body = AudioCalibrationRequestSchema.parse(request.body)
   return orchestrator.autoAdjustAudio(body.gameId, body.durationMs, body.audio)
 })
+app.post('/api/audio/ensure', async () => ({ ok: true, ...await orchestrator.ensureSelectedAudio() }))
 app.post('/api/replay/save', async () => { await orchestrator.saveReplay(); return { ok: true } })
 app.post<{ Body: { sceneName: string } }>('/api/scene', async (request) => { await orchestrator.switchScene(ObsSceneNameSchema.parse(request.body.sceneName)); return { ok: true } })
 app.post<{ Body: { initialPath?: string } }>('/api/folders/select', async (request) => ({ path: await selectFolder(typeof request.body?.initialPath === 'string' ? request.body.initialPath : '') }))

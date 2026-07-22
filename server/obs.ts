@@ -22,6 +22,7 @@ export const managedOutputPreset = {
 } as const
 export const stockBgmInputName = STOCK_BGM_INPUT_NAME
 export type BgmControlAction = 'play' | 'pause' | 'stop' | 'restart'
+export type ProfileApplyResult = { warnings: string[]; audioApplied: boolean }
 export type TwitchIngestTestResult = {
   ok: true
   output: {
@@ -948,7 +949,7 @@ export class ObsController {
     }
   }
 
-  async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
+  async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<ProfileApplyResult> {
     await this.connect(config)
     const warnings: string[] = []
     await this.configureManagedOutput(warnings)
@@ -974,6 +975,14 @@ export class ObsController {
       this.setVolume(method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame, profile.audio.gameDb),
     ])
     await this.setMuted(config.sources.microphone, false)
+    let audioApplied = true
+    try {
+      const managed = await this.audioCalibration.applyManagedMicrophoneFilters(this.obs, config.sources.microphone)
+      warnings.push(...managed.warnings)
+    } catch (error) {
+      audioApplied = false
+      warnings.push(`マイクの自動音量保護を適用できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+    }
     await this.reconcileMicrophoneSceneItems(config, profile, warnings)
     await this.configureSeparatedAudioTracks(config, warnings)
 
@@ -1008,6 +1017,26 @@ export class ObsController {
         { parameterCategory: 'SimpleOutput', parameterName: 'RecRBTime' },
       ], String(profile.recording.replayBufferSeconds))
       if (!applied) warnings.push(`リプレイバッファ時間 ${profile.recording.replayBufferSeconds} 秒をOBSプロファイルへ反映できませんでした`)
+    }
+    return { warnings, audioApplied }
+  }
+
+  async ensureProfileAudio(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
+    await this.connect(config)
+    const warnings: string[] = []
+    const activeGame = method === 'geforce_now' ? config.sources.geforceNow : method === 'elgato' ? config.sources.switchGame : config.sources.pcGame
+    const managed = await this.audioCalibration.applyManagedMicrophoneFilters(this.obs, config.sources.microphone)
+    warnings.push(...managed.warnings)
+    const volumes: Array<[string, number]> = [
+      [config.sources.microphone, profile.audio.microphoneDb],
+      [activeGame, profile.audio.gameDb],
+      [config.sources.discord, profile.audio.discordDb],
+      [config.sources.bgm, profile.audio.bgmDb],
+      [stockBgmInputName, profile.audio.bgmDb],
+    ]
+    for (const [inputName, inputVolumeDb] of volumes) {
+      await this.audioCalibration.assertOutputsInactive(this.obs)
+      await this.setVolume(inputName, inputVolumeDb)
     }
     return warnings
   }
