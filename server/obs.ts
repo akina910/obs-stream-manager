@@ -21,6 +21,39 @@ export type TwitchIngestTestResult = {
   totalFrames: number
   skippedFrames: number
   congestion: number
+  secondary: {
+    durationMs: number
+    bytesSent: number
+    totalFrames: number
+    skippedFrames: number
+  } | null
+  recording: {
+    durationMs: number
+    bytesSent: number
+    totalFrames: number
+    skippedFrames: number
+  } | null
+  replayBuffer: {
+    durationMs: number
+    bytesSent: number
+    totalFrames: number
+    skippedFrames: number
+  } | null
+  obs: {
+    activeFps: number
+    renderTotalFrames: number
+    renderSkippedFrames: number
+    outputTotalFrames: number
+    outputSkippedFrames: number
+  }
+  verticalBacktrackStopped: boolean
+  warnings: string[]
+}
+
+export type TwitchIngestTestOptions = {
+  includeSecondary?: boolean
+  includeRecording?: boolean
+  includeReplayBuffer?: boolean
 }
 
 export class ObsController {
@@ -382,12 +415,12 @@ export class ObsController {
     }
   }
 
-  private async startTwitchSecondary(): Promise<void> {
+  private async startTwitchSecondary(credentials?: { server: string; key: string }): Promise<void> {
     const plugin = await this.getTwitchOutputPluginStatus()
     if (plugin.state !== 'ready') throw new Error(plugin.detail)
     if (plugin.outputActive) return
-    const key = this.secrets.get('twitch-stream-key')
-    const server = this.secrets.get('twitch-stream-server')
+    const key = credentials?.key ?? this.secrets.get('twitch-stream-key')
+    const server = credentials?.server ?? this.secrets.get('twitch-stream-server')
     if (!key || !server) throw new Error('Twitchへの映像送信準備が未完了です。Twitchを再接続してください')
     try {
       await this.callVendor('obs-stream-manager-output', 'start_twitch', { server, key })
@@ -401,10 +434,14 @@ export class ObsController {
     const deadline = Date.now() + this.streamStartTimeoutMs
     do {
       const status = await this.callVendor('obs-stream-manager-output', 'twitch_status')
-      if (status.outputActive === true) return
+      const totalFrames = typeof status.totalFrames === 'number' ? status.totalFrames : null
+      // OBS marks an RTMP output active before the first encoded frame reaches it.
+      // Waiting for the first frame keeps the UI and follow-up recording startup
+      // from treating the RTMP handshake/warm-up period as live video time.
+      if (status.outputActive === true && (totalFrames === null || totalFrames > 0)) return
       await wait(250)
     } while (Date.now() < deadline)
-    throw new Error('Twitch副出力が開始状態になりませんでした')
+    throw new Error('Twitch副出力から映像フレームが送信されませんでした')
   }
 
   private async stopTwitchSecondary(): Promise<void> {
@@ -659,6 +696,15 @@ export class ObsController {
     return false
   }
 
+  private async waitForRecordActive(): Promise<boolean> {
+    const deadline = Date.now() + this.streamStartTimeoutMs
+    do {
+      if ((await this.obs.call('GetRecordStatus')).outputActive) return true
+      await wait(250)
+    } while (Date.now() < deadline)
+    return false
+  }
+
   private async waitForReplayInactive(): Promise<boolean> {
     const deadline = Date.now() + this.streamStopTimeoutMs
     do {
@@ -668,11 +714,30 @@ export class ObsController {
     return false
   }
 
-  async testTwitchIngest(config: AppConfig, durationMs = 15_000): Promise<TwitchIngestTestResult> {
+
+  private async waitForReplayActive(): Promise<boolean> {
+    const deadline = Date.now() + this.streamStartTimeoutMs
+    do {
+      if ((await this.getReplayBufferStatus()).outputActive) return true
+      await wait(250)
+    } while (Date.now() < deadline)
+    return false
+  }
+
+  async testTwitchIngest(
+    config: AppConfig,
+    durationMs = 15_000,
+    options: TwitchIngestTestOptions = {},
+  ): Promise<TwitchIngestTestResult> {
     await this.connect(config)
-    const currentStatus = await this.obs.call('GetStreamStatus')
-    if (currentStatus.outputActive) {
-      throw Object.assign(new Error('配信中はTwitch出力テストを実行できません。配信を停止してから再実行してください'), { statusCode: 409 })
+    const [currentStream, currentRecord, currentReplay] = await Promise.all([
+      this.obs.call('GetStreamStatus'),
+      this.obs.call('GetRecordStatus'),
+      this.getReplayBufferStatus(),
+    ])
+    const currentSecondary = options.includeSecondary === false ? null : await this.getTwitchOutputPluginStatus()
+    if (currentStream.outputActive || currentRecord.outputActive || currentReplay.outputActive || currentSecondary?.outputActive) {
+      throw Object.assign(new Error('出力中はTwitch出力テストを実行できません。配信・録画・リプレイを停止してから再実行してください'), { statusCode: 409 })
     }
     const streamKey = this.secrets.get('twitch-stream-key')
     const streamServer = this.secrets.get('twitch-stream-server')
@@ -680,15 +745,68 @@ export class ObsController {
     const testKey = `${streamKey}${streamKey.includes('?') ? '&' : '?'}bandwidthtest=true`
     const boundedDurationMs = Math.max(0, Math.min(30_000, durationMs))
     let started = false
+    let secondaryStarted = false
+    let recordingStarted = false
+    let replayStarted = false
     let changed = false
+    let secondaryStartedAt = 0
+    let verticalBacktrackStopped = false
+    const warnings: string[] = []
     try {
+      await this.configureSeparatedAudioTracks(config, warnings)
+      const video = await this.obs.call('GetVideoSettings').catch(() => null)
+      if ((video?.outputWidth ?? 0) * (video?.outputHeight ?? 0) >= 2560 * 1440) {
+        verticalBacktrackStopped = await this.stopVerticalBacktrackIfActive().catch(() => false)
+      }
       changed = await this.configureManagedStream(streamServer, testKey)
       await this.obs.call('StartStream')
       started = true
       if (!await this.waitForStreamActive()) throw new Error('OBSからTwitchテスト出力を開始できませんでした')
+      if (options.includeSecondary !== false) {
+        await this.startTwitchSecondary({ server: streamServer, key: testKey })
+        secondaryStarted = true
+        secondaryStartedAt = Date.now()
+      }
+      if (options.includeRecording) {
+        await this.obs.call('StartRecord')
+        recordingStarted = true
+        if (!await this.waitForRecordActive()) throw new Error('負荷テスト用の通常録画を開始できませんでした')
+      }
+      if (options.includeReplayBuffer) {
+        await this.obs.call('StartReplayBuffer')
+        replayStarted = true
+        if (!await this.waitForReplayActive()) throw new Error('負荷テスト用のリプレイバッファを開始できませんでした')
+      }
+      const measurementStartedAt = Date.now()
+      const [secondaryBaseline, recordBaseline, replayBaseline, baselineStats] = await Promise.all([
+        secondaryStarted ? this.callVendor('obs-stream-manager-output', 'twitch_status') : Promise.resolve(null),
+        recordingStarted ? this.obs.call('GetRecordStatus') : Promise.resolve(null),
+        replayStarted ? this.getReplayBufferStatus() : Promise.resolve(null),
+        this.obs.call('GetStats'),
+      ])
       await wait(boundedDurationMs)
-      const status = await this.obs.call('GetStreamStatus')
+      const [status, secondaryStatus, recordStatus, replayStatus, stats] = await Promise.all([
+        this.obs.call('GetStreamStatus'),
+        secondaryStarted ? this.callVendor('obs-stream-manager-output', 'twitch_status') : Promise.resolve(null),
+        recordingStarted ? this.obs.call('GetRecordStatus') : Promise.resolve(null),
+        replayStarted ? this.getReplayBufferStatus() : Promise.resolve(null),
+        this.obs.call('GetStats'),
+      ])
       if (!status.outputActive) throw new Error('Twitchテスト出力が途中で停止しました。OBSログを確認してください')
+      if (secondaryStarted && secondaryStatus?.outputActive !== true) throw new Error('Twitch副出力テストが途中で停止しました。OBSログを確認してください')
+      if (recordingStarted && recordStatus?.outputActive !== true) throw new Error('負荷テスト用の通常録画が途中で停止しました')
+      if (replayStarted && replayStatus?.outputActive !== true) throw new Error('負荷テスト用のリプレイバッファが途中で停止しました')
+      const numeric = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : 0
+      const outputMetric = (output: Record<string, unknown>, websocketName: string, vendorName: string) => numeric(output[websocketName] ?? output[vendorName])
+      const metrics = (output: Record<string, unknown> | null, baseline: Record<string, unknown> | null, fallbackDurationMs: number) => output ? {
+        durationMs: baseline && typeof output.outputDuration === 'number' && typeof baseline.outputDuration === 'number'
+          ? Math.max(0, output.outputDuration - baseline.outputDuration)
+          : fallbackDurationMs,
+        bytesSent: Math.max(0, outputMetric(output, 'outputBytes', 'bytesSent') - (baseline ? outputMetric(baseline, 'outputBytes', 'bytesSent') : 0)),
+        totalFrames: Math.max(0, outputMetric(output, 'outputTotalFrames', 'totalFrames') - (baseline ? outputMetric(baseline, 'outputTotalFrames', 'totalFrames') : 0)),
+        skippedFrames: Math.max(0, outputMetric(output, 'outputSkippedFrames', 'skippedFrames') - (baseline ? outputMetric(baseline, 'outputSkippedFrames', 'skippedFrames') : 0)),
+      } : null
+      const measuredDurationMs = Date.now() - measurementStartedAt
       return {
         ok: true,
         durationMs: status.outputDuration,
@@ -696,8 +814,29 @@ export class ObsController {
         totalFrames: status.outputTotalFrames,
         skippedFrames: status.outputSkippedFrames,
         congestion: status.outputCongestion,
+        secondary: metrics(secondaryStatus, secondaryBaseline, secondaryStarted ? measuredDurationMs : Date.now() - secondaryStartedAt),
+        recording: metrics(recordStatus, recordBaseline, measuredDurationMs),
+        replayBuffer: metrics(replayStatus, replayBaseline, measuredDurationMs),
+        obs: {
+          activeFps: numeric(stats.activeFps),
+          renderTotalFrames: numeric(stats.renderTotalFrames) - numeric(baselineStats.renderTotalFrames),
+          renderSkippedFrames: numeric(stats.renderSkippedFrames) - numeric(baselineStats.renderSkippedFrames),
+          outputTotalFrames: numeric(stats.outputTotalFrames) - numeric(baselineStats.outputTotalFrames),
+          outputSkippedFrames: numeric(stats.outputSkippedFrames) - numeric(baselineStats.outputSkippedFrames),
+        },
+        verticalBacktrackStopped,
+        warnings,
       }
     } finally {
+      if (replayStarted) {
+        await this.obs.call('StopReplayBuffer').catch(() => undefined)
+        await this.waitForReplayInactive().catch(() => false)
+      }
+      if (recordingStarted) {
+        await this.obs.call('StopRecord').catch(() => undefined)
+        await this.waitForRecordInactive().catch(() => false)
+      }
+      if (secondaryStarted) await this.stopTwitchSecondary().catch(() => undefined)
       if (started) {
         await this.obs.call('StopStream').catch(() => undefined)
         await this.waitForStreamInactive().catch(() => false)

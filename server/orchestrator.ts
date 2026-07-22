@@ -355,7 +355,7 @@ export class StreamOrchestrator {
     if (status.streaming || externalActive) throw Object.assign(new Error('配信中はゲーム・接続設定・バックアップを変更できません。先に配信を終了してください'), { statusCode: 409 })
   }
 
-  async testTwitchOutput() {
+  async testTwitchOutput(options: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } = {}) {
     return this.exclusive(async () => {
       const status = await this.getStatus()
       const externalActive = Object.values(status.platforms).some(({ state }) => ['starting', 'live', 'stopping'].includes(state))
@@ -364,7 +364,8 @@ export class StreamOrchestrator {
       }
       const config = await this.store.getConfig()
       try {
-        return await this.obs.testTwitchIngest(config)
+        const durationMs = Math.max(0, Math.min(30_000, options.durationMs ?? 15_000))
+        return await this.obs.testTwitchIngest(config, durationMs, options)
       } finally {
         const active = await this.obs.isStreaming(config).catch(() => null)
         if (active === null) {

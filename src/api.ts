@@ -22,7 +22,21 @@ export type OAuthConnectionStatuses = Record<OAuthProvider, OAuthConnectionStatu
 export type OAuthStartResult =
   | { mode: 'redirect'; url: string }
   | { mode: 'device'; url: string; userCode: string; requestId: string; intervalMs: number; expiresAt: number }
-export type TwitchIngestTestResult = { ok: true; durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number; congestion: number }
+type OutputTestMetrics = { durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number }
+export type TwitchIngestTestResult = {
+  ok: true
+  durationMs: number
+  bytesSent: number
+  totalFrames: number
+  skippedFrames: number
+  congestion: number
+  secondary: OutputTestMetrics | null
+  recording: OutputTestMetrics | null
+  replayBuffer: OutputTestMetrics | null
+  obs: { activeFps: number; renderTotalFrames: number; renderSkippedFrames: number; outputTotalFrames: number; outputSkippedFrames: number }
+  verticalBacktrackStopped: boolean
+  warnings: string[]
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
@@ -60,7 +74,7 @@ export const api = {
   select: (gameId: string, captureMethod?: CaptureMethod) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod }) }),
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
-  testTwitchOutput: () => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: '{}' }),
+  testTwitchOutput: (options: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } = {}) => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: JSON.stringify(options) }),
   autoAdjustAudio: (gameId: string, audio: GameProfile['audio'], durationMs = 15_000) => request<AudioCalibrationResult>('/api/audio/auto-adjust', { method: 'POST', body: JSON.stringify({ gameId, audio, durationMs }) }),
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),

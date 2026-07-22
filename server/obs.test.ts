@@ -324,6 +324,7 @@ describe('ObsController recording fallbacks', () => {
     const calls: Array<{ request: string; data: unknown }> = []
     let streaming = false
     let twitchActive = false
+    let twitchActiveStatusChecks = 0
     let service = { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
@@ -344,7 +345,8 @@ describe('ObsController recording fallbacks', () => {
           if (vendor.vendorName === 'obs-stream-manager-output') {
             if (vendor.requestType === 'start_twitch') twitchActive = true
             if (vendor.requestType === 'stop_twitch') twitchActive = false
-            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: twitchActive } }
+            if (vendor.requestType === 'twitch_status' && twitchActive) twitchActiveStatusChecks += 1
+            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: twitchActive, totalFrames: twitchActiveStatusChecks >= 2 ? 1 : 0 } }
           }
           return { responseData: { success: true } }
         }
@@ -357,7 +359,7 @@ describe('ObsController recording fallbacks', () => {
       ['twitch-stream-key', 'test-twitch-stream-key'],
       ['twitch-stream-server', 'rtmp://twitch.example/app'],
     ])
-    const controller = new ObsController(secrets, 50)
+    const controller = new ObsController(secrets, 600)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
     const profile = structuredClone(starterProfiles[0])
     const config = structuredClone(defaultConfig)
@@ -369,6 +371,7 @@ describe('ObsController recording fallbacks', () => {
     config.features.verticalRecording = false
 
     await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
+    expect(twitchActiveStatusChecks).toBeGreaterThanOrEqual(2)
     const startTwitch = calls.find(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'start_twitch')
     expect(startTwitch?.data).toEqual({
       vendorName: 'obs-stream-manager-output',
@@ -418,13 +421,25 @@ describe('ObsController recording fallbacks', () => {
     const controller = new ObsController(secrets, 50)
     ;(controller as unknown as { obs: typeof fake }).obs = fake
 
-    await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0)).resolves.toEqual({
+    await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0, { includeSecondary: false })).resolves.toEqual({
       ok: true,
       durationMs: 1_500,
       bytesSent: 2_000_000,
       totalFrames: 90,
       skippedFrames: 0,
       congestion: 0,
+      secondary: null,
+      recording: null,
+      replayBuffer: null,
+      obs: {
+        activeFps: 0,
+        renderTotalFrames: 0,
+        renderSkippedFrames: 0,
+        outputTotalFrames: 0,
+        outputSkippedFrames: 0,
+      },
+      verticalBacktrackStopped: false,
+      warnings: [],
     })
 
     const applied = calls.find(({ request }) => request === 'SetStreamServiceSettings')?.data as { streamServiceSettings: { key: string } }
@@ -434,6 +449,90 @@ describe('ObsController recording fallbacks', () => {
       streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
     })
     expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['StartStream', 'StopStream']))
+  })
+
+  it('stress-tests primary, secondary, recording, and replay outputs without going live', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let streaming = false
+    let secondary = false
+    let recording = false
+    let replay = false
+    let backtrack = true
+    let statsCalls = 0
+    let service = {
+      streamServiceType: 'rtmp_common',
+      streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
+    }
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request === 'GetStreamStatus') return { outputActive: streaming, outputDuration: 1_500, outputBytes: 2_000_000, outputTotalFrames: 90, outputSkippedFrames: 0, outputCongestion: 0 }
+        if (request === 'GetRecordStatus') return { outputActive: recording, outputDuration: statsCalls ? 1_600 : 200, outputBytes: statsCalls ? 3_500_000 : 500_000, outputTotalFrames: statsCalls ? 94 : 10, outputSkippedFrames: 0 }
+        if (request === 'GetReplayBufferStatus') return { outputActive: replay, outputDuration: statsCalls ? 1_500 : 200, outputBytes: statsCalls ? 3_000_000 : 500_000, outputTotalFrames: statsCalls ? 88 : 10, outputSkippedFrames: 0 }
+        if (request === 'GetVideoSettings') return { outputWidth: 3840, outputHeight: 2160 }
+        if (request === 'GetStats') {
+          statsCalls += 1
+          return statsCalls === 1
+            ? { activeFps: 60, renderTotalFrames: 100, renderSkippedFrames: 1, outputTotalFrames: 100, outputSkippedFrames: 2 }
+            : { activeFps: 60, renderTotalFrames: 190, renderSkippedFrames: 1, outputTotalFrames: 190, outputSkippedFrames: 2 }
+        }
+        if (request === 'GetStreamServiceSettings') return service
+        if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
+        if (request === 'StartStream') { streaming = true; return {} }
+        if (request === 'StopStream') { streaming = false; return {} }
+        if (request === 'StartRecord') { recording = true; return {} }
+        if (request === 'StopRecord') { recording = false; return {} }
+        if (request === 'StartReplayBuffer') { replay = true; return {} }
+        if (request === 'StopReplayBuffer') { replay = false; return {} }
+        if (request === 'CallVendorRequest') {
+          const vendor = data as { vendorName: string; requestType: string }
+          if (vendor.vendorName === 'aitum-vertical-canvas') {
+            if (vendor.requestType === 'stop_backtrack') backtrack = false
+            return { responseData: { success: true, backtrack } }
+          }
+          if (vendor.vendorName === 'obs-stream-manager-output') {
+            if (vendor.requestType === 'start_twitch') secondary = true
+            if (vendor.requestType === 'stop_twitch') secondary = false
+            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: secondary, bytesSent: statsCalls ? 2_100_000 : 200_000, totalFrames: statsCalls ? 99 : 10, skippedFrames: 0 } }
+          }
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['twitch-stream-key', 'test-twitch-stream-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+
+    await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0, {
+      includeSecondary: true,
+      includeRecording: true,
+      includeReplayBuffer: true,
+    })).resolves.toMatchObject({
+      ok: true,
+      totalFrames: 90,
+      skippedFrames: 0,
+      secondary: { totalFrames: 89, skippedFrames: 0 },
+      recording: { totalFrames: 84, skippedFrames: 0 },
+      replayBuffer: { totalFrames: 78, skippedFrames: 0 },
+      obs: { activeFps: 60, renderTotalFrames: 90, renderSkippedFrames: 0, outputTotalFrames: 90, outputSkippedFrames: 0 },
+      verticalBacktrackStopped: true,
+      warnings: [],
+    })
+
+    const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
+    const startStreamIndex = calls.findIndex(({ request }) => request === 'StartStream')
+    expect(stopBacktrackIndex).toBeGreaterThan(-1)
+    expect(stopBacktrackIndex).toBeLessThan(startStreamIndex)
+    expect(streaming).toBe(false)
+    expect(secondary).toBe(false)
+    expect(recording).toBe(false)
+    expect(replay).toBe(false)
+    expect(service).toEqual({ streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } })
   })
 
   it('reports OBS as connected when the replay buffer is unavailable', async () => {
