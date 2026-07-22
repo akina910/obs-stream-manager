@@ -21,11 +21,13 @@ the Free Software Foundation; either version 2 of the License, or
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("OBS Stream Manager contributors")
 
-#define OBS_STREAM_MANAGER_OUTPUT_API_VERSION 1
+#define OBS_STREAM_MANAGER_OUTPUT_API_VERSION 2
 
 static obs_websocket_vendor vendor;
 static obs_output_t *twitch_output;
 static obs_service_t *twitch_service;
+static obs_encoder_t *twitch_video_encoder;
+static obs_encoder_t *twitch_audio_encoder;
 static pthread_mutex_t managed_stream_mutex;
 static bool managed_stream_configuration_pending;
 static long long managed_video_bitrate_kbps;
@@ -88,6 +90,14 @@ static void release_twitch_output(void)
 		obs_output_release(twitch_output);
 		twitch_output = NULL;
 	}
+	if (twitch_video_encoder) {
+		obs_encoder_release(twitch_video_encoder);
+		twitch_video_encoder = NULL;
+	}
+	if (twitch_audio_encoder) {
+		obs_encoder_release(twitch_audio_encoder);
+		twitch_audio_encoder = NULL;
+	}
 	if (twitch_service) {
 		obs_service_release(twitch_service);
 		twitch_service = NULL;
@@ -112,15 +122,60 @@ static void start_twitch(obs_data_t *request, obs_data_t *response, void *privat
 		return;
 	}
 
-	obs_encoder_t *video_encoder = obs_output_get_video_encoder(main_output);
-	obs_encoder_t *audio_encoder = obs_output_get_audio_encoder(main_output, 0);
-	if (!video_encoder || !audio_encoder) {
+	obs_encoder_t *main_video_encoder = obs_output_get_video_encoder(main_output);
+	obs_encoder_t *main_audio_encoder = obs_output_get_audio_encoder(main_output, 0);
+	if (!main_video_encoder || !main_audio_encoder) {
 		obs_output_release(main_output);
 		set_error(response, "The primary OBS stream encoders are unavailable");
 		return;
 	}
 
+	obs_data_t *main_video_settings = obs_encoder_get_settings(main_video_encoder);
+	obs_data_t *main_audio_settings = obs_encoder_get_settings(main_audio_encoder);
+	obs_data_t *video_settings = obs_data_create();
+	obs_data_t *audio_settings = obs_data_create();
+	obs_data_apply(video_settings, main_video_settings);
+	obs_data_apply(audio_settings, main_audio_settings);
+	obs_data_release(main_video_settings);
+	obs_data_release(main_audio_settings);
+	const char *video_encoder_id = obs_encoder_get_id(main_video_encoder);
+	const char *audio_encoder_id = obs_encoder_get_id(main_audio_encoder);
+	const size_t audio_mixer_index = obs_encoder_get_mixer_index(main_audio_encoder);
+	/* The primary encoder is already active, so make the Twitch settings explicit
+	 * before creating its dedicated encoder. Updating rate control/keyframes after
+	 * an encoder starts is ignored by several NVENC/x264 implementations. */
+	pthread_mutex_lock(&managed_stream_mutex);
+	const long long video_bitrate_kbps = managed_video_bitrate_kbps;
+	const long long audio_bitrate_kbps = managed_audio_bitrate_kbps;
+	pthread_mutex_unlock(&managed_stream_mutex);
+	obs_data_set_string(video_settings, "rate_control", "CBR");
+	obs_data_set_int(video_settings, "keyint_sec", 2);
+	obs_data_set_int(video_settings, "bf", 2);
+	if (video_bitrate_kbps >= 500 && video_bitrate_kbps <= 6000)
+		obs_data_set_int(video_settings, "bitrate", video_bitrate_kbps);
+	if (audio_bitrate_kbps >= 64 && audio_bitrate_kbps <= 160)
+		obs_data_set_int(audio_settings, "bitrate", audio_bitrate_kbps);
+
 	release_twitch_output();
+	twitch_video_encoder = obs_video_encoder_create(video_encoder_id, "obs_stream_manager_twitch_video_encoder",
+							 video_settings, NULL);
+	twitch_audio_encoder = obs_audio_encoder_create(audio_encoder_id, "obs_stream_manager_twitch_audio_encoder",
+							 audio_settings, audio_mixer_index, NULL);
+	obs_data_release(video_settings);
+	obs_data_release(audio_settings);
+	if (!twitch_video_encoder || !twitch_audio_encoder) {
+		obs_output_release(main_output);
+		set_error(response, "Unable to create dedicated Twitch encoders");
+		release_twitch_output();
+		return;
+	}
+	obs_encoder_set_video(twitch_video_encoder, obs_encoder_video(main_video_encoder));
+	obs_encoder_set_audio(twitch_audio_encoder, obs_encoder_audio(main_audio_encoder));
+	obs_encoder_set_frame_rate_divisor(twitch_video_encoder, 1);
+	if (obs_encoder_scaling_enabled(main_video_encoder))
+		obs_encoder_set_scaled_size(twitch_video_encoder, obs_encoder_get_width(main_video_encoder),
+					    obs_encoder_get_height(main_video_encoder));
+
 	obs_data_t *service_settings = obs_data_create();
 	obs_data_set_string(service_settings, "server", server);
 	obs_data_set_string(service_settings, "key", key);
@@ -129,6 +184,7 @@ static void start_twitch(obs_data_t *request, obs_data_t *response, void *privat
 	obs_data_release(service_settings);
 	if (!twitch_service) {
 		obs_output_release(main_output);
+		release_twitch_output();
 		set_error(response, "Unable to create the Twitch RTMP service");
 		return;
 	}
@@ -145,8 +201,8 @@ static void start_twitch(obs_data_t *request, obs_data_t *response, void *privat
 	}
 
 	obs_output_set_service(twitch_output, twitch_service);
-	obs_output_set_video_encoder(twitch_output, video_encoder);
-	obs_output_set_audio_encoder(twitch_output, audio_encoder, 0);
+	obs_output_set_video_encoder(twitch_output, twitch_video_encoder);
+	obs_output_set_audio_encoder(twitch_output, twitch_audio_encoder, 0);
 	obs_output_release(main_output);
 
 	if (!obs_output_start(twitch_output)) {
@@ -183,6 +239,17 @@ static void twitch_status(obs_data_t *request, obs_data_t *response, void *priva
 	obs_data_set_int(response, "bytesSent", twitch_output ? (long long)obs_output_get_total_bytes(twitch_output) : 0);
 	obs_data_set_int(response, "totalFrames", twitch_output ? (long long)obs_output_get_total_frames(twitch_output) : 0);
 	obs_data_set_int(response, "skippedFrames", twitch_output ? (long long)obs_output_get_frames_dropped(twitch_output) : 0);
+	obs_data_set_bool(response, "dedicatedEncoder", twitch_video_encoder && twitch_audio_encoder);
+	if (twitch_video_encoder) {
+		const uint32_t divisor = obs_encoder_get_frame_rate_divisor(twitch_video_encoder);
+		const struct video_output_info *video_info = video_output_get_info(obs_encoder_video(twitch_video_encoder));
+		obs_data_set_int(response, "videoWidth", obs_encoder_get_width(twitch_video_encoder));
+		obs_data_set_int(response, "videoHeight", obs_encoder_get_height(twitch_video_encoder));
+		if (video_info) {
+			obs_data_set_int(response, "fpsNumerator", video_info->fps_num);
+			obs_data_set_int(response, "fpsDenominator", video_info->fps_den * (divisor ? divisor : 1));
+		}
+	}
 }
 
 static void set_source_force_mono(obs_data_t *request, obs_data_t *response, void *private_data)
@@ -339,6 +406,8 @@ static void configure_stream(obs_data_t *request, obs_data_t *response, void *pr
 	const bool configured = configure_stream_encoders(main_output, video_bitrate_kbps, audio_bitrate_kbps, response);
 	obs_output_release(main_output);
 	if (configured) {
+		if (twitch_output && obs_output_active(twitch_output))
+			configure_stream_encoders(twitch_output, video_bitrate_kbps, audio_bitrate_kbps, NULL);
 		pthread_mutex_lock(&managed_stream_mutex);
 		if (managed_stream_configuration_pending && managed_video_bitrate_kbps == video_bitrate_kbps &&
 		    managed_audio_bitrate_kbps == audio_bitrate_kbps)

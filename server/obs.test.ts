@@ -152,7 +152,7 @@ describe('ObsController recording fallbacks', () => {
           const vendor = data as { vendorName: string; requestType: string }
           if (vendor.vendorName === 'obs-stream-manager-output') {
             if (vendor.requestType === 'start_twitch') twitchActive = true
-            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: twitchActive } }
+            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 2, outputActive: twitchActive, totalFrames: twitchActive ? 1 : 0, dedicatedEncoder: twitchActive, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
           }
           if (vendor.vendorName === 'aitum-vertical-canvas' && vendor.requestType === 'status') {
             return { responseData: { success: true, backtrack: true } }
@@ -213,7 +213,7 @@ describe('ObsController recording fallbacks', () => {
       call: vi.fn(async (request: string, data?: unknown) => {
         if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
         if (request === 'GetVideoSettings') return { baseWidth: 3840, baseHeight: 2160, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 }
-        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 1, outputActive: false } }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 2, outputActive: false } }
         if (request === 'SetProfileParameter' && (data as { parameterName?: string }).parameterName === 'ApplyServiceSettings') {
           throw new Error('parameter is unavailable')
         }
@@ -242,7 +242,7 @@ describe('ObsController recording fallbacks', () => {
         const vendor = data as { requestType: string }
         if (vendor.requestType === 'configure_stream') return { responseData: { success: false, error: 'Unknown request type' } }
         if (vendor.requestType === 'start_twitch') { twitchActive = true; return { responseData: { success: true, outputActive: true } } }
-        if (vendor.requestType === 'twitch_status') return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: twitchActive, totalFrames: twitchActive ? 1 : 0 } }
+        if (vendor.requestType === 'twitch_status') return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 2, outputActive: twitchActive, totalFrames: twitchActive ? 1 : 0, dedicatedEncoder: twitchActive, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
         return { responseData: { success: true } }
       }),
     }
@@ -262,6 +262,55 @@ describe('ObsController recording fallbacks', () => {
       expect.stringContaining('CBR 6000 kbps'),
     ])
     expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'start_twitch')).toBe(true)
+  })
+
+  it('stops a Twitch secondary output that does not prove FHD 60fps encoding', async () => {
+    const vendorRequests: string[] = []
+    let twitchActive = false
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request !== 'CallVendorRequest') return {}
+        const vendor = data as { requestType: string }
+        vendorRequests.push(vendor.requestType)
+        if (vendor.requestType === 'start_twitch') twitchActive = true
+        if (vendor.requestType === 'stop_twitch') twitchActive = false
+        if (vendor.requestType === 'twitch_status') {
+          return {
+            responseData: {
+              success: true,
+              pluginVersion: '0.2.16',
+              apiVersion: 2,
+              outputActive: twitchActive,
+              totalFrames: twitchActive ? 1 : 0,
+              dedicatedEncoder: twitchActive,
+              videoWidth: 1920,
+              videoHeight: 1080,
+              fpsNumerator: 30,
+              fpsDenominator: 1,
+            },
+          }
+        }
+        return { responseData: { success: true, outputActive: twitchActive } }
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['twitch-stream-key', 'twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    config.features.youtube = true
+    config.features.twitch = true
+    profile.youtube.enabled = true
+    profile.twitch.enabled = true
+
+    await expect(controller.startSecondaryTwitchForObsStream(config, profile)).rejects.toThrow('フレームレートが30.00fps')
+    expect(twitchActive).toBe(false)
+    expect(vendorRequests).toContain('stop_twitch')
   })
 
   it('detects an empty Aitum Vertical scene before starting a black recording', async () => {
@@ -421,7 +470,7 @@ describe('ObsController recording fallbacks', () => {
             if (vendor.requestType === 'start_twitch') twitchActive = true
             if (vendor.requestType === 'stop_twitch') twitchActive = false
             if (vendor.requestType === 'twitch_status' && twitchActive) twitchActiveStatusChecks += 1
-            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: twitchActive, totalFrames: twitchActiveStatusChecks >= 2 ? 1 : 0 } }
+            return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 2, outputActive: twitchActive, totalFrames: twitchActiveStatusChecks >= 2 ? 1 : 0, dedicatedEncoder: twitchActive, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
           }
           return { responseData: { success: true } }
         }
@@ -484,7 +533,7 @@ describe('ObsController recording fallbacks', () => {
         }
         if (request === 'GetVideoSettings') return { baseWidth: 3840, baseHeight: 2160, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 }
         if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
-        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 1, outputActive: false } }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 2, outputActive: false } }
         if (request === 'GetStreamServiceSettings') return service
         if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
         if (request === 'StartStream') { streaming = true; return {} }
@@ -585,7 +634,7 @@ describe('ObsController recording fallbacks', () => {
           if (vendor.vendorName === 'obs-stream-manager-output') {
             if (vendor.requestType === 'start_twitch') secondary = true
             if (vendor.requestType === 'stop_twitch') secondary = false
-            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: secondary, bytesSent: statsCalls ? 2_100_000 : 200_000, totalFrames: statsCalls ? 99 : 10, skippedFrames: 0 } }
+            return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 2, outputActive: secondary, bytesSent: statsCalls ? 2_100_000 : 200_000, totalFrames: statsCalls ? 99 : 10, skippedFrames: 0, dedicatedEncoder: secondary, videoWidth: 1920, videoHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } }
           }
         }
         return {}
@@ -1140,7 +1189,7 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'GetStreamStatus') return { outputActive: false }
         if (request === 'GetStreamServiceSettings') return service
         if (request === 'SetStreamServiceSettings') { setService(data as typeof service); return {} }
-        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: false } }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 2, outputActive: false } }
         return {}
       }),
     }
@@ -1179,7 +1228,7 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'GetReplayBufferStatus') return { outputActive: replayBuffer }
         if (request === 'StopRecord') { recording = false; return {} }
         if (request === 'StopReplayBuffer') { replayBuffer = false; return {} }
-        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 1, outputActive: false } }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.1', apiVersion: 2, outputActive: false } }
         return {}
       }),
     }

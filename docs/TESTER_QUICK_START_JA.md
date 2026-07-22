@@ -1,9 +1,9 @@
-# OBS Stream Manager 0.2.15 テスター向け使い方
+# OBS Stream Manager 0.2.16 テスター向け使い方
 
 ## インストール
 
 1. 配信・録画を終了し、OBSとOBS Stream Managerを閉じます。
-2. `OBS Stream Manager-Setup-0.2.15-x64.exe`をダブルクリックします。
+2. `OBS Stream Manager-Setup-0.2.16-x64.exe`をダブルクリックします。
 3. インストール後にOBSを起動します。Stream Managerも自動で準備されます。
 
 以前のバージョンを使っていた場合、ゲームプロファイルや接続情報はそのまま引き継がれます。

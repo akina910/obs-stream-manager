@@ -22,8 +22,14 @@ export type Preparation = {
 type YouTubeBroadcast = { id: string; snippet: Record<string, unknown>; status: Record<string, unknown>; contentDetails: Record<string, unknown> }
 type YouTubeStream = {
   id: string
-  cdn?: { ingestionInfo?: { streamName?: string; rtmpsIngestionAddress?: string; ingestionAddress?: string } }
+  snippet?: { title?: string }
+  cdn?: {
+    resolution?: string
+    frameRate?: string
+    ingestionInfo?: { streamName?: string; rtmpsIngestionAddress?: string; ingestionAddress?: string }
+  }
   status?: { streamStatus?: string; healthStatus?: { status?: string } }
+  contentDetails?: { isReusable?: boolean }
 }
 
 type YouTubeLifecyclePolling = {
@@ -36,6 +42,30 @@ type YouTubeLifecyclePolling = {
 function parseViewerCount(value: unknown): number | null {
   const count = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
   return Number.isSafeInteger(count) && count >= 0 ? count : null
+}
+
+const youtubeManagedResolution = '1080p'
+const youtubeManagedFrameRate = '60fps'
+const youtubeManagedStreamTitle = 'OBS Stream Manager 1080p60 reusable stream'
+
+function isManagedYouTubeStream(stream: YouTubeStream | undefined): boolean {
+  return stream?.cdn?.resolution === youtubeManagedResolution && stream.cdn.frameRate === youtubeManagedFrameRate
+}
+
+export function parseYouTubePublicViewerCount(html: string): number | null {
+  const rendererMarker = '"videoViewCountRenderer"'
+  const candidates = new Set<number>()
+  let offset = 0
+  while ((offset = html.indexOf(rendererMarker, offset)) >= 0) {
+    const renderer = html.slice(offset, offset + 1_200)
+    offset += rendererMarker.length
+    if (!/"isLive":true/.test(renderer)) continue
+    const match = renderer.match(/(\d(?:[\d,.\u00a0\u202f ]*\d)?)[\s\u00a0\u202f]*(?:watching now|人が視聴中)/i)
+    if (!match) continue
+    const count = parseViewerCount(match[1].replace(/[,.\s\u00a0\u202f]/g, ''))
+    if (count !== null) candidates.add(count)
+  }
+  return candidates.size === 1 ? [...candidates][0] : null
 }
 
 const defaultYouTubeLifecyclePolling = {
@@ -73,6 +103,7 @@ export class PlatformServices {
   private platformStatusGeneration = 0
   private youtubeConfiguredBroadcastCache: { broadcastId: string; value: YouTubeBroadcast; expiresAt: number } | null = null
   private youtubeObservedActive: { configuredBroadcastId: string; activeBroadcastId: string } | null = null
+  private readonly youtubePublicViewerCache = new Map<string, { value: number | null; expiresAt: number }>()
 
   constructor(private readonly secrets: SecretStore, private readonly store: DataStore, youtubeLifecyclePolling: YouTubeLifecyclePolling = {}) {
     this.youtubeLifecyclePolling = { ...defaultYouTubeLifecyclePolling, ...youtubeLifecyclePolling }
@@ -84,6 +115,7 @@ export class PlatformServices {
     this.platformStatusRefresh = null
     this.youtubeConfiguredBroadcastCache = null
     this.youtubeObservedActive = null
+    this.youtubePublicViewerCache.clear()
   }
 
   private statusKey(config: AppConfig, profile: GameProfile | null): string {
@@ -91,6 +123,26 @@ export class PlatformServices {
       youtube: [config.features.youtube, config.youtube.clientId, config.youtube.refreshTokenStored, config.youtube.broadcastId, profile?.youtube.enabled ?? null],
       twitch: [config.features.twitch, config.twitch.clientId, config.twitch.accessTokenStored, config.twitch.refreshTokenStored, config.twitch.broadcasterId, profile?.twitch.enabled ?? null],
     })
+  }
+
+  private async youtubePublicViewerCount(broadcastId: string): Promise<number | null> {
+    const cached = this.youtubePublicViewerCache.get(broadcastId)
+    if (cached && cached.expiresAt > Date.now()) return cached.value
+    let value: number | null = null
+    try {
+      const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(broadcastId)}`, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138 Safari/537.36',
+          'accept-language': 'ja,en-US;q=0.9,en;q=0.8',
+        },
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (response.ok) value = parseYouTubePublicViewerCount(await response.text())
+    } catch {
+      value = null
+    }
+    this.youtubePublicViewerCache.set(broadcastId, { value, expiresAt: Date.now() + 30_000 })
+    return value
   }
 
   private async youtubeLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatus> {
@@ -166,9 +218,14 @@ export class PlatformServices {
           } else if (item?.liveStreamingDetails && item.status?.publicStatsViewable === false) {
             viewerCountState = 'hidden'
           } else if (item?.liveStreamingDetails) {
-            // YouTube omits concurrentViewers when the current audience is zero.
-            viewerCount = 0
-            viewerCountState = 'available'
+            const publicCount = await this.youtubePublicViewerCount(broadcast.id).catch(() => null)
+            if (publicCount !== null) {
+              viewerCount = publicCount
+              viewerCountState = 'available'
+              viewerCountDetail = 'YouTube公開ページのライブ人数から取得しました'
+            } else {
+              viewerCountDetail = 'YouTubeがライブ視聴者数を返していません。0人とは断定せず30秒以内に再取得します'
+            }
           } else {
             viewerCountDetail = 'YouTubeがライブ視聴統計をまだ返していません。10秒ごとに再取得します'
           }
@@ -325,36 +382,51 @@ export class PlatformServices {
     const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
     videoUrl.search = new URLSearchParams({ part: 'snippet' }).toString()
     await apiJson(videoUrl.toString(), { method: 'PUT', headers, body: JSON.stringify({ id: broadcast.id, snippet: { title: renderedTitle, description: profile.youtube.description, categoryId: profile.youtube.categoryId } }) })
-    let streamId = typeof broadcast.contentDetails.boundStreamId === 'string' ? broadcast.contentDetails.boundStreamId : ''
+    const lifeCycle = String(broadcast.status.lifeCycleStatus ?? '')
+    const streamId = typeof broadcast.contentDetails.boundStreamId === 'string' ? broadcast.contentDetails.boundStreamId : ''
     let stream: YouTubeStream | undefined
-    if (!streamId) {
+    const loadStream = async (id: string): Promise<YouTubeStream | undefined> => {
       const streamsUrl = new URL('https://www.googleapis.com/youtube/v3/liveStreams')
-      streamsUrl.search = new URLSearchParams({ part: 'id,cdn', mine: 'true', maxResults: '1' }).toString()
+      streamsUrl.search = new URLSearchParams({ part: 'id,cdn,status', id }).toString()
       const streams = await apiJson<{ items: YouTubeStream[] }>(streamsUrl.toString(), { headers })
-      stream = streams.items[0]
-      if (!stream) {
-        const createStreamUrl = new URL('https://www.googleapis.com/youtube/v3/liveStreams')
-        createStreamUrl.search = new URLSearchParams({ part: 'id,snippet,cdn,contentDetails' }).toString()
-        stream = await apiJson<YouTubeStream>(createStreamUrl.toString(), {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            snippet: { title: 'OBS Stream Manager reusable stream' },
-            cdn: { ingestionType: 'rtmp', resolution: 'variable', frameRate: 'variable' },
-            contentDetails: { isReusable: true },
-          }),
-        })
-      }
-      streamId = stream.id
-      const bindUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts/bind')
-      bindUrl.search = new URLSearchParams({ id: broadcast.id, streamId: stream.id, part: 'id,contentDetails' }).toString()
-      await apiJson(bindUrl.toString(), { method: 'POST', headers })
+      return streams.items[0]
     }
-    if (!stream) {
+    const createManagedStream = async (): Promise<YouTubeStream> => {
       const streamsUrl = new URL('https://www.googleapis.com/youtube/v3/liveStreams')
-      streamsUrl.search = new URLSearchParams({ part: 'id,cdn', id: streamId }).toString()
+      streamsUrl.search = new URLSearchParams({ part: 'id,snippet,cdn,status,contentDetails', mine: 'true', maxResults: '50' }).toString()
       const streams = await apiJson<{ items: YouTubeStream[] }>(streamsUrl.toString(), { headers })
-      stream = streams.items[0]
+      const reusable = streams.items.find((candidate) => isManagedYouTubeStream(candidate)
+        && candidate.snippet?.title === youtubeManagedStreamTitle
+        && candidate.contentDetails?.isReusable === true
+        && candidate.status?.streamStatus !== 'active')
+      if (reusable) return reusable
+
+      const createStreamUrl = new URL('https://www.googleapis.com/youtube/v3/liveStreams')
+      createStreamUrl.search = new URLSearchParams({ part: 'id,snippet,cdn,contentDetails' }).toString()
+      return apiJson<YouTubeStream>(createStreamUrl.toString(), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          snippet: { title: youtubeManagedStreamTitle },
+          cdn: { ingestionType: 'rtmp', resolution: youtubeManagedResolution, frameRate: youtubeManagedFrameRate },
+          contentDetails: { isReusable: true },
+        }),
+      })
+    }
+    const bindStream = async (next: YouTubeStream): Promise<void> => {
+      const bindUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts/bind')
+      bindUrl.search = new URLSearchParams({ id: broadcast.id, streamId: next.id, part: 'id,contentDetails' }).toString()
+      await apiJson(bindUrl.toString(), { method: 'POST', headers })
+      stream = next
+    }
+
+    if (streamId) stream = await loadStream(streamId)
+    if (!isManagedYouTubeStream(stream)) {
+      if (!['created', 'ready'].includes(lifeCycle) || stream?.status?.streamStatus === 'active') {
+        const actual = `${stream?.cdn?.resolution ?? 'unknown'}/${stream?.cdn?.frameRate ?? 'unknown'}`
+        throw new Error(`YouTube配信枠が${actual}です。配信中の枠は変更しません。配信終了後にゲームを選び直して1080p60枠へ更新してください`)
+      }
+      await bindStream(await createManagedStream())
     }
     const streamKey = stream?.cdn?.ingestionInfo?.streamName
     if (!streamKey) throw new Error('YouTube 配信キーを取得できませんでした。YouTube Studio のストリーム設定を確認してください')

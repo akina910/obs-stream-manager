@@ -11,7 +11,7 @@ type StreamServiceSettings = OBSRequestTypes['SetStreamServiceSettings']
 type AppliedStreamService = { streamServiceType: string; server: string; key: string }
 type ObsRuntimeStatus = Omit<RuntimeStatus, 'platforms'>
 type TwitchOutputPluginStatus = NonNullable<ObsRuntimeStatus['twitchOutputPlugin']>
-const twitchOutputPluginApiVersion = 1
+const twitchOutputPluginApiVersion = 2
 export const managedOutputPreset = {
   width: 1920,
   height: 1080,
@@ -515,7 +515,29 @@ export class ObsController {
       // OBS marks an RTMP output active before the first encoded frame reaches it.
       // Waiting for the first frame keeps the UI and follow-up recording startup
       // from treating the RTMP handshake/warm-up period as live video time.
-      if (status.outputActive === true && (totalFrames === null || totalFrames > 0)) return
+      if (status.outputActive === true && (totalFrames === null || totalFrames > 0)) {
+        const width = typeof status.videoWidth === 'number' ? status.videoWidth : null
+        const height = typeof status.videoHeight === 'number' ? status.videoHeight : null
+        const fpsNumerator = typeof status.fpsNumerator === 'number' ? status.fpsNumerator : null
+        const fpsDenominator = typeof status.fpsDenominator === 'number' ? status.fpsDenominator : null
+        const fps = fpsNumerator !== null && fpsDenominator !== null && fpsDenominator > 0
+          ? fpsNumerator / fpsDenominator
+          : null
+        const expectedFps = managedOutputPreset.fpsNumerator / managedOutputPreset.fpsDenominator
+        let videoError: string | null = null
+        if (status.dedicatedEncoder !== true) {
+          videoError = '専用エンコーダーを確認できません'
+        } else if (width !== managedOutputPreset.width || height !== managedOutputPreset.height) {
+          videoError = `映像サイズが${width ?? '?'}x${height ?? '?'}です（必要: ${managedOutputPreset.width}x${managedOutputPreset.height}）`
+        } else if (fps === null || Math.abs(fps - expectedFps) > 0.01) {
+          videoError = `フレームレートが${fps === null ? '?' : fps.toFixed(2)}fpsです（必要: ${expectedFps}fps）`
+        }
+        if (videoError) {
+          await this.callVendor('obs-stream-manager-output', 'stop_twitch').catch(() => undefined)
+          throw new Error(`Twitch副出力の映像設定が不正です: ${videoError}`)
+        }
+        return
+      }
       await wait(250)
     } while (Date.now() < deadline)
     throw new Error('Twitch副出力から映像フレームが送信されませんでした')
