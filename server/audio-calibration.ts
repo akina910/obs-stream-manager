@@ -36,6 +36,7 @@ type RawFilter = {
   filterKind: string
   filterEnabled: boolean
   filterSettings: Record<string, string | number | boolean | null>
+  filterIndex?: number
 }
 
 type ManagedFilterSpec = {
@@ -135,6 +136,7 @@ function rawFilters(value: unknown): RawFilter[] {
       filterKind: filter.filterKind,
       filterEnabled: filter.filterEnabled !== false,
       filterSettings: settings,
+      filterIndex: finiteNumber(filter.filterIndex),
     }]
   })
 }
@@ -221,6 +223,71 @@ export class AudioCalibrationService {
   private async filterList(client: AudioObsClient, sourceName: string): Promise<RawFilter[]> {
     const response = await client.call('GetSourceFilterList', { sourceName })
     return rawFilters(response?.filters)
+  }
+
+  private async ensureMicrophoneMono(
+    client: AudioObsClient,
+    sourceName: string,
+    rollbacks: RollbackAction[],
+    warnings: string[],
+  ): Promise<void> {
+    try {
+      const response = await client.call('CallVendorRequest', {
+        vendorName: 'obs-stream-manager-output',
+        requestType: 'set_source_force_mono',
+        requestData: { sourceName, enabled: true },
+      })
+      if (response.responseData.success === false) {
+        const detail = typeof response.responseData.error === 'string' ? response.responseData.error : 'vendor request failed'
+        throw new Error(detail)
+      }
+      if (response.responseData.changed === true) {
+        const previousEnabled = response.responseData.previousEnabled === true
+        warnings.push(`${sourceName}を左右同じ音声のモノラル入力へ自動設定しました`)
+        rollbacks.push({
+          label: `${sourceName}のモノラル設定`,
+          run: async () => {
+            await client.call('CallVendorRequest', {
+              vendorName: 'obs-stream-manager-output',
+              requestType: 'set_source_force_mono',
+              requestData: { sourceName, enabled: previousEnabled },
+            })
+          },
+        })
+      }
+    } catch (error) {
+      warnings.push(`${sourceName}をモノラル化できませんでした。OBSとOBS Stream Managerを再起動してください: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private async orderManagedFilters(
+    client: AudioObsClient,
+    sourceName: string,
+    desiredFilterNames: string[],
+    rollbacks: RollbackAction[],
+  ): Promise<void> {
+    const original = await this.filterList(client, sourceName)
+    const ownedNames = desiredFilterNames.filter((name) => name.startsWith('OBS Stream Manager - '))
+    if (ownedNames.length < 2) return
+    const originalIndices = new Map(original.flatMap(({ filterName, filterIndex }) => filterIndex === undefined ? [] : [[filterName, filterIndex]] as const))
+    const unmanagedNames = original.map(({ filterName }) => filterName).filter((filterName) => !ownedNames.includes(filterName))
+    const desiredOrder = [...unmanagedNames, ...ownedNames]
+    const originalOrder = original.map(({ filterName }) => filterName)
+    if (originalOrder.every((filterName, index) => filterName === desiredOrder[index])) return
+    rollbacks.push({
+      label: `${sourceName}のフィルター順序`,
+      run: async () => {
+        for (const [filterName, filterIndex] of [...originalIndices.entries()].sort((left, right) => left[1] - right[1])) {
+          await client.call('SetSourceFilterIndex', { sourceName, filterName, filterIndex })
+        }
+      },
+    })
+    for (const [desiredIndex, filterName] of desiredOrder.entries()) {
+      const current = await this.filterList(client, sourceName)
+      const currentIndex = current.find(({ filterName: candidate }) => candidate === filterName)?.filterIndex
+      if (currentIndex === undefined || currentIndex === desiredIndex) continue
+      await client.call('SetSourceFilterIndex', { sourceName, filterName, filterIndex: desiredIndex })
+    }
   }
 
   private async ensureFilter(
@@ -310,10 +377,10 @@ export class AudioCalibrationService {
       },
       {
         sourceName,
-        filterName: 'OBS Stream Manager - Expander',
-        filterKind: 'expander_filter',
-        filterSettings: { attack_time: 10, detector: 'RMS', output_gain: 0, presets: 'expander', ratio: 1.5, release_time: 120, threshold: -50 },
-        compatible: ({ filterKind }) => filterKind === 'expander_filter' || filterKind === 'noise_gate_filter',
+        filterName: 'OBS Stream Manager - Upward Compressor',
+        filterKind: 'upward_compressor_filter',
+        filterSettings: { attack_time: 10, detector: 'RMS', knee_width: 10, output_gain: 0, ratio: 0.25, release_time: 100, threshold: -20 },
+        compatible: ({ filterKind }) => filterKind === 'upward_compressor_filter',
       },
       {
         sourceName,
@@ -321,6 +388,13 @@ export class AudioCalibrationService {
         filterKind: 'compressor_filter',
         filterSettings: { attack_time: 6, output_gain: 6, ratio: 3, release_time: 60, sidechain_source: 'none', threshold: -18 },
         compatible: ({ filterKind, filterSettings }) => filterKind === 'compressor_filter' && (!filterSettings.sidechain_source || filterSettings.sidechain_source === 'none'),
+      },
+      {
+        sourceName,
+        filterName: 'OBS Stream Manager - Expander',
+        filterKind: 'expander_filter',
+        filterSettings: { attack_time: 10, detector: 'RMS', output_gain: 0, presets: 'expander', ratio: 2, release_time: 120, threshold: -45 },
+        compatible: ({ filterKind }) => filterKind === 'expander_filter' || filterKind === 'noise_gate_filter',
       },
       {
         sourceName,
@@ -372,11 +446,13 @@ export class AudioCalibrationService {
     const warnings: string[] = []
     const rollbacks: RollbackAction[] = []
     try {
+      await this.ensureMicrophoneMono(client, sourceName, rollbacks, warnings)
       for (const spec of this.microphoneFilterSpecs(sourceName)) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, spec, rollbacks, warnings)
         if (result) filters.push(result)
       }
+      await this.orderManagedFilters(client, sourceName, filters.map(({ filterName }) => filterName), rollbacks)
       return { filters, warnings }
     } catch (error) {
       for (const rollback of [...rollbacks].reverse()) await rollback.run().catch(() => undefined)
@@ -411,9 +487,10 @@ export class AudioCalibrationService {
   ): Promise<AudioCalibrationResult> {
     const startedAt = new Date()
     const durationMs = Math.max(9_000, Math.min(30_000, Math.round(requestedDurationMs)))
-    const baselineDurationMs = Math.floor(durationMs * 0.54)
-    const firstVerificationDurationMs = Math.floor(durationMs * 0.27)
-    const finalVerificationDurationMs = durationMs - baselineDurationMs - firstVerificationDurationMs
+    const preflightDurationMs = Math.floor(durationMs * 0.18)
+    const baselineDurationMs = Math.floor(durationMs * 0.38)
+    const firstVerificationDurationMs = Math.floor(durationMs * 0.25)
+    const finalVerificationDurationMs = durationMs - preflightDurationMs - baselineDurationMs - firstVerificationDurationMs
     const configuredSources = sourceMap(config, method)
     const client = this.clientFactory()
     const warnings: string[] = []
@@ -435,10 +512,10 @@ export class AudioCalibrationService {
         throw asStatusError(`${detail}。OBSで音声ソースを有効にしてから再実行してください`, 422)
       }
 
-      const baselineSamples = await this.measure(client, sourceNames, baselineDurationMs)
-      const baseline = new Map<AudioCalibrationRole, AudioMeasurement | null>()
-      for (const source of sources) baseline.set(source.role, this.analyze(baselineSamples.get(source.sourceName), baselineDurationMs))
-      const silentRequired = sources.filter(({ role, required }) => required && !baseline.get(role))
+      const preflightSamples = await this.measure(client, sourceNames, preflightDurationMs)
+      const preflight = new Map<AudioCalibrationRole, AudioMeasurement | null>()
+      for (const source of sources) preflight.set(source.role, this.analyze(preflightSamples.get(source.sourceName), preflightDurationMs))
+      const silentRequired = sources.filter(({ role, required }) => required && !preflight.get(role))
       if (silentRequired.length) {
         const names = silentRequired.map(({ role, sourceName }) => `${role === 'microphone' ? 'マイク' : 'ゲーム音'}「${sourceName}」`).join('と')
         throw asStatusError(`${names}の音声を測定できませんでした。普段の声量で話しながらゲーム音を鳴らし、もう一度実行してください`, 422)
@@ -446,20 +523,33 @@ export class AudioCalibrationService {
 
       await this.assertOutputsInactive(client)
 
+      await this.ensureMicrophoneMono(client, config.sources.microphone, rollbacks, warnings)
       for (const spec of this.microphoneFilterSpecs(config.sources.microphone)) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, spec, rollbacks, warnings)
         if (result) filterResults.push(result)
       }
+      await this.orderManagedFilters(client, config.sources.microphone, filterResults
+        .filter(({ sourceName }) => sourceName === config.sources.microphone)
+        .map(({ filterName }) => filterName), rollbacks)
       for (const spec of this.gameFilterSpecs(activeGameSource(config, method), config.sources.microphone, profile.audio.duckingDb)) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, spec, rollbacks, warnings)
         if (result) filterResults.push(result)
       }
-      for (const source of sources.filter(({ role }) => (role === 'discord' || role === 'bgm') && baseline.get(role))) {
+      for (const source of sources.filter(({ role }) => (role === 'discord' || role === 'bgm') && preflight.get(role))) {
         await this.assertOutputsInactive(client)
         const result = await this.ensureFilter(client, this.optionalLimiterSpec(source.sourceName), rollbacks, warnings)
         if (result) filterResults.push(result)
+      }
+
+      const baselineSamples = await this.measure(client, sourceNames, baselineDurationMs)
+      const baseline = new Map<AudioCalibrationRole, AudioMeasurement | null>()
+      for (const source of sources) baseline.set(source.role, this.analyze(baselineSamples.get(source.sourceName), baselineDurationMs))
+      const processedSilentRequired = sources.filter(({ role, required }) => required && !baseline.get(role))
+      if (processedSilentRequired.length) {
+        const names = processedSilentRequired.map(({ role, sourceName }) => `${role === 'microphone' ? 'マイク' : 'ゲーム音'}「${sourceName}」`).join('と')
+        throw asStatusError(`${names}の音声を処理後に測定できませんでした。普段の声量で話しながらゲーム音を鳴らし、もう一度実行してください`, 422)
       }
 
       const readings: AudioCalibrationReading[] = []

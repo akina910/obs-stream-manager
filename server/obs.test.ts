@@ -1104,6 +1104,7 @@ describe('ObsController recording fallbacks', () => {
       on: vi.fn(),
       call: vi.fn(async (request: string, data?: unknown) => {
         if (request === 'GetSourceActive') return { videoActive: true }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, changed: false, previousEnabled: true, enabled: true } }
         if (request === 'GetSourceFilterList') return (data as { sourceName?: string })?.sourceName === 'MIC'
           ? { filters: [] }
           : { filters: [{ filterKind: 'compressor_filter', filterName: 'Game Ducking', filterEnabled: true, filterSettings: { sidechain_source: 'MIC' } }] }

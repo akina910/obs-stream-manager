@@ -76,7 +76,12 @@ class FakeAudioObs {
       this.volumes.set(String(data?.inputName), Number(data?.inputVolumeDb))
       return {}
     }
-    if (request === 'GetSourceFilterList') return { filters: this.filters.get(String(data?.sourceName)) ?? [] }
+    if (request === 'GetSourceFilterList') return {
+      filters: (this.filters.get(String(data?.sourceName)) ?? []).map((filter, filterIndex) => ({ ...filter, filterIndex })),
+    }
+    if (request === 'CallVendorRequest') {
+      return { responseData: { success: true, changed: true, previousEnabled: false, enabled: true } }
+    }
     if (request === 'CreateSourceFilter') {
       const sourceName = String(data?.sourceName)
       const current = this.filters.get(sourceName) ?? []
@@ -106,6 +111,16 @@ class FakeAudioObs {
       filter.filterEnabled = data?.filterEnabled === true
       return {}
     }
+    if (request === 'SetSourceFilterIndex') {
+      const sourceName = String(data?.sourceName)
+      const filters = this.filters.get(sourceName) ?? []
+      const currentIndex = filters.findIndex(({ filterName }) => filterName === data?.filterName)
+      if (currentIndex < 0) throw new Error('missing filter')
+      const [filter] = filters.splice(currentIndex, 1)
+      filters.splice(Number(data?.filterIndex), 0, filter)
+      this.filters.set(sourceName, filters)
+      return {}
+    }
     throw new Error(`Unexpected request: ${request}`)
   }
 }
@@ -123,10 +138,64 @@ describe('AudioCalibrationService', () => {
 
     const result = await service.applyManagedMicrophoneFilters(fake as unknown as OBSWebSocket, 'MIC')
 
-    expect(result.filters).toHaveLength(4)
-    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Compressor'))?.filterSettings).toMatchObject({ output_gain: 6 })
-    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Expander'))?.filterSettings).toMatchObject({ ratio: 1.5, threshold: -50 })
+    expect(result.filters).toHaveLength(5)
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName === 'OBS Stream Manager - Compressor')?.filterSettings).toMatchObject({ output_gain: 6 })
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Upward Compressor'))?.filterSettings).toMatchObject({ ratio: 0.25, threshold: -20 })
+    expect(fake.filters.get('MIC')?.find(({ filterName }) => filterName.endsWith('Expander'))?.filterSettings).toMatchObject({ ratio: 2, threshold: -45 })
+    expect(fake.calls).toContainEqual(expect.objectContaining({ request: 'CallVendorRequest' }))
+    expect(result.warnings).toContain('MICを左右同じ音声のモノラル入力へ自動設定しました')
     expect(fake.calls.filter(({ request }) => request === 'GetStreamStatus').length).toBeGreaterThan(1)
+  })
+
+  it('migrates the legacy filter layout while keeping user filters before the managed safety chain', async () => {
+    const fake = new FakeAudioObs()
+    fake.filters.set('MIC', [
+      { filterName: 'OBS Stream Manager - Noise Suppression', filterKind: 'noise_suppress_filter_v2', filterEnabled: true, filterSettings: { method: 'rnnoise' } },
+      { filterName: 'OBS Stream Manager - Expander', filterKind: 'expander_filter', filterEnabled: true, filterSettings: { ratio: 1.5, threshold: -50 } },
+      { filterName: 'User EQ', filterKind: 'gain_filter', filterEnabled: true, filterSettings: { db: 1 } },
+      { filterName: 'OBS Stream Manager - Compressor', filterKind: 'compressor_filter', filterEnabled: true, filterSettings: { output_gain: 6, sidechain_source: 'none' } },
+      { filterName: 'OBS Stream Manager - Limiter', filterKind: 'limiter_filter', filterEnabled: true, filterSettings: { threshold: -2 } },
+    ])
+    const service = new AudioCalibrationService()
+
+    await service.applyManagedMicrophoneFilters(fake as unknown as OBSWebSocket, 'MIC')
+
+    expect(fake.filters.get('MIC')?.map(({ filterName }) => filterName)).toEqual([
+      'User EQ',
+      'OBS Stream Manager - Noise Suppression',
+      'OBS Stream Manager - Upward Compressor',
+      'OBS Stream Manager - Compressor',
+      'OBS Stream Manager - Expander',
+      'OBS Stream Manager - Limiter',
+    ])
+    expect(fake.calls.some(({ request }) => request === 'SetSourceFilterIndex')).toBe(true)
+  })
+
+  it('restores the legacy filter order when migration fails partway through', async () => {
+    const fake = new FakeAudioObs()
+    const legacy: Filter[] = [
+      { filterName: 'OBS Stream Manager - Noise Suppression', filterKind: 'noise_suppress_filter_v2', filterEnabled: true, filterSettings: { method: 'rnnoise' } },
+      { filterName: 'OBS Stream Manager - Expander', filterKind: 'expander_filter', filterEnabled: true, filterSettings: { ratio: 1.5, threshold: -50 } },
+      { filterName: 'User EQ', filterKind: 'gain_filter', filterEnabled: true, filterSettings: { db: 1 } },
+      { filterName: 'OBS Stream Manager - Compressor', filterKind: 'compressor_filter', filterEnabled: true, filterSettings: { output_gain: 6, sidechain_source: 'none' } },
+      { filterName: 'OBS Stream Manager - Limiter', filterKind: 'limiter_filter', filterEnabled: true, filterSettings: { threshold: -2 } },
+    ]
+    fake.filters.set('MIC', structuredClone(legacy))
+    const originalCall = fake.call.bind(fake)
+    let rejectedMove = false
+    fake.call = vi.fn(async (request: string, data?: Record<string, unknown>) => {
+      if (request === 'SetSourceFilterIndex' && data?.filterName === 'OBS Stream Manager - Compressor' && !rejectedMove) {
+        rejectedMove = true
+        throw new Error('filter reorder failed')
+      }
+      return originalCall(request, data)
+    })
+    const service = new AudioCalibrationService()
+
+    await expect(service.applyManagedMicrophoneFilters(fake as unknown as OBSWebSocket, 'MIC'))
+      .rejects.toThrow('filter reorder failed')
+
+    expect(fake.filters.get('MIC')).toEqual(legacy)
   })
 
   it('measures, applies, verifies, and installs the managed safety filters', async () => {
@@ -135,7 +204,7 @@ describe('AudioCalibrationService', () => {
     const service = new AudioCalibrationService(
       () => fake as unknown as OBSWebSocket,
       async () => {
-        if (phase === 0) fake.emit({ MIC: { magnitudeDb: -24, peakDb: -10 }, GAME_PC: { magnitudeDb: -30, peakDb: -14 } }, 20)
+        if (phase <= 1) fake.emit({ MIC: { magnitudeDb: -24, peakDb: -10 }, GAME_PC: { magnitudeDb: -30, peakDb: -14 } }, 20)
         else fake.emit({ MIC: { magnitudeDb: -18, peakDb: -6 }, GAME_PC: { magnitudeDb: -24, peakDb: -10 } }, 12)
         phase += 1
       },
@@ -150,8 +219,9 @@ describe('AudioCalibrationService', () => {
     expect(result.readings.find(({ role }) => role === 'game')).toMatchObject({ status: 'adjusted', verifiedDb: -24, verifiedPeakDb: -10 })
     expect(fake.filters.get('MIC')?.map(({ filterKind }) => filterKind)).toEqual([
       'noise_suppress_filter_v2',
-      'expander_filter',
+      'upward_compressor_filter',
       'compressor_filter',
+      'expander_filter',
       'limiter_filter',
     ])
     expect(fake.filters.get('GAME_PC')).toHaveLength(2)
@@ -174,7 +244,7 @@ describe('AudioCalibrationService', () => {
         fake.emit({
           MIC: { magnitudeDb: -18, peakDb: -6 },
           GAME_PC: { magnitudeDb: -24, peakDb: -10 },
-          'BGM Stock': phase === 0 ? { magnitudeDb: -36, peakDb: -18 } : { magnitudeDb: -30, peakDb: -14 },
+          'BGM Stock': phase <= 1 ? { magnitudeDb: -36, peakDb: -18 } : { magnitudeDb: -30, peakDb: -14 },
         }, 20)
         phase += 1
       },

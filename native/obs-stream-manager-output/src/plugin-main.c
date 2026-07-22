@@ -185,6 +185,43 @@ static void twitch_status(obs_data_t *request, obs_data_t *response, void *priva
 	obs_data_set_int(response, "skippedFrames", twitch_output ? (long long)obs_output_get_frames_dropped(twitch_output) : 0);
 }
 
+static void set_source_force_mono(obs_data_t *request, obs_data_t *response, void *private_data)
+{
+	UNUSED_PARAMETER(private_data);
+	const char *source_name = obs_data_get_string(request, "sourceName");
+	if (!source_name || !*source_name) {
+		set_error(response, "The audio source name is missing");
+		return;
+	}
+
+	obs_source_t *source = obs_get_source_by_name(source_name);
+	if (!source) {
+		set_error(response, "The requested audio source was not found");
+		return;
+	}
+	if (!(obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO)) {
+		obs_source_release(source);
+		set_error(response, "The requested source does not provide audio");
+		return;
+	}
+
+	const bool enabled = !obs_data_has_user_value(request, "enabled") || obs_data_get_bool(request, "enabled");
+	const uint32_t previous_flags = obs_source_get_flags(source);
+	const bool previous_enabled = (previous_flags & OBS_SOURCE_FLAG_FORCE_MONO) != 0;
+	const uint32_t next_flags = enabled ? previous_flags | OBS_SOURCE_FLAG_FORCE_MONO
+					    : previous_flags & ~OBS_SOURCE_FLAG_FORCE_MONO;
+	if (next_flags != previous_flags)
+		obs_source_set_flags(source, next_flags);
+	obs_source_release(source);
+
+	obs_data_set_bool(response, "success", true);
+	obs_data_set_bool(response, "enabled", enabled);
+	obs_data_set_bool(response, "previousEnabled", previous_enabled);
+	obs_data_set_bool(response, "changed", next_flags != previous_flags);
+	blog(LOG_INFO, "[OBS Stream Manager Output] Force mono %s for source '%s'", enabled ? "enabled" : "disabled",
+	     source_name);
+}
+
 bool obs_module_load(void)
 {
 	if (pthread_mutex_init(&managed_stream_mutex, NULL) != 0) {
@@ -321,6 +358,7 @@ void obs_module_post_load(void)
 	if (!obs_websocket_vendor_register_request(vendor, "start_twitch", start_twitch, NULL) ||
 	    !obs_websocket_vendor_register_request(vendor, "stop_twitch", stop_twitch, NULL) ||
 	    !obs_websocket_vendor_register_request(vendor, "configure_stream", configure_stream, NULL) ||
+	    !obs_websocket_vendor_register_request(vendor, "set_source_force_mono", set_source_force_mono, NULL) ||
 	    !obs_websocket_vendor_register_request(vendor, "twitch_status", twitch_status, NULL))
 		blog(LOG_ERROR, "[OBS Stream Manager Output] Request registration failed");
 }

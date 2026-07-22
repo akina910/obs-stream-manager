@@ -1,6 +1,6 @@
 {
   "name": "obs-stream-manager",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "private": false,
   "description": "Local-first OBS dock for managing game profiles, multistream setup, recording and chat.",
   "author": "OBS Stream Manager contributors",
@@ -26,6 +26,8 @@
     "dist:win:dir": "npm run build:obs-plugin && npm run build && npm run prepare:icon && electron-builder --win dir --x64",
     "release:checksums": "node scripts/write-release-checksums.mjs release",
     "verify:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-windows-package.ps1",
+    "verify:obs-output": "tsx scripts/verify-live-obs-output.ts",
+    "verify:obs-audio-filter": "tsx scripts/measure-obs-filter-response.ts",
     "start": "node dist/server/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.desktop.json",
     "lint": "eslint .",
