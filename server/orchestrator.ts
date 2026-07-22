@@ -297,7 +297,9 @@ export class StreamOrchestrator {
     const warnings: string[] = []
     if (active) {
       if (this.selected) {
-        await this.obs.startSecondaryTwitchForObsStream(config, this.selected).catch((error) => {
+        await this.obs.startSecondaryTwitchForObsStream(config, this.selected).then((secondaryWarnings) => {
+          warnings.push(...secondaryWarnings)
+        }).catch((error) => {
           warnings.push(`Twitch副出力: ${error instanceof Error ? error.message : String(error)}`)
         })
         await this.platforms.startYouTubeBroadcast(config, this.selected).catch((error) => {

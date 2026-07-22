@@ -1,6 +1,6 @@
 {
   "name": "obs-stream-manager",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "private": false,
   "description": "Local-first OBS dock for managing game profiles, multistream setup, recording and chat.",
   "author": "OBS Stream Manager contributors",

@@ -127,10 +127,11 @@ describe('ObsController BGM stock', () => {
 })
 
 describe('ObsController recording fallbacks', () => {
-  it('keeps standard recording but suppresses extra video encoders for a 4K simulcast', async () => {
+  it('switches a 4K profile to managed FHD before starting simultaneous outputs', async () => {
     const calls: Array<{ request: string; data: unknown }> = []
     let streaming = false
     let twitchActive = false
+    let videoSettings = { baseWidth: 3840, baseHeight: 2160, outputWidth: 3840, outputHeight: 2160, fpsNumerator: 60, fpsDenominator: 1 }
     const fake = {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
@@ -140,7 +141,8 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'GetSourceActive') return { videoActive: true }
         if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '10_GAME_PC' }
         if (request === 'GetInputList') return { inputs: [] }
-        if (request === 'GetVideoSettings') return { outputWidth: 3840, outputHeight: 2160 }
+        if (request === 'GetVideoSettings') return videoSettings
+        if (request === 'SetVideoSettings') { videoSettings = structuredClone(data) as typeof videoSettings; return {} }
         if (request === 'GetStreamStatus') return { outputActive: streaming }
         if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
         if (request === 'GetStreamServiceSettings') return { streamServiceType: 'rtmp_common', streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' } }
@@ -178,15 +180,86 @@ describe('ObsController recording fallbacks', () => {
     const warnings = await controller.start(config, profile, profile.capture.localSourceName)
 
     expect(calls.map(({ request }) => request)).toEqual(expect.arrayContaining(['StartStream', 'StartRecord', 'StartReplayBuffer']))
-    expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { vendorName?: string }).vendorName === 'source-record')).toBe(false)
+    expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { vendorName?: string; requestType?: string }).vendorName === 'source-record' && (data as { requestType?: string }).requestType === 'record_start')).toBe(true)
     const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
-    const startStreamIndex = calls.findIndex(({ request }) => request === 'StartStream')
-    expect(stopBacktrackIndex).toBeGreaterThanOrEqual(0)
-    expect(stopBacktrackIndex).toBeLessThan(startStreamIndex)
+    expect(stopBacktrackIndex).toBe(-1)
+    expect(calls.find(({ request }) => request === 'SetVideoSettings')?.data).toMatchObject({
+      outputWidth: 1920,
+      outputHeight: 1080,
+      fpsNumerator: 60,
+      fpsDenominator: 1,
+    })
+    expect(calls.find(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'configure_stream')?.data).toMatchObject({
+      vendorName: 'obs-stream-manager-output',
+      requestType: 'configure_stream',
+      requestData: { videoBitrateKbps: 6_000, audioBitrateKbps: 160 },
+    })
+    expect(calls).toContainEqual({
+      request: 'SetProfileParameter',
+      data: { parameterCategory: 'AdvOut', parameterName: 'ApplyServiceSettings', parameterValue: 'false' },
+    })
     expect(calls.map(({ request }) => request)).not.toContain('TriggerHotkeyByName')
-    expect(warnings.join(' ')).toContain('3840×2160')
-    expect(warnings.join(' ')).toContain('60 FPS')
-    expect(warnings.join(' ')).toContain('Backtrack')
+    expect(warnings.join(' ')).not.toContain('3840×2160')
+    expect(videoSettings).toMatchObject({ outputWidth: 1920, outputHeight: 1080 })
+  })
+
+  it('warns when any managed FHD profile parameter cannot be updated', async () => {
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        if (request === 'GetStreamStatus' || request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetVideoSettings') return { baseWidth: 3840, baseHeight: 2160, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 1, outputActive: false } }
+        if (request === 'SetProfileParameter' && (data as { parameterName?: string }).parameterName === 'ApplyServiceSettings') {
+          throw new Error('parameter is unavailable')
+        }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const warnings: string[] = []
+
+    await (controller as unknown as { configureManagedOutput(warnings: string[]): Promise<void> }).configureManagedOutput(warnings)
+
+    expect(warnings).toEqual([expect.stringContaining('FHD配信プロファイル設定を一部更新できませんでした')])
+  })
+
+  it('keeps OBS-triggered Twitch output available when an older plugin cannot configure the encoder', async () => {
+    const calls: Array<{ request: string; data: unknown }> = []
+    let twitchActive = false
+    const fake = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      on: vi.fn(),
+      call: vi.fn(async (request: string, data?: unknown) => {
+        calls.push({ request, data })
+        if (request !== 'CallVendorRequest') return {}
+        const vendor = data as { requestType: string }
+        if (vendor.requestType === 'configure_stream') return { responseData: { success: false, error: 'Unknown request type' } }
+        if (vendor.requestType === 'start_twitch') { twitchActive = true; return { responseData: { success: true, outputActive: true } } }
+        if (vendor.requestType === 'twitch_status') return { responseData: { success: true, pluginVersion: '0.2.3', apiVersion: 1, outputActive: twitchActive, totalFrames: twitchActive ? 1 : 0 } }
+        return { responseData: { success: true } }
+      }),
+    }
+    const controller = new ObsController(memorySecrets([
+      ['twitch-stream-key', 'twitch-key'],
+      ['twitch-stream-server', 'rtmp://twitch.example/app'],
+    ]), 50)
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    config.features.youtube = true
+    config.features.twitch = true
+    profile.youtube.enabled = true
+    profile.twitch.enabled = true
+
+    await expect(controller.startSecondaryTwitchForObsStream(config, profile)).resolves.toEqual([
+      expect.stringContaining('CBR 6000 kbps'),
+    ])
+    expect(calls.some(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'start_twitch')).toBe(true)
   })
 
   it('detects an empty Aitum Vertical scene before starting a black recording', async () => {
@@ -407,6 +480,9 @@ describe('ObsController recording fallbacks', () => {
           outputSkippedFrames: 0,
           outputCongestion: 0,
         }
+        if (request === 'GetVideoSettings') return { baseWidth: 3840, baseHeight: 2160, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 }
+        if (request === 'GetRecordStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, pluginVersion: '0.2.12', apiVersion: 1, outputActive: false } }
         if (request === 'GetStreamServiceSettings') return service
         if (request === 'SetStreamServiceSettings') { service = structuredClone(data) as typeof service; return {} }
         if (request === 'StartStream') { streaming = true; return {} }
@@ -423,6 +499,15 @@ describe('ObsController recording fallbacks', () => {
 
     await expect(controller.testTwitchIngest(structuredClone(defaultConfig), 0, { includeSecondary: false })).resolves.toEqual({
       ok: true,
+      output: {
+        width: 1920,
+        height: 1080,
+        fpsNumerator: 60,
+        fpsDenominator: 1,
+        videoBitrateKbps: 6_000,
+        audioBitrateKbps: 160,
+        encoderConfigured: true,
+      },
       durationMs: 1_500,
       bytesSent: 2_000_000,
       totalFrames: 90,
@@ -459,6 +544,7 @@ describe('ObsController recording fallbacks', () => {
     let replay = false
     let backtrack = true
     let statsCalls = 0
+    let videoSettings = { baseWidth: 3840, baseHeight: 2160, outputWidth: 3840, outputHeight: 2160, fpsNumerator: 60, fpsDenominator: 1 }
     let service = {
       streamServiceType: 'rtmp_common',
       streamServiceSettings: { service: 'YouTube - RTMPS', server: 'auto' },
@@ -472,7 +558,8 @@ describe('ObsController recording fallbacks', () => {
         if (request === 'GetStreamStatus') return { outputActive: streaming, outputDuration: 1_500, outputBytes: 2_000_000, outputTotalFrames: 90, outputSkippedFrames: 0, outputCongestion: 0 }
         if (request === 'GetRecordStatus') return { outputActive: recording, outputDuration: statsCalls ? 1_600 : 200, outputBytes: statsCalls ? 3_500_000 : 500_000, outputTotalFrames: statsCalls ? 94 : 10, outputSkippedFrames: 0 }
         if (request === 'GetReplayBufferStatus') return { outputActive: replay, outputDuration: statsCalls ? 1_500 : 200, outputBytes: statsCalls ? 3_000_000 : 500_000, outputTotalFrames: statsCalls ? 88 : 10, outputSkippedFrames: 0 }
-        if (request === 'GetVideoSettings') return { outputWidth: 3840, outputHeight: 2160 }
+        if (request === 'GetVideoSettings') return videoSettings
+        if (request === 'SetVideoSettings') { videoSettings = structuredClone(data) as typeof videoSettings; return {} }
         if (request === 'GetStats') {
           statsCalls += 1
           return statsCalls === 1
@@ -520,14 +607,13 @@ describe('ObsController recording fallbacks', () => {
       recording: { totalFrames: 84, skippedFrames: 0 },
       replayBuffer: { totalFrames: 78, skippedFrames: 0 },
       obs: { activeFps: 60, renderTotalFrames: 90, renderSkippedFrames: 0, outputTotalFrames: 90, outputSkippedFrames: 0 },
-      verticalBacktrackStopped: true,
+      verticalBacktrackStopped: false,
       warnings: [],
     })
 
     const stopBacktrackIndex = calls.findIndex(({ request, data }) => request === 'CallVendorRequest' && (data as { requestType?: string }).requestType === 'stop_backtrack')
-    const startStreamIndex = calls.findIndex(({ request }) => request === 'StartStream')
-    expect(stopBacktrackIndex).toBeGreaterThan(-1)
-    expect(stopBacktrackIndex).toBeLessThan(startStreamIndex)
+    expect(stopBacktrackIndex).toBe(-1)
+    expect(videoSettings).toMatchObject({ outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 })
     expect(streaming).toBe(false)
     expect(secondary).toBe(false)
     expect(recording).toBe(false)
@@ -608,7 +694,8 @@ describe('ObsController recording fallbacks', () => {
     config.obs.startDelaySeconds = 0
     const warnings = await controller.start(config, profile, profile.capture.localSourceName)
     expect(calls).toContain('StartStream')
-    expect(warnings).toHaveLength(4)
+    expect(warnings).toHaveLength(5)
+    expect(warnings.join(' ')).toContain('CBR 6000 kbps')
     expect(warnings.join(' ')).toContain('通常録画')
     expect(warnings.join(' ')).toContain('Source Record')
     expect(warnings.join(' ')).toContain('Aitum Vertical')
@@ -787,6 +874,7 @@ describe('ObsController recording fallbacks', () => {
           if (vendorName === 'source-record') return { responseData: { success: false, error: 'no source found' } }
           throw new Error('No vendor was found by that name.')
         }
+        if (request === 'TriggerHotkeyByName') throw new Error('No hotkeys were found by that name.')
         return {}
       }),
     }
@@ -832,7 +920,9 @@ describe('ObsController recording fallbacks', () => {
     config.features.verticalRecording = true
     profile.recording.verticalRecording = true
 
-    await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([])
+    await expect(controller.start(config, profile, profile.capture.localSourceName)).resolves.toEqual([
+      expect.stringContaining('CBR 6000 kbps'),
+    ])
     expect(calls).toContainEqual({
       request: 'TriggerHotkeyByName',
       data: { hotkeyName: 'VerticalCanvasDockStartRecording' },
@@ -1000,7 +1090,8 @@ describe('ObsController recording fallbacks', () => {
 
     const warnings = await controller.applyProfile(structuredClone(defaultConfig), profile, 'local')
 
-    expect(warnings).toHaveLength(2)
+    expect(warnings).toHaveLength(3)
+    expect(warnings.join(' ')).toContain('FHD配信プロファイル')
     expect(warnings.join(' ')).toContain('録画保存先')
     expect(warnings.join(' ')).toContain('リプレイバッファ時間')
   })

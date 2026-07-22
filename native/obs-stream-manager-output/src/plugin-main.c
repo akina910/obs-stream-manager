@@ -10,6 +10,7 @@ the Free Software Foundation; either version 2 of the License, or
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <util/threading.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,6 +26,10 @@ OBS_MODULE_AUTHOR("OBS Stream Manager contributors")
 static obs_websocket_vendor vendor;
 static obs_output_t *twitch_output;
 static obs_service_t *twitch_service;
+static pthread_mutex_t managed_stream_mutex;
+static bool managed_stream_configuration_pending;
+static long long managed_video_bitrate_kbps;
+static long long managed_audio_bitrate_kbps;
 
 #ifdef _WIN32
 static void launch_companion_app(void)
@@ -182,6 +187,10 @@ static void twitch_status(obs_data_t *request, obs_data_t *response, void *priva
 
 bool obs_module_load(void)
 {
+	if (pthread_mutex_init(&managed_stream_mutex, NULL) != 0) {
+		blog(LOG_ERROR, "[OBS Stream Manager Output] Managed stream mutex initialization failed");
+		return false;
+	}
 	#ifdef _WIN32
 	launch_companion_app();
 	#endif
@@ -189,8 +198,121 @@ bool obs_module_load(void)
 	return true;
 }
 
+static bool configure_stream_encoders(obs_output_t *output, long long video_bitrate_kbps,
+				      long long audio_bitrate_kbps, obs_data_t *response)
+{
+	if (!output) {
+		if (response)
+			set_error(response, "The primary OBS stream output is unavailable");
+		else
+			blog(LOG_WARNING, "[OBS Stream Manager Output] Primary stream output is unavailable");
+		return false;
+	}
+
+	obs_encoder_t *video_encoder = obs_output_get_video_encoder(output);
+	obs_encoder_t *audio_encoder = obs_output_get_audio_encoder(output, 0);
+	if (!video_encoder || !audio_encoder) {
+		if (response)
+			set_error(response, "The primary OBS stream encoders are unavailable");
+		else
+			blog(LOG_WARNING, "[OBS Stream Manager Output] Primary stream encoders are unavailable");
+		return false;
+	}
+
+	obs_data_t *video_settings = obs_encoder_get_settings(video_encoder);
+	obs_data_set_string(video_settings, "rate_control", "CBR");
+	obs_data_set_int(video_settings, "bitrate", video_bitrate_kbps);
+	obs_data_set_int(video_settings, "keyint_sec", 2);
+	obs_data_set_int(video_settings, "bf", 2);
+	obs_encoder_update(video_encoder, video_settings);
+	obs_data_release(video_settings);
+
+	obs_data_t *audio_settings = obs_encoder_get_settings(audio_encoder);
+	obs_data_set_int(audio_settings, "bitrate", audio_bitrate_kbps);
+	obs_encoder_update(audio_encoder, audio_settings);
+	obs_data_release(audio_settings);
+
+	if (response) {
+		obs_data_set_bool(response, "success", true);
+		obs_data_set_int(response, "videoBitrateKbps", video_bitrate_kbps);
+		obs_data_set_int(response, "audioBitrateKbps", audio_bitrate_kbps);
+	}
+	return true;
+}
+
+static void frontend_event(enum obs_frontend_event event, void *private_data)
+{
+	UNUSED_PARAMETER(private_data);
+	if (event != OBS_FRONTEND_EVENT_STREAMING_STARTING)
+		return;
+
+	pthread_mutex_lock(&managed_stream_mutex);
+	const bool pending = managed_stream_configuration_pending;
+	const long long video_bitrate_kbps = managed_video_bitrate_kbps;
+	const long long audio_bitrate_kbps = managed_audio_bitrate_kbps;
+	pthread_mutex_unlock(&managed_stream_mutex);
+	if (!pending)
+		return;
+
+	obs_output_t *main_output = obs_frontend_get_streaming_output();
+	if (!main_output) {
+		blog(LOG_WARNING, "[OBS Stream Manager Output] Managed stream settings could not be applied before start");
+		return;
+	}
+
+	if (configure_stream_encoders(main_output, video_bitrate_kbps, audio_bitrate_kbps, NULL)) {
+		blog(LOG_INFO,
+		     "[OBS Stream Manager Output] Applied managed stream settings before start: video=%lld Kbps, audio=%lld Kbps, keyframe=2 seconds, B-frames=2",
+		     video_bitrate_kbps, audio_bitrate_kbps);
+		pthread_mutex_lock(&managed_stream_mutex);
+		if (managed_stream_configuration_pending && managed_video_bitrate_kbps == video_bitrate_kbps &&
+		    managed_audio_bitrate_kbps == audio_bitrate_kbps)
+			managed_stream_configuration_pending = false;
+		pthread_mutex_unlock(&managed_stream_mutex);
+	}
+	obs_output_release(main_output);
+}
+
+static void configure_stream(obs_data_t *request, obs_data_t *response, void *private_data)
+{
+	UNUSED_PARAMETER(private_data);
+	const long long video_bitrate_kbps = obs_data_get_int(request, "videoBitrateKbps");
+	const long long audio_bitrate_kbps = obs_data_get_int(request, "audioBitrateKbps");
+	if (video_bitrate_kbps < 500 || video_bitrate_kbps > 6000 || audio_bitrate_kbps < 64 ||
+	    audio_bitrate_kbps > 160) {
+		set_error(response, "Managed stream bitrate is outside the supported range");
+		return;
+	}
+	pthread_mutex_lock(&managed_stream_mutex);
+	managed_video_bitrate_kbps = video_bitrate_kbps;
+	managed_audio_bitrate_kbps = audio_bitrate_kbps;
+	managed_stream_configuration_pending = true;
+	pthread_mutex_unlock(&managed_stream_mutex);
+
+	obs_output_t *main_output = obs_frontend_get_streaming_output();
+	if (!main_output || !obs_output_active(main_output)) {
+		obs_data_set_bool(response, "success", true);
+		obs_data_set_bool(response, "scheduledForStreamStart", true);
+		obs_data_set_int(response, "videoBitrateKbps", video_bitrate_kbps);
+		obs_data_set_int(response, "audioBitrateKbps", audio_bitrate_kbps);
+		if (main_output)
+			obs_output_release(main_output);
+		return;
+	}
+	const bool configured = configure_stream_encoders(main_output, video_bitrate_kbps, audio_bitrate_kbps, response);
+	obs_output_release(main_output);
+	if (configured) {
+		pthread_mutex_lock(&managed_stream_mutex);
+		if (managed_stream_configuration_pending && managed_video_bitrate_kbps == video_bitrate_kbps &&
+		    managed_audio_bitrate_kbps == audio_bitrate_kbps)
+			managed_stream_configuration_pending = false;
+		pthread_mutex_unlock(&managed_stream_mutex);
+	}
+}
+
 void obs_module_post_load(void)
 {
+	obs_frontend_add_event_callback(frontend_event, NULL);
 	vendor = obs_websocket_register_vendor("obs-stream-manager-output");
 	if (!vendor) {
 		blog(LOG_ERROR, "[OBS Stream Manager Output] obs-websocket vendor registration failed");
@@ -198,12 +320,15 @@ void obs_module_post_load(void)
 	}
 	if (!obs_websocket_vendor_register_request(vendor, "start_twitch", start_twitch, NULL) ||
 	    !obs_websocket_vendor_register_request(vendor, "stop_twitch", stop_twitch, NULL) ||
+	    !obs_websocket_vendor_register_request(vendor, "configure_stream", configure_stream, NULL) ||
 	    !obs_websocket_vendor_register_request(vendor, "twitch_status", twitch_status, NULL))
 		blog(LOG_ERROR, "[OBS Stream Manager Output] Request registration failed");
 }
 
 void obs_module_unload(void)
 {
+	obs_frontend_remove_event_callback(frontend_event, NULL);
 	release_twitch_output();
+	pthread_mutex_destroy(&managed_stream_mutex);
 	blog(LOG_INFO, "[OBS Stream Manager Output] Plugin unloaded");
 }

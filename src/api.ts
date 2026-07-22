@@ -25,6 +25,7 @@ export type OAuthStartResult =
 type OutputTestMetrics = { durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number }
 export type TwitchIngestTestResult = {
   ok: true
+  output: { width: number; height: number; fpsNumerator: number; fpsDenominator: number; videoBitrateKbps: number; audioBitrateKbps: number; encoderConfigured: boolean }
   durationMs: number
   bytesSent: number
   totalFrames: number

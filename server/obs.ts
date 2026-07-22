@@ -12,10 +12,27 @@ type AppliedStreamService = { streamServiceType: string; server: string; key: st
 type ObsRuntimeStatus = Omit<RuntimeStatus, 'platforms'>
 type TwitchOutputPluginStatus = NonNullable<ObsRuntimeStatus['twitchOutputPlugin']>
 const twitchOutputPluginApiVersion = 1
+export const managedOutputPreset = {
+  width: 1920,
+  height: 1080,
+  fpsNumerator: 60,
+  fpsDenominator: 1,
+  videoBitrateKbps: 6_000,
+  audioBitrateKbps: 160,
+} as const
 export const stockBgmInputName = STOCK_BGM_INPUT_NAME
 export type BgmControlAction = 'play' | 'pause' | 'stop' | 'restart'
 export type TwitchIngestTestResult = {
   ok: true
+  output: {
+    width: number
+    height: number
+    fpsNumerator: number
+    fpsDenominator: number
+    videoBitrateKbps: number
+    audioBitrateKbps: number
+    encoderConfigured: boolean
+  }
   durationMs: number
   bytesSent: number
   totalFrames: number
@@ -278,6 +295,63 @@ export class ObsController {
     if (!advanced) warnings.push('OBSが基本出力モードのため、配信用MIXをA1、分離録画をA2以降へ設定しました。詳細出力モードではA1=ゲーム、A2=Discord、A3=マイク、A4=BGM、A5=AUXになります')
   }
 
+  private async configureManagedOutput(warnings: string[]): Promise<void> {
+    const [stream, record, replay, secondary] = await Promise.all([
+      this.obs.call('GetStreamStatus').catch(() => ({ outputActive: false })),
+      this.obs.call('GetRecordStatus').catch(() => ({ outputActive: false })),
+      this.getReplayBufferStatus().catch(() => ({ outputActive: false })),
+      this.getTwitchOutputPluginStatus().catch(() => null),
+    ])
+    if (stream.outputActive || record.outputActive || replay.outputActive || secondary?.outputActive) {
+      warnings.push('FHD配信設定は出力中のため変更していません。配信・録画・リプレイを停止してゲームを選び直すと反映されます')
+      return
+    }
+
+    const video = await this.obs.call('GetVideoSettings').catch(() => null)
+    if (video) {
+      const needsVideoUpdate = video.outputWidth !== managedOutputPreset.width
+        || video.outputHeight !== managedOutputPreset.height
+        || video.fpsNumerator !== managedOutputPreset.fpsNumerator
+        || video.fpsDenominator !== managedOutputPreset.fpsDenominator
+      if (needsVideoUpdate) {
+        await this.obs.call('SetVideoSettings', {
+          baseWidth: video.baseWidth || managedOutputPreset.width,
+          baseHeight: video.baseHeight || managedOutputPreset.height,
+          outputWidth: managedOutputPreset.width,
+          outputHeight: managedOutputPreset.height,
+          fpsNumerator: managedOutputPreset.fpsNumerator,
+          fpsDenominator: managedOutputPreset.fpsDenominator,
+        }).catch((error) => warnings.push(`OBS映像を1920×1080/60 FPSへ変更できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+      }
+    }
+
+    const profileSettings = [
+      { parameterCategory: 'AdvOut', parameterName: 'ApplyServiceSettings', parameterValue: 'false' },
+      { parameterCategory: 'AdvOut', parameterName: 'UseRescale', parameterValue: 'false' },
+      { parameterCategory: 'AdvOut', parameterName: 'RecUseRescale', parameterValue: 'false' },
+      { parameterCategory: 'AdvOut', parameterName: 'RecEncoder', parameterValue: 'none' },
+      { parameterCategory: 'Stream1', parameterName: 'EnableMultitrackVideo', parameterValue: 'false' },
+      { parameterCategory: 'SimpleOutput', parameterName: 'VBitrate', parameterValue: String(managedOutputPreset.videoBitrateKbps) },
+      { parameterCategory: 'SimpleOutput', parameterName: 'ABitrate', parameterValue: String(managedOutputPreset.audioBitrateKbps) },
+      ...Array.from({ length: 6 }, (_, index) => ({
+        parameterCategory: 'AdvOut',
+        parameterName: `Track${index + 1}Bitrate`,
+        parameterValue: String(managedOutputPreset.audioBitrateKbps),
+      })),
+    ]
+    const profileResults = await Promise.all(profileSettings.map((setting) => this.obs.call('SetProfileParameter', setting).then(() => true).catch(() => false)))
+    if (profileResults.some((result) => !result)) warnings.push('OBSのFHD配信プロファイル設定を一部更新できませんでした')
+
+  }
+
+  private async configureStreamEncoder(): Promise<void> {
+    await this.callVendor('obs-stream-manager-output', 'configure_stream', {
+      videoBitrateKbps: managedOutputPreset.videoBitrateKbps,
+      audioBitrateKbps: managedOutputPreset.audioBitrateKbps,
+    })
+    await wait(500)
+  }
+
   private async ensureStockBgmInput(filename: string): Promise<void> {
     const sceneList = await this.obs.call('GetSceneList')
     let created = false
@@ -459,9 +533,18 @@ export class ObsController {
         stop_recording: 'VerticalCanvasDockStopRecording',
         stop_backtrack: 'VerticalCanvasDockStopBacktrack',
       } as const
-      await this.obs.call('TriggerHotkeyByName', {
-        hotkeyName: hotkeyNames[requestType],
-      })
+      try {
+        await this.obs.call('TriggerHotkeyByName', {
+          hotkeyName: hotkeyNames[requestType],
+        })
+      } catch (hotkeyError) {
+        const hotkeyMessage = hotkeyError instanceof Error ? hotkeyError.message : String(hotkeyError)
+        const missingHotkey = hotkeyMessage.toLowerCase().includes('no hotkeys were found')
+        // Stop operations are global, idempotent teardown. A missing Aitum vendor
+        // and missing Aitum hotkey means there is simply no vertical output to stop.
+        if (requestType !== 'start_recording' && missingHotkey) return
+        throw hotkeyError
+      }
     }
   }
 
@@ -614,11 +697,16 @@ export class ObsController {
     await this.configurePrimaryStream(config, profile)
   }
 
-  async startSecondaryTwitchForObsStream(config: AppConfig, profile: GameProfile): Promise<void> {
-    if (!(config.features.youtube && profile.youtube.enabled && config.features.twitch && profile.twitch.enabled)) return
+  async startSecondaryTwitchForObsStream(config: AppConfig, profile: GameProfile): Promise<string[]> {
+    const warnings: string[] = []
+    if (!(config.features.youtube && profile.youtube.enabled && config.features.twitch && profile.twitch.enabled)) return warnings
     await this.connect(config)
+    await this.configureStreamEncoder().catch((error) => {
+      warnings.push(`配信ビットレートをCBR ${managedOutputPreset.videoBitrateKbps} kbpsへ固定できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+    })
     await this.startTwitchSecondary()
     this.started.twitch = true
+    return warnings
   }
 
   async finishObsTriggeredStream(config: AppConfig): Promise<string[]> {
@@ -749,19 +837,25 @@ export class ObsController {
     let recordingStarted = false
     let replayStarted = false
     let changed = false
+    let encoderConfigured = false
     let secondaryStartedAt = 0
     let verticalBacktrackStopped = false
     const warnings: string[] = []
     try {
+      await this.configureManagedOutput(warnings)
       await this.configureSeparatedAudioTracks(config, warnings)
       const video = await this.obs.call('GetVideoSettings').catch(() => null)
       if ((video?.outputWidth ?? 0) * (video?.outputHeight ?? 0) >= 2560 * 1440) {
         verticalBacktrackStopped = await this.stopVerticalBacktrackIfActive().catch(() => false)
       }
       changed = await this.configureManagedStream(streamServer, testKey)
+      try { await this.configureStreamEncoder() } catch { /* retry after OBS creates the encoder */ }
       await this.obs.call('StartStream')
       started = true
       if (!await this.waitForStreamActive()) throw new Error('OBSからTwitchテスト出力を開始できませんでした')
+      await this.configureStreamEncoder()
+        .then(() => { encoderConfigured = true })
+        .catch((error) => warnings.push(`配信ビットレートをCBR ${managedOutputPreset.videoBitrateKbps} kbpsへ固定できませんでした: ${error instanceof Error ? error.message : String(error)}`))
       if (options.includeSecondary !== false) {
         await this.startTwitchSecondary({ server: streamServer, key: testKey })
         secondaryStarted = true
@@ -809,6 +903,15 @@ export class ObsController {
       const measuredDurationMs = Date.now() - measurementStartedAt
       return {
         ok: true,
+        output: {
+          width: video?.outputWidth ?? 0,
+          height: video?.outputHeight ?? 0,
+          fpsNumerator: video?.fpsNumerator ?? 0,
+          fpsDenominator: video?.fpsDenominator ?? 0,
+          videoBitrateKbps: managedOutputPreset.videoBitrateKbps,
+          audioBitrateKbps: managedOutputPreset.audioBitrateKbps,
+          encoderConfigured,
+        },
         durationMs: status.outputDuration,
         bytesSent: status.outputBytes,
         totalFrames: status.outputTotalFrames,
@@ -848,6 +951,7 @@ export class ObsController {
   async applyProfile(config: AppConfig, profile: GameProfile, method: CaptureMethod): Promise<string[]> {
     await this.connect(config)
     const warnings: string[] = []
+    await this.configureManagedOutput(warnings)
     await this.obs.call('SetCurrentProgramScene', { sceneName: profile.obs.sceneName })
 
     const selectedSource = this.captureSource(profile, method)
@@ -949,6 +1053,7 @@ export class ObsController {
     const startedNow = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false }
     let restoreManagedStreamServiceOnFailure = false
     try {
+      await this.configureManagedOutput(warnings)
       const protection = await this.highResolutionSimulcast(config, profile)
       await this.protectHighResolutionSimulcast(protection, warnings)
       const stream = await this.obs.call('GetStreamStatus')
@@ -956,6 +1061,7 @@ export class ObsController {
       if (!stream.outputActive) {
         await this.configurePrimaryStream(config, profile)
         restoreManagedStreamServiceOnFailure = this.streamServiceManaged
+        try { await this.configureStreamEncoder() } catch { /* retry after OBS creates the encoder */ }
       }
       if (!stream.outputActive) {
         await this.obs.call('StartStream')
@@ -970,6 +1076,7 @@ export class ObsController {
           throw new Error(`OBS配信出力が開始状態になりませんでした。${guidance}`)
         }
       }
+      await this.configureStreamEncoder().catch((error) => warnings.push(`配信ビットレートをCBR ${managedOutputPreset.videoBitrateKbps} kbpsへ固定できませんでした: ${error instanceof Error ? error.message : String(error)}`))
       if (config.features.youtube && profile.youtube.enabled && config.features.twitch && profile.twitch.enabled) {
         await this.startTwitchSecondary()
         this.started.twitch = true
@@ -977,8 +1084,8 @@ export class ObsController {
       }
 
       // Allocate the primary simulcast encoder before optional recording encoders.
-      // Source Record was observed dropping 99.9% of frames when it competed with
-      // a 4K60 simulcast and a vertical encoder.
+      // The managed 1080p60 preset keeps the shared YouTube/Twitch encoder within
+      // Twitch's 6000 kbps ceiling while recording reuses the same encoder.
       const record = await this.obs.call('GetRecordStatus')
       if (config.features.recording && profile.recording.enabled && !record.outputActive) {
         try { await this.obs.call('StartRecord'); this.started.record = true; startedNow.record = true }

@@ -439,7 +439,7 @@ describe('StreamOrchestrator OBS-triggered external sync', () => {
     const obs = {
       applyProfile: vi.fn().mockResolvedValue([]),
       preparePrimaryStream: vi.fn().mockResolvedValue(undefined),
-      startSecondaryTwitchForObsStream: vi.fn().mockResolvedValue(undefined),
+      startSecondaryTwitchForObsStream: vi.fn().mockResolvedValue([]),
       finishObsTriggeredStream: vi.fn().mockResolvedValue([]),
     } as unknown as ObsController
     const platforms = {
