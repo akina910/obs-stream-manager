@@ -145,13 +145,22 @@ describe('desktop integration lifecycle', () => {
   it('restores the OBS plugin during install so OBS can start the companion immediately after an upgrade', async () => {
     const installer = await readFile(new URL('../installer.nsh', import.meta.url), 'utf8')
     const builder = await readFile(new URL('../electron-builder.yml', import.meta.url), 'utf8')
+    const desktopMain = await readFile(new URL('./main.ts', import.meta.url), 'utf8')
+    const pluginInstaller = await readFile(new URL('./obs-plugin-installer.ts', import.meta.url), 'utf8')
 
-    expect(installer).toContain('ReadEnvStr $1 "ProgramData"')
-    expect(installer).toContain('CopyFiles /SILENT "$INSTDIR\\resources\\obs-plugin\\bin\\64bit\\obs-stream-manager-output.dll"')
-    expect(installer).toContain('$1\\obs-studio\\plugins\\obs-stream-manager-output\\bin\\64bit\\obs-stream-manager-output.dll')
+    expect(installer).toContain('CopyFiles /SILENT "$INSTDIR\\resources\\obs-plugin\\bin\\64bit\\obs-stream-manager-output-v2.dll"')
+    expect(installer).toContain('$APPDATA\\obs-studio\\plugins\\obs-stream-manager-output-v2\\bin\\64bit\\obs-stream-manager-output-v2.dll')
     expect(builder).toContain('oneClick: true')
     expect(builder).toContain('perMachine: true')
-    expect(builder).toContain('requestExecutionLevel: admin')
+    expect(builder).toContain('requestExecutionLevel: user')
+    expect(builder).toContain('- "**/*.node"')
+    expect(builder).toContain('- "**/node_modules/@img/sharp-win32-x64/lib/*.dll"')
+    expect(pluginInstaller).toContain("path.join(pluginRoot, 'staging', `${OBS_OUTPUT_PLUGIN_FILENAME}.new`)")
+    expect(pluginInstaller).toContain("path.join(targetDirectory, `${OBS_OUTPUT_PLUGIN_FILENAME}.pending`)")
+    expect(pluginInstaller).toContain("[Environment]::SetEnvironmentVariable('OBS_PLUGINS_PATH'")
+    expect(pluginInstaller).toContain("[Environment]::SetEnvironmentVariable('OBS_PLUGINS_DATA_PATH'")
+    expect(pluginInstaller).toContain("'System32', 'tasklist.exe'")
+    expect(desktopMain).toContain('new ObsPluginInstallRetry(')
   })
 
   it('lets the installed OBS plugin start the companion before the dock is loaded', async () => {
@@ -160,5 +169,22 @@ describe('desktop integration lifecycle', () => {
     expect(plugin).toContain('L"Software\\\\OBS Stream Manager"')
     expect(plugin).toContain('CreateProcessW(executable')
     expect(plugin).toContain('L"\\"%ls\\" --background"')
+  })
+
+  it('shares the proven primary STREAM MIX encoder with Twitch instead of creating a silent duplicate AAC encoder', async () => {
+    const plugin = await readFile(new URL('../native/obs-stream-manager-output/src/plugin-main.c', import.meta.url), 'utf8')
+    expect(plugin).toContain('#define OBS_STREAM_MANAGER_OUTPUT_API_VERSION 4')
+    expect(plugin).toContain('#define STREAM_MIXER_INDEX 5')
+    expect(plugin).toContain('twitch_audio_encoder = obs_encoder_get_ref(main_audio_encoder)')
+    expect(plugin).not.toContain('obs_audio_encoder_create(')
+    expect(plugin).toContain('"sharedPrimaryAudioEncoder"')
+    expect(plugin).toContain('"audioMixerIndex"')
+  })
+
+  it('keeps the Twitch secondary output alive while the primary RTMP output is reconnecting', async () => {
+    const plugin = await readFile(new URL('../native/obs-stream-manager-output/src/plugin-main.c', import.meta.url), 'utf8')
+    expect(plugin).toContain('obs_output_reconnecting(main_output)')
+    expect(plugin).toContain('Primary stream is reconnecting; keeping Twitch output active')
+    expect(plugin.indexOf('if (reconnecting)')).toBeLessThan(plugin.indexOf('release_twitch_output();', plugin.indexOf('static void frontend_event')))
   })
 })

@@ -104,7 +104,7 @@ export class BgmLibraryStore {
     }
     const selectedTrackId = tracks.some((track) => track.id === library.selectedTrackId) ? library.selectedTrackId : null
     if (tracks.length !== library.tracks.length || selectedTrackId !== library.selectedTrackId) {
-      await this.write({ version: 1, tracks, selectedTrackId })
+      await this.write({ version: 1, tracks, selectedTrackId, playbackMode: library.playbackMode })
     }
     const retainedFiles = await this.readRetainedFiles()
     const trackedFiles = new Set([...tracks.map((track) => track.filename), ...retainedFiles])
@@ -148,14 +148,14 @@ export class BgmLibraryStore {
         addedAt: new Date().toISOString(),
       }
       await atomicWrite(this.trackPath(track), bytes)
-      return { version: 1, tracks: [...library.tracks, track], selectedTrackId: library.selectedTrackId }
+      return { ...library, tracks: [...library.tracks, track] }
     })
   }
 
-  async selectTrack(id: string): Promise<BgmLibrary> {
+  async selectTrack(id: string | null, playbackMode = 'loop' as BgmLibrary['playbackMode']): Promise<BgmLibrary> {
     return this.mutate(async (library) => {
-      if (!library.tracks.some((track) => track.id === id)) throw Object.assign(new Error('BGMが見つかりません'), { statusCode: 404 })
-      return { ...library, selectedTrackId: id }
+      if (id !== null && !library.tracks.some((track) => track.id === id)) throw Object.assign(new Error('BGMが見つかりません'), { statusCode: 404 })
+      return { ...library, selectedTrackId: id, playbackMode }
     })
   }
 
@@ -169,7 +169,7 @@ export class BgmLibraryStore {
       if (retainFile) await this.retainFiles([removed.filename])
       else await removeFileWithRetry(this.trackPath(removed))
       return {
-        version: 1,
+        ...latest,
         tracks: latest.tracks.filter((track) => track.id !== id),
         selectedTrackId: wasSelected ? null : latest.selectedTrackId,
       }
@@ -250,7 +250,7 @@ export class BgmLibraryStore {
         tracks.push(imported)
       }
       const selectedTrackId = prepared.library.selectedTrackId ? idMap.get(prepared.library.selectedTrackId) ?? null : null
-      const saved = await this.write({ version: 1, tracks, selectedTrackId })
+      const saved = await this.write({ version: 1, tracks, selectedTrackId, playbackMode: prepared.library.playbackMode })
       let finished = false
       return {
         library: saved,

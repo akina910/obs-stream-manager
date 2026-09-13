@@ -22,7 +22,7 @@ Run `OBS Stream Manager-Setup-*-x64.exe` and approve the Windows administrator p
 
 ### Portable EXE
 
-Run `OBS Stream Manager-Portable-*-x64.exe` directly from any folder. Installation is not required. Windows requests administrator approval at launch so the bundled OBS plugin can be installed automatically. Portable builds are not registered for Windows startup because moving the executable would leave a broken startup entry. Start the EXE before opening OBS.
+Run `OBS Stream Manager-Portable-*-x64.exe` directly from any folder. Installation and administrator approval are normally unnecessary, and the bundled OBS plugin is placed automatically. Portable builds are not registered for Windows startup because moving the executable would leave a broken startup entry. Start the EXE before opening OBS. Only when an older plugin is owned by another administrator, follow the in-app guidance to update with the installer or run the app as administrator once.
 
 ### Portable ZIP
 
@@ -32,7 +32,7 @@ All package types store settings and credentials in the same Windows user data l
 
 ## OBS integration is automatic
 
-While OBS is closed, OBS Stream Manager automatically prepares OBS's built-in connection, imports its local password, and registers the `Stream Manager` dock. End users do not enter a URL or password, enable WebSocket manually, or create a custom browser dock. If OBS was already running on first launch, close it once and start it again. Existing docks and unrelated OBS settings are preserved. [OBS_SETUP.md](docs/OBS_SETUP.md) is now only a recovery and advanced guide.
+While OBS is closed, OBS Stream Manager automatically prepares OBS's built-in connection, imports its local password, registers the `Stream Manager` dock, and configures the selected profile for FHD 60 FPS, YouTube CBR 10000 kbps, Twitch CBR 6000 kbps, and A1-A5 recording. End users do not enter a URL or password, enable WebSocket manually, change output mode, or create a custom browser dock. If OBS was already running on first launch, close it once and start it again. Existing docks, recording paths, encoder selection, and unrelated OBS settings are preserved. [OBS_SETUP.md](docs/OBS_SETUP.md) is now only a recovery and advanced guide.
 
 Closing the desktop window does not stop the OBS dock server. The app remains in the Windows notification area, and launching the EXE again reopens the same window. Choose **Quit completely** from the notification-area menu or Settings only when you also want to stop the local server. The OBS dock becomes unavailable after a complete quit.
 
@@ -64,11 +64,11 @@ YouTube uses PKCE for a desktop public client, and Twitch uses Device Code Flow.
 - Supported target: Windows 11 x64
 - Supported target: OBS Studio 31.1 or later; the built-in connection is configured automatically
 - Simultaneous YouTube/Twitch output: the app installs its bundled plugin automatically; restart OBS after the first install or an update
-- Optional: Aitum Vertical, Source Record, Advanced Scene Switcher, and Steam
+- Optional: Aitum Vertical, Advanced Scene Switcher, and Steam
 
-Aitum Multistream is not required. If Source Record or Aitum Vertical is unavailable, only its corresponding extra recording feature is disabled with a warning.
+Aitum Multistream and Source Record are not required. If Aitum Vertical is unavailable, only vertical recording is disabled with a warning.
 
-After Windows administrator approval, the bundled plugin is installed automatically in OBS's official Windows plugin directory at `C:\ProgramData\obs-studio\plugins\obs-stream-manager-output`.
+The bundled plugin is installed automatically in OBS's per-user plugin directory at `%APPDATA%\obs-studio\plugins\obs-stream-manager-output-v2`; no administrator approval is required.
 
 ## Main features
 
@@ -76,10 +76,11 @@ After Windows administrator approval, the bundled plugin is installed automatica
 - Automatic discovery and library insertion of owned Steam games, including uninstalled games
 - Clear indication of the selected game and currently applied profile
 - OBS scene, capture, audio, recording, and replay-buffer control
-- A BGM library for MP3, WAV, OGG, FLAC, and M4A files with shared looping playback, pause, and resume across scenes
+- A BGM library for MP3, WAV, OGG, FLAC, and M4A files with per-game track, volume, loop/once, and auto-play settings
 - Per-game audio auto-adjustment from OBS meters, peak protection, and microphone sidechain ducking
-- Isolated recording stems: A1 game, A2 Discord, A3 microphone, A4 BGM, A5 capture/AUX, with A6 as the shared YouTube/Twitch stream mix
-- At 4K or high frame rates, standard recording shares the stream encoder while only overloaded Source Record/vertical encoders are suppressed
+- OBS application-level capture for the selected game and Discord, with isolated recording stems: A1 game, A2 Discord, A3 microphone, A4 BGM, A5 capture/AUX, and A6 as the shared YouTube/Twitch stream mix
+- Source Record is not started during streaming because it exposes no per-output dropped-frame health signal; FHD 60 FPS delivery and A1-A5 stem recording take priority
+- During YouTube/Twitch simulcast, the additional vertical encoder is suppressed so both public outputs remain stable
 - Automatic YouTube broadcast, title, description, privacy, and per-game thumbnail setup
 - Automatic Twitch title, category, tag, stream-key, and secondary-video-output setup, plus a non-public bandwidth test
 - Title variables `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`, with automatic Part advancement after a successful stream
@@ -90,7 +91,7 @@ After Windows administrator approval, the bundled plugin is installed automatica
 
 ## Data, updates, and uninstalling
 
-Personal settings, game profiles, thumbnails, BGM tracks, shared stream templates, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder. Each BGM file can be up to 50 MB and is attached to OBS through the managed `BGM Stock` media source. Backups exported from Settings include the BGM files and selected-track state, up to 150 MB total.
+Personal settings, game profiles, thumbnails, BGM tracks, shared stream templates, descriptions, logs, and backups are stored in `%APPDATA%\obs-stream-manager`. Updating the app preserves this folder. Each BGM file can be up to 50 MB and is attached to OBS through the managed `BGM Stock` media source. The track library is shared, but each game profile stores its own track, volume, loop/once mode, and auto-play choice. Switching games stops the previous BGM before applying the next profile. Backups exported from Settings include both the BGM files and per-game assignments, up to 150 MB total.
 
 Configure the shared stream template from Settings. Its text supports `{game}`, `{part}`, `{date}`, `{time}`, and `{datetime}`. Each game can override only its template display name, such as shortening `ARK: Survival Ascended` to `ARK`. Create an OBS image source named `COMMON_STREAM_TEMPLATE` (or use the same custom source name in both OBS and the app). Selecting a game then assigns that profile's generated PNG to the source automatically.
 

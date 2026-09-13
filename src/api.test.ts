@@ -36,4 +36,40 @@ describe('API request headers', () => {
 
     expect(fetchMock).toHaveBeenCalledWith('/api/audio/ensure', expect.objectContaining({ method: 'POST', body: '{}' }))
   })
+
+  it('can reapply a selected game without updating external platform metadata', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      profile: {},
+      captureMethod: 'geforce_now',
+      warnings: [],
+      services: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.select('steam_3357650', 'geforce_now', false)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/select', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        gameId: 'steam_3357650',
+        captureMethod: 'geforce_now',
+        preparePlatforms: false,
+      }),
+    }))
+  })
+
+  it('uses independent endpoints for recording-only start and stop', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, warnings: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, warnings: [], outputPath: 'capture.mkv', remuxedPath: 'capture.mp4' }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.startRecordingOnly()
+    await api.stopRecordingOnly()
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/recording/start', expect.objectContaining({ method: 'POST', body: '{}' }))
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/recording/stop', expect.objectContaining({ method: 'POST', body: '{}' }))
+    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain('/api/stream/start')
+    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain('/api/stream/stop')
+  })
 })

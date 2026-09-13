@@ -9,11 +9,13 @@ export type CaptureMethod = z.infer<typeof CaptureMethodSchema>
 
 export const ThumbnailApplyStatusSchema = z.enum(['not_registered', 'pending', 'applied', 'failed', 'disabled'])
 export type ThumbnailApplyStatus = z.infer<typeof ThumbnailApplyStatusSchema>
+export const BgmPlaybackModeSchema = z.enum(['loop', 'once'])
+export type BgmPlaybackMode = z.infer<typeof BgmPlaybackModeSchema>
 
 export const GameIdSchema = z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9_-]*$/)
 export const AudioProfileSchema = z.object({
   microphoneDb: z.number().min(-100).max(26).default(-3),
-  microphoneBoostDb: z.number().min(0).max(24).default(0),
+  microphoneBoostDb: z.number().min(0).max(30).default(0),
   gameDb: z.number().min(-100).max(26).default(-15),
   discordDb: z.number().min(-100).max(26).default(-18),
   bgmDb: z.number().min(-100).max(26).default(-25),
@@ -74,6 +76,11 @@ export const GameProfileSchema = z.object({
     tags: z.array(z.string()).default(['日本語']),
   }),
   audio: AudioProfileSchema,
+  bgm: z.object({
+    trackId: z.string().uuid().nullable().default(null),
+    playbackMode: BgmPlaybackModeSchema.default('loop'),
+    autoPlay: z.boolean().default(false),
+  }).default({ trackId: null, playbackMode: 'loop', autoPlay: false }),
   recording: z.object({
     enabled: z.boolean().default(true),
     directory: z.string().default(''),
@@ -166,6 +173,7 @@ export const BgmLibrarySchema = z.object({
   version: z.literal(1).default(1),
   tracks: z.array(BgmTrackSchema).default([]),
   selectedTrackId: z.string().uuid().nullable().default(null),
+  playbackMode: BgmPlaybackModeSchema.default('loop'),
 })
 
 export type BgmLibrary = z.infer<typeof BgmLibrarySchema>
@@ -190,6 +198,7 @@ export const LocalObsSetupStatusSchema = z.object({
   detail: z.string(),
   dockConfigured: z.boolean(),
   websocketConfigured: z.boolean(),
+  outputConfigured: z.boolean(),
 })
 
 export type LocalObsSetupStatus = z.infer<typeof LocalObsSetupStatusSchema>
@@ -201,6 +210,7 @@ export const RuntimeStatusSchema = z.object({
   streaming: z.boolean(),
   streamElapsedMs: z.number().nonnegative().optional(),
   recording: z.boolean(),
+  recordingOnly: z.boolean().default(false),
   replayBuffer: z.boolean(),
   sourceRecord: z.boolean(),
   verticalRecording: z.boolean(),

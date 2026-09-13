@@ -42,6 +42,7 @@ npm run dist:win
 
 生成前処理は次の場合に失敗します。
 
+- 配布ビルドでYouTubeまたはTwitchのプロバイダー設定が不足している
 - YouTubeクライアント種別が `desktop` ではない
 - YouTube Desktop appクライアント資格情報が不足している
 - Twitch Client Secret、API Key、アクセストークン、更新トークンが入力に含まれる

@@ -161,6 +161,7 @@ describe('DataStore', () => {
       capture: { ...profile.capture, localSourceName: 'Persistent Game Capture', allowDisplayFallback: true },
       obs: { ...profile.obs, sceneName: 'Persistent Scene' },
       audio: { ...profile.audio, gameDb: -21, duckingDb: 0 },
+      bgm: { trackId: '00000000-0000-4000-8000-000000000123', playbackMode: 'once', autoPlay: true },
       recording: { ...profile.recording, directory: 'D:\\Persistent Recordings', replayBufferSeconds: 240, verticalRecording: false },
       state: { ...profile.state, thumbnailAutoApply: false },
     })
@@ -185,6 +186,7 @@ describe('DataStore', () => {
       capture: { localSourceName: 'Persistent Game Capture', allowDisplayFallback: true },
       obs: { sceneName: 'Persistent Scene' },
       audio: { gameDb: -21, duckingDb: 0 },
+      bgm: { trackId: '00000000-0000-4000-8000-000000000123', playbackMode: 'once', autoPlay: true },
       recording: { directory: 'D:\\Persistent Recordings', replayBufferSeconds: 240, verticalRecording: false },
       state: {
         thumbnailFilename: withThumbnail.state.thumbnailFilename,

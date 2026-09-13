@@ -22,7 +22,7 @@ export type OAuthConnectionStatuses = Record<OAuthProvider, OAuthConnectionStatu
 export type OAuthStartResult =
   | { mode: 'redirect'; url: string }
   | { mode: 'device'; url: string; userCode: string; requestId: string; intervalMs: number; expiresAt: number }
-type OutputTestMetrics = { durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number }
+type OutputTestMetrics = { durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number; measuredFps: number }
 export type TwitchIngestTestResult = {
   ok: true
   output: { width: number; height: number; fpsNumerator: number; fpsDenominator: number; videoBitrateKbps: number; audioBitrateKbps: number; encoderConfigured: boolean }
@@ -30,10 +30,11 @@ export type TwitchIngestTestResult = {
   bytesSent: number
   totalFrames: number
   skippedFrames: number
+  measuredFps: number
   congestion: number
   secondary: OutputTestMetrics | null
-  recording: OutputTestMetrics | null
-  replayBuffer: OutputTestMetrics | null
+  recording: { durationMs: number; bytesWritten: number } | null
+  replayBuffer: { active: true } | null
   obs: { activeFps: number; renderTotalFrames: number; renderSkippedFrames: number; outputTotalFrames: number; outputSkippedFrames: number }
   verticalBacktrackStopped: boolean
   warnings: string[]
@@ -72,9 +73,11 @@ export const api = {
   deleteProfile: (id: string) => request<{ ok: true }>(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   uploadThumbnail: (id: string, mime: string, data: string, filename: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
   deleteThumbnail: (id: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'DELETE' }),
-  select: (gameId: string, captureMethod?: CaptureMethod) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod }) }),
+  select: (gameId: string, captureMethod?: CaptureMethod, preparePlatforms = true) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod, preparePlatforms }) }),
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
+  startRecordingOnly: () => request<{ ok: true; warnings: string[] }>('/api/recording/start', { method: 'POST', body: '{}' }),
+  stopRecordingOnly: () => request<{ ok: true; warnings: string[]; outputPath: string | null; remuxedPath: string | null }>('/api/recording/stop', { method: 'POST', body: '{}' }),
   testTwitchOutput: (options: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } = {}) => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: JSON.stringify(options) }),
   autoAdjustAudio: (gameId: string, audio: GameProfile['audio'], durationMs = 15_000) => request<AudioCalibrationResult>('/api/audio/auto-adjust', { method: 'POST', body: JSON.stringify({ gameId, audio, durationMs }) }),
   ensureAudio: () => request<{ ok: true; applied: boolean; warnings: string[] }>('/api/audio/ensure', { method: 'POST', body: '{}' }),

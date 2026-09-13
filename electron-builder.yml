@@ -1,6 +1,7 @@
 appId: io.github.akina910.obs-stream-manager
 productName: OBS Stream Manager
 copyright: Copyright 2026 OBS Stream Manager contributors
+beforePack: scripts/electron-builder-hooks.cjs
 directories:
   output: release
 publish:
@@ -19,6 +20,7 @@ extraResources:
 asar: true
 asarUnpack:
   - "**/*.node"
+  - "**/node_modules/@img/sharp-win32-x64/lib/*.dll"
 win:
   icon: build/icon.ico
   target:
@@ -40,4 +42,4 @@ nsis:
   deleteAppDataOnUninstall: false
 portable:
   artifactName: "${productName}-Portable-${version}-${arch}.${ext}"
-  requestExecutionLevel: admin
+  requestExecutionLevel: user

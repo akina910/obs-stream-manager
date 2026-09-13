@@ -49,6 +49,20 @@ describe('BgmLibraryStore', () => {
     await expect(readFile(library.trackPath(second))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('keeps playback mode with the runtime selection and can clear it between game profiles', async () => {
+    const library = await createLibrary()
+    const track = (await library.addTrack('loop.mp3', mp3('loop'))).tracks[0]
+
+    await expect(library.selectTrack(track.id, 'once')).resolves.toMatchObject({
+      selectedTrackId: track.id,
+      playbackMode: 'once',
+    })
+    await expect(library.selectTrack(null, 'loop')).resolves.toMatchObject({
+      selectedTrackId: null,
+      playbackMode: 'loop',
+    })
+  })
+
   it('rejects unsupported, empty, and oversized files', async () => {
     const library = await createLibrary()
 

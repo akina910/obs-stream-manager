@@ -25,6 +25,7 @@ const pcBase = {
   youtube: { enabled: true, titleTemplate: '{game}｜ゲーム配信', description: '', privacy: 'public' as const, categoryId: '20' },
   twitch: { enabled: true, titleTemplate: '{game}｜ゲーム配信', categoryName: '', tags: ['日本語'] },
   audio: { microphoneDb: -3, microphoneBoostDb: 0, gameDb: -15, discordDb: -18, bgmDb: -25, duckingDb: -6 },
+  bgm: { trackId: null, playbackMode: 'loop' as const, autoPlay: false },
   recording: { enabled: true, directory: '', replayBufferSeconds: 180, sourceRecord: false, verticalRecording: false },
   state: { lastUsedAt: null, thumbnailAutoApply: true, thumbnailApplyStatus: 'not_registered' as const, thumbnailLastAppliedAt: null, nextPartNumber: 1 },
 }

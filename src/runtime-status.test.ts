@@ -6,6 +6,7 @@ const stoppedStatus: RuntimeStatus = {
   obsConnected: true,
   streaming: false,
   recording: false,
+  recordingOnly: false,
   replayBuffer: false,
   sourceRecord: false,
   verticalRecording: false,
@@ -29,7 +30,6 @@ describe('runtime status labels', () => {
       ['Twitch', 'オフライン'],
       ['録画', '停止'],
       ['リプレイ', '停止'],
-      ['素材', '停止'],
       ['縦録画', '停止'],
     ])
   })
@@ -48,9 +48,21 @@ describe('runtime status labels', () => {
     expect(getExternalDeliveryWarning(active)).toContain('公開配信中とは確認できていません')
     expect(getRuntimeOutputs(active).find(({ key }) => key === 'recording')?.state).toBe('録画中')
     expect(getRuntimeOutputs(active).find(({ key }) => key === 'replay')?.state).toBe('動作中')
-    expect(getRuntimeOutputs(active).find(({ key }) => key === 'source')?.state).toBe('録画中')
     expect(getRuntimeOutputs(active).find(({ key }) => key === 'vertical')?.state).toBe('録画中')
     expect(getBroadcastStatus({ ...stoppedStatus, busy: true })).toEqual({ label: '配信停止中', detail: '切替処理中', tone: 'stopped' })
+  })
+
+  it('labels recording-only separately while keeping broadcast delivery stopped', () => {
+    const recordingOnly = { ...stoppedStatus, recording: true, recordingOnly: true }
+    expect(getBroadcastStatus(recordingOnly, 'Minecraft')).toEqual({
+      label: '録画専用モード',
+      detail: '配信停止・{game}録画中',
+      detailValues: { game: 'Minecraft' },
+      tone: 'sending',
+    })
+    expect(getBroadcastStatus(recordingOnly)).toEqual({ label: '録画専用モード', detail: '配信停止・選択中ゲーム録画中', tone: 'sending' })
+    expect(getRuntimeOutputs(recordingOnly).find(({ key }) => key === 'recording')).toMatchObject({ label: '録画のみ', active: true })
+    expect(getRuntimeOutputs(recordingOnly).find(({ key }) => key === 'obs')).toMatchObject({ state: '停止', active: false })
   })
 
   it('reports external streaming only after a platform confirms live', () => {

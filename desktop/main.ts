@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs'
-import { appendFile, copyFile, mkdir, readFile, rename, rm } from 'node:fs/promises'
-import crypto from 'node:crypto'
+import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import electronUpdater from 'electron-updater'
 import { RuntimeStatusSchema } from '../shared/contracts.js'
+import { OBS_OUTPUT_PLUGIN_DIRECTORY, OBS_OUTPUT_PLUGIN_FILENAME } from '../shared/obs-output-plugin.js'
 import { redactSensitiveText } from '../shared/redaction.js'
 import type { DesktopUpdateState, UpdateBlockReason } from '../shared/update-contracts.js'
 import {
@@ -21,6 +21,12 @@ import {
   type DesktopIntegrationSettings,
   type WindowsStartupRegistration,
 } from './integration.js'
+import {
+  installObsPluginFiles,
+  ObsPluginInstallRetry,
+  registerWindowsObsPluginDiscovery,
+  type ObsPluginInstallState,
+} from './obs-plugin-installer.js'
 import { hasStartupListenRetried, StartupListenTimeoutError, startupListenRetryArgs, withStartupListenTimeout } from './startup.js'
 import { createElectronUpdateAdapter, getUpdateBlockReason, ManualUpdateService } from './updater.js'
 
@@ -51,6 +57,7 @@ let shutdownComplete = false
 let closeNoticeShown = false
 let audioCalibrationWindow: BrowserWindow | null = null
 let audioCalibrationHideTimer: ReturnType<typeof setTimeout> | null = null
+let obsPluginRetry: ObsPluginInstallRetry | null = null
 
 function clearAudioCalibrationWindow(window?: BrowserWindow): void {
   if (window && audioCalibrationWindow !== window) return
@@ -142,49 +149,20 @@ async function providerBundlePath(): Promise<string | null> {
   }
 }
 
-async function installObsOutputPlugin(): Promise<'unavailable' | 'current' | 'installed' | 'pending'> {
+async function installObsOutputPlugin(): Promise<ObsPluginInstallState> {
   if (!app.isPackaged) return 'unavailable'
-  const source = path.join(process.resourcesPath, 'obs-plugin', 'bin', '64bit', 'obs-stream-manager-output.dll')
-  if (!existsSync(source)) return 'unavailable'
+  const source = path.join(process.resourcesPath, 'obs-plugin', 'bin', '64bit', OBS_OUTPUT_PLUGIN_FILENAME)
   const isolatedPluginRoot = process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_DIR?.trim()
-  if (!isolatedPluginRoot) {
-    const legacyPluginRoot = path.join(app.getPath('appData'), 'obs-studio', 'plugins', 'obs-stream-manager-output')
-    await rm(legacyPluginRoot, { recursive: true, force: true }).catch(() => {
-      // A running OBS instance can keep the previous DLL locked. The installer also retries this migration.
-    })
-  }
-  const programData = process.env.PROGRAMDATA?.trim() || process.env.ProgramData?.trim() || 'C:\\ProgramData'
-  const pluginRoot = isolatedPluginRoot || path.join(programData, 'obs-studio', 'plugins', 'obs-stream-manager-output')
-  const targetDirectory = path.join(pluginRoot, 'bin', '64bit')
-  const target = path.join(targetDirectory, 'obs-stream-manager-output.dll')
-  const pending = path.join(targetDirectory, 'obs-stream-manager-output.pending.dll')
-  const digest = async (filename: string) => crypto.createHash('sha256').update(await readFile(filename)).digest('hex')
-  try {
-    await mkdir(targetDirectory, { recursive: true })
-    const localeSource = path.join(process.resourcesPath, 'obs-plugin', 'data', 'locale', 'en-US.ini')
-    if (existsSync(localeSource)) {
-      const localeTarget = path.join(pluginRoot, 'data', 'locale', 'en-US.ini')
-      await mkdir(path.dirname(localeTarget), { recursive: true })
-      await copyFile(localeSource, localeTarget)
-    }
-    if (existsSync(pending)) {
-      try {
-        await rm(target, { force: true })
-        await rename(pending, target)
-      } catch { /* OBS may still have the previous DLL loaded */ }
-    }
-    if (existsSync(target) && await digest(target) === await digest(source)) return 'current'
-    try {
-      await copyFile(source, target)
-      return 'installed'
-    } catch {
-      await copyFile(source, pending)
-      return 'pending'
-    }
-  } catch {
-    // Plugin installation must not prevent the local manager from starting.
-    return 'unavailable'
-  }
+  const pluginRoot = isolatedPluginRoot || path.join(app.getPath('appData'), 'obs-studio', 'plugins', OBS_OUTPUT_PLUGIN_DIRECTORY)
+  // Plugin discovery repair must never prevent the companion server from
+  // starting. The installer also writes these values, and a later app launch
+  // retries the repair if Windows temporarily rejects the environment update.
+  await registerWindowsObsPluginDiscovery(pluginRoot).catch(() => undefined)
+  return installObsPluginFiles({
+    source,
+    pluginRoot,
+    localeSource: path.join(process.resourcesPath, 'obs-plugin', 'data', 'locale', 'en-US.ini'),
+  })
 }
 
 function isAllowedExternalUrl(value: string): boolean {
@@ -339,7 +317,7 @@ if (!app.requestSingleInstanceLock()) {
     if (tray && process.platform === 'win32') {
       try { tray.displayBalloon({
         title: '音声自動調整を待機しています',
-        content: 'ゲームへ戻り、ゲーム音を鳴らしながら普段どおり話してください。音を検出してから計測します。',
+        content: '普段どおり話してください。ゲーム音も取得できれば相対音量まで、なければマイクだけを調整します。',
         iconType: 'info',
       }) } catch { /* A notification failure must not cancel calibration. */ }
     }
@@ -358,7 +336,7 @@ if (!app.requestSingleInstanceLock()) {
     if (tray && process.platform === 'win32') {
       try { tray.displayBalloon({
         title: succeeded ? '音声自動調整が完了しました' : '音声自動調整を完了できませんでした',
-        content: succeeded ? 'ゲーム音とマイクの計測結果を確認してください。' : '画面に戻って詳細を確認してください。',
+        content: succeeded ? 'マイクと、取得できた音源の計測結果を確認してください。' : '画面に戻って詳細を確認してください。',
         iconType: succeeded ? 'info' : 'warning',
       }) } catch { /* The result remains visible in the restored window. */ }
     }
@@ -376,6 +354,8 @@ if (!app.requestSingleInstanceLock()) {
       .catch(async (error) => { await writeStartupError(error) })
       .finally(() => {
         shutdownComplete = true
+        obsPluginRetry?.stop()
+        obsPluginRetry = null
         updateService?.dispose()
         updateService = null
         tray?.destroy()
@@ -415,6 +395,14 @@ if (!app.requestSingleInstanceLock()) {
       }
       const obsPluginState = await installObsOutputPlugin()
       process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_INSTALL_STATE = obsPluginState
+      obsPluginRetry = new ObsPluginInstallRetry(
+        installObsOutputPlugin,
+        async (effectiveState, observedState) => {
+          process.env.OBS_STREAM_MANAGER_OBS_PLUGIN_INSTALL_STATE = effectiveState
+          await markLifecycle(`obs-output-plugin-retry-${observedState}`).catch(() => undefined)
+        },
+      )
+      obsPluginRetry.start(obsPluginState)
       await markLifecycle(`obs-output-plugin-${obsPluginState}`).catch(() => undefined)
       serverModule = await import('../server/index.js') as ServerModule
       await markLifecycle('server-module-loaded').catch(() => undefined)

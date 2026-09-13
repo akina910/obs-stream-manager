@@ -65,9 +65,12 @@ try {
   Assert-True ($resolvedTestRoot.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase)) 'Unsafe test directory'
   Assert-True (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) "Port $port is already in use"
   if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
-  New-Item -ItemType Directory -Path $testRoot, $dataDirectory, (Join-Path $obsConfigDirectory 'plugin_config\obs-websocket') | Out-Null
-  Set-Content -LiteralPath (Join-Path $obsConfigDirectory 'global.ini') -Value "[General]`r`nName=PackageVerification`r`n`r`n[BasicWindow]`r`nExtraBrowserDocks=[]" -Encoding UTF8
-  Set-Content -LiteralPath (Join-Path $obsConfigDirectory 'user.ini') -Value "[General]`r`nName=PackageVerification`r`n`r`n[BasicWindow]`r`nExtraBrowserDocks=[]" -Encoding UTF8
+  $obsProfileDirectory = Join-Path $obsConfigDirectory 'basic\profiles\PackageVerification'
+  New-Item -ItemType Directory -Path $testRoot, $dataDirectory, (Join-Path $obsConfigDirectory 'plugin_config\obs-websocket'), $obsProfileDirectory | Out-Null
+  $obsRootFixture = "[General]`r`nName=PackageVerification`r`n`r`n[Basic]`r`nProfile=PackageVerification`r`nProfileDir=PackageVerification`r`n`r`n[BasicWindow]`r`nExtraBrowserDocks=[]"
+  Set-Content -LiteralPath (Join-Path $obsConfigDirectory 'global.ini') -Value $obsRootFixture -Encoding UTF8
+  Set-Content -LiteralPath (Join-Path $obsConfigDirectory 'user.ini') -Value $obsRootFixture -Encoding UTF8
+  Set-Content -LiteralPath (Join-Path $obsProfileDirectory 'basic.ini') -Value "[Output]`r`nMode=Simple`r`n`r`n[Video]`r`nBaseCX=3840`r`nBaseCY=2160`r`nOutputCX=3840`r`nOutputCY=2160`r`nFPSCommon=30" -Encoding UTF8
   if ($PackageArchive) {
     $resolvedArchive = (Resolve-Path -LiteralPath $PackageArchive).Path
     Assert-True ([IO.Path]::GetExtension($resolvedArchive) -eq '.zip') 'Package archive must be a ZIP file'
@@ -78,7 +81,15 @@ try {
   }
   $exe = Join-Path $runtime 'OBS Stream Manager.exe'
   Assert-True ([bool](Test-Path -LiteralPath $exe)) 'Packaged executable is missing'
-  $obsPlugin = Join-Path $runtime 'resources\obs-plugin\bin\64bit\obs-stream-manager-output.dll'
+  $sharpRuntime = Join-Path $runtime 'resources\app.asar.unpacked\node_modules\@img\sharp-win32-x64\lib'
+  $sharpNativeAddon = Join-Path $sharpRuntime 'sharp-win32-x64.node'
+  $sharpLibvips = Join-Path $sharpRuntime 'libvips-42.dll'
+  $sharpLibvipsCpp = Join-Path $sharpRuntime 'libvips-cpp-8.17.3.dll'
+  Assert-True ([bool](Test-Path -LiteralPath $sharpNativeAddon)) 'Sharp native addon must be unpacked beside its runtime DLLs'
+  Assert-True ([bool](Test-Path -LiteralPath $sharpLibvips)) 'Sharp libvips runtime DLL must be unpacked'
+  Assert-True ([bool](Test-Path -LiteralPath $sharpLibvipsCpp)) 'Sharp libvips C++ runtime DLL must be unpacked'
+  $results.sharpNativeRuntimeUnpacked = $true
+  $obsPlugin = Join-Path $runtime 'resources\obs-plugin\bin\64bit\obs-stream-manager-output-v2.dll'
   Assert-True ([bool](Test-Path -LiteralPath $obsPlugin)) 'Bundled OBS output plugin is missing'
   $obsPluginLocale = Join-Path $runtime 'resources\obs-plugin\data\locale\en-US.ini'
   Assert-True ([bool](Test-Path -LiteralPath $obsPluginLocale)) 'Bundled OBS output plugin locale is missing'
@@ -87,6 +98,8 @@ try {
   $obsPluginVersion = Get-Content -LiteralPath $obsPluginVersionFile -Raw | ConvertFrom-Json
   $expectedVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
   Assert-True ($obsPluginVersion.version -eq $expectedVersion) "Unexpected OBS output plugin version: $($obsPluginVersion.version), expected $expectedVersion"
+  $obsPluginText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($obsPlugin))
+  Assert-True ($obsPluginText.Contains($expectedVersion)) "Bundled OBS output plugin binary does not contain version $expectedVersion"
   $appUpdateConfig = Join-Path $runtime 'resources\app-update.yml'
   Assert-True ([bool](Test-Path -LiteralPath $appUpdateConfig)) 'Packaged update provider configuration is missing'
   $appUpdateText = Get-Content -LiteralPath $appUpdateConfig -Raw
@@ -175,7 +188,7 @@ try {
   $bootstrap = Invoke-RestMethod "http://127.0.0.1:$port/api/bootstrap" -TimeoutSec 60
   $results.obsSetupAutomatic = $bootstrap.obsSetup.phase -eq 'ready' -and $bootstrap.obsSetup.dockConfigured -and $bootstrap.obsSetup.websocketConfigured
   $results.obsDockRegistered = (Get-Content -LiteralPath (Join-Path $obsConfigDirectory 'user.ini') -Raw).Contains('"title":"Stream Manager"')
-  $results.obsPluginDeployed = Test-Path -LiteralPath (Join-Path $obsPluginDirectory 'bin\64bit\obs-stream-manager-output.dll')
+  $results.obsPluginDeployed = Test-Path -LiteralPath (Join-Path $obsPluginDirectory 'bin\64bit\obs-stream-manager-output-v2.dll')
   $oauthStatus = Invoke-RestMethod "http://127.0.0.1:$port/api/oauth/status" -TimeoutSec 10
   $providerOAuthProvisioned = [bool]$bootstrap.config.youtube.clientId -and $bootstrap.config.youtube.clientSecretStored -and $oauthStatus.youtube.appConfigured -and [bool]$bootstrap.config.twitch.clientId -and $oauthStatus.twitch.appConfigured
   if ($AllowMissingProviderOAuth) {

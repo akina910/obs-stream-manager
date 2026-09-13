@@ -11,6 +11,7 @@ import { BgmLibraryStore, maxBackupRequestBytes, maxBgmTrackBytes } from './bgm-
 import { CaptureDetector } from './capture.js'
 import { CommonTemplateService } from './common-template.js'
 import { selectFolder } from './folder-picker.js'
+import { fpsMotionTestHtml } from './fps-motion-fixture.js'
 import { AppLogger } from './logger.js'
 import { LocalObsProvisioner } from './local-obs-provisioning.js'
 import { ObsController } from './obs.js'
@@ -37,8 +38,9 @@ if (process.env.NODE_ENV !== 'test') await localObs.start()
 const logger = new AppLogger(dataDir)
 const obs = new ObsController(secrets, 8_000, 45_000)
 const platforms = new PlatformServices(secrets, store)
+await platforms.restoreDiagnostics()
 const commonTemplates = new CommonTemplateService(store)
-const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger, commonTemplates)
+const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger, commonTemplates, bgm)
 await orchestrator.restoreSelection()
 obs.onStreamStateChanged((active) => orchestrator.handleObsStreamStateChanged(active))
 const listenPort = Number(process.env.PORT ?? 4317)
@@ -84,11 +86,17 @@ app.setErrorHandler((error, _request, reply) => {
 })
 
 app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
+app.get('/api/diagnostics/fps-motion', async (_request, reply) => reply
+  .header('Cache-Control', 'no-store')
+  .type('text/html; charset=utf-8')
+  .send(fpsMotionTestHtml))
 app.get('/api/bootstrap', async () => ({ config: await store.getConfig(), profiles: await store.listProfiles(), status: await orchestrator.getStatus(), obsSetup: localObs.status() }))
 app.get('/api/status', async () => orchestrator.getStatus())
 app.get('/api/obs/setup-status', async () => localObs.status())
 app.post('/api/obs/prepare', async () => localObs.prepare())
 app.get('/api/comments', async () => platforms.getComments())
+app.get('/api/platform-diagnostics', async () => platforms.getDiagnostics())
+app.get('/api/platform-diagnostics/history', async () => platforms.getDiagnosticsArchive())
 app.get('/api/bgm', async () => ({ ...(await bgm.getLibrary()), playback: await obs.bgmPlaybackStatus(await store.getConfig()) }))
 app.post<{ Body: { filename?: string; data?: string } }>('/api/bgm', { bodyLimit: 70 * 1024 * 1024 }, async (request, reply) => {
   const filename = typeof request.body?.filename === 'string' ? request.body.filename : ''
@@ -102,47 +110,59 @@ app.post<{ Body: { filename?: string; data?: string } }>('/api/bgm', { bodyLimit
   return { ...library, playback: await obs.bgmPlaybackStatus(await store.getConfig()) }
 })
 app.post<{ Params: { id: string } }>('/api/bgm/:id/play', async (request) => {
-  const track = await bgm.getTrack(request.params.id)
-  if (!track) throw Object.assign(new Error('BGMが見つかりません'), { statusCode: 404 })
-  const config = await store.getConfig()
-  const runtime = await orchestrator.getStatus()
-  const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
-  await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25)
-  const library = await bgm.selectTrack(track.id)
-  await bgm.releaseRetainedFiles().catch(() => undefined)
-  await logger.write('bgm.played', { trackId: track.id, filename: track.originalName })
-  return { ...library, playback: await obs.bgmPlaybackStatus(config) }
-})
-app.post<{ Body: { action?: string } }>('/api/bgm/control', async (request) => {
-  const action = z.enum(['play', 'pause', 'stop', 'restart']).parse(request.body?.action)
-  const config = await store.getConfig()
-  const library = await bgm.getLibrary()
-  if (action === 'play' || action === 'restart') {
-    const track = library.tracks.find((item) => item.id === library.selectedTrackId)
-    if (!track) throw Object.assign(new Error('再生するBGMを選択してください'), { statusCode: 409 })
+  return orchestrator.runExclusiveLocalOperation(async () => {
+    const track = await bgm.getTrack(request.params.id)
+    if (!track) throw Object.assign(new Error('BGMが見つかりません'), { statusCode: 404 })
+    const config = await store.getConfig()
     const runtime = await orchestrator.getStatus()
     const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
-    await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25, action === 'restart')
-  } else {
-    await obs.controlBgm(config, action)
-  }
-  return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+    const playbackMode = profile?.bgm.playbackMode ?? 'loop'
+    await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25, true, playbackMode)
+    const library = await bgm.selectTrack(track.id, playbackMode)
+    await bgm.releaseRetainedFiles().catch(() => undefined)
+    await logger.write('bgm.played', { trackId: track.id, filename: track.originalName })
+    return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+  })
+})
+app.post<{ Body: { action?: string } }>('/api/bgm/control', async (request) => {
+  return orchestrator.runExclusiveLocalOperation(async () => {
+    const action = z.enum(['play', 'pause', 'stop', 'restart']).parse(request.body?.action)
+    const config = await store.getConfig()
+    const library = await bgm.getLibrary()
+    if (action === 'play' || action === 'restart') {
+      const track = library.tracks.find((item) => item.id === library.selectedTrackId)
+      if (!track) throw Object.assign(new Error('再生するBGMを選択してください'), { statusCode: 409 })
+      const runtime = await orchestrator.getStatus()
+      const profile = runtime.selectedGameId ? await store.getProfile(runtime.selectedGameId) : null
+      await obs.playBgm(config, bgm.trackPath(track), profile?.audio.bgmDb ?? -25, action === 'restart', profile?.bgm.playbackMode ?? 'loop')
+    } else {
+      await obs.controlBgm(config, action)
+    }
+    return { ...library, playback: await obs.bgmPlaybackStatus(config) }
+  })
 })
 app.delete<{ Params: { id: string } }>('/api/bgm/:id', async (request) => {
-  const config = await store.getConfig()
-  const library = await bgm.getLibrary()
-  let cleared = true
-  if (library.selectedTrackId === request.params.id) {
-    try {
-      await obs.clearBgm(config)
-    } catch (error) {
-      cleared = false
-      await logger.write('bgm.delete-clear-failed', { trackId: request.params.id, message: error instanceof Error ? error.message : String(error) })
+  return orchestrator.runExclusiveLocalOperation(async () => {
+    const config = await store.getConfig()
+    const library = await bgm.getLibrary()
+    let cleared = true
+    if (library.selectedTrackId === request.params.id) {
+      try {
+        await obs.clearBgm(config)
+      } catch (error) {
+        cleared = false
+        await logger.write('bgm.delete-clear-failed', { trackId: request.params.id, message: error instanceof Error ? error.message : String(error) })
+      }
     }
-  }
-  const removed = await bgm.removeTrack(request.params.id, { retainFile: !cleared })
-  await logger.write('bgm.removed', { trackId: removed.removed.id, filename: removed.removed.originalName })
-  return { ...removed.library, playback: await obs.bgmPlaybackStatus(config) }
+    const removed = await bgm.removeTrack(request.params.id, { retainFile: !cleared })
+    for (const profile of await store.listProfiles()) {
+      if (profile.bgm.trackId !== request.params.id) continue
+      const saved = await store.saveProfile({ ...profile, bgm: { ...profile.bgm, trackId: null, autoPlay: false } })
+      orchestrator.syncSavedProfile(saved)
+    }
+    await logger.write('bgm.removed', { trackId: removed.removed.id, filename: removed.removed.originalName })
+    return { ...removed.library, playback: await obs.bgmPlaybackStatus(config) }
+  })
 })
 app.get('/api/templates/common', async () => (await store.getConfig()).commonTemplate)
 app.put<{ Body: unknown }>('/api/templates/common', async (request) => {
@@ -210,8 +230,25 @@ app.get<{ Params: { requestId: string } }>('/api/oauth/twitch/device/:requestId'
 app.get('/api/profiles', async () => store.listProfiles())
 app.post('/api/profiles', async (request) => {
   await orchestrator.assertNotStreaming()
-  const profile = await commonTemplates.withExclusiveAccess(() => store.saveProfile(GameProfileSchema.parse(request.body)))
-  await orchestrator.invalidateProfile(profile.id)
+  const next = GameProfileSchema.parse(request.body)
+  const previous = await store.getProfile(next.id)
+  const profile = await commonTemplates.withExclusiveAccess(() => store.saveProfile(next))
+  const platformSettingsChanged = previous !== null && JSON.stringify({
+    displayName: previous.displayName,
+    presentation: previous.presentation,
+    youtube: previous.youtube,
+    twitch: previous.twitch,
+    nextPartNumber: previous.state.nextPartNumber,
+    thumbnailAutoApply: previous.state.thumbnailAutoApply,
+  }) !== JSON.stringify({
+    displayName: profile.displayName,
+    presentation: profile.presentation,
+    youtube: profile.youtube,
+    twitch: profile.twitch,
+    nextPartNumber: profile.state.nextPartNumber,
+    thumbnailAutoApply: profile.state.thumbnailAutoApply,
+  })
+  orchestrator.syncSavedProfile(profile, platformSettingsChanged)
   return profile
 })
 app.delete<{ Params: { id: string } }>('/api/profiles/:id', async (request, reply) => {
@@ -228,7 +265,7 @@ app.post<{ Params: { id: string }; Body: { mime: string; data: string; filename?
   if (!request.body?.data || !request.body?.mime) throw Object.assign(new Error('画像がありません'), { statusCode: 400 })
   const originalName = typeof request.body.filename === 'string' ? path.basename(request.body.filename).trim().slice(0, 255) || undefined : undefined
   const saved = await store.saveThumbnail(profile, Buffer.from(request.body.data, 'base64'), request.body.mime, originalName)
-  await orchestrator.invalidateProfile(profile.id)
+  orchestrator.syncSavedProfile(saved, true)
   await logger.write('thumbnail.saved', { gameId: profile.id, filename: saved.state.thumbnailFilename })
   return saved
 })
@@ -238,7 +275,7 @@ app.delete<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (req
   const profile = await store.getProfile(request.params.id)
   if (!profile) return reply.status(404).send({ error: 'Profile not found' })
   const saved = await store.removeThumbnail(profile)
-  await orchestrator.invalidateProfile(profile.id)
+  orchestrator.syncSavedProfile(saved, true)
   await logger.write('thumbnail.removed', { gameId: profile.id })
   return saved
 })
@@ -251,13 +288,15 @@ app.get<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (reques
   return reply.type(extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg').send(await readFile(filename))
 })
 
-app.post<{ Body: { gameId: string; captureMethod?: string } }>('/api/select', async (request) => {
+app.post<{ Body: { gameId: string; captureMethod?: string; preparePlatforms?: boolean } }>('/api/select', async (request) => {
   await orchestrator.assertNotStreaming()
   const override = request.body.captureMethod ? CaptureMethodSchema.parse(request.body.captureMethod) : undefined
-  return orchestrator.select(GameIdSchema.parse(request.body.gameId), override)
+  return orchestrator.select(GameIdSchema.parse(request.body.gameId), override, request.body.preparePlatforms !== false)
 })
 app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
+app.post('/api/recording/start', async () => ({ ok: true, warnings: await orchestrator.startRecordingOnly() }))
+app.post('/api/recording/stop', async () => ({ ok: true, ...await orchestrator.stopRecordingOnly() }))
 app.post<{ Body: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } }>('/api/twitch/output-test', async (request) => {
   const result = await orchestrator.testTwitchOutput(request.body ?? {})
   await logger.write('twitch.output_test.completed', {
@@ -265,7 +304,12 @@ app.post<{ Body: { durationMs?: number; includeSecondary?: boolean; includeRecor
     bytesSent: result.bytesSent,
     totalFrames: result.totalFrames,
     skippedFrames: result.skippedFrames,
+    measuredFps: result.measuredFps,
     congestion: result.congestion,
+    secondary: result.secondary,
+    recording: result.recording,
+    replayBuffer: result.replayBuffer,
+    obs: result.obs,
   })
   return result
 })

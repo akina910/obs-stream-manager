@@ -255,12 +255,13 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .selection-summary-actions button:hover, .selection-summary-actions button:focus-visible { background: rgba(111, 141, 255, .15); outline: none; }
 .empty-tile { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 1.5px dashed var(--border-strong); border-radius: 9px; color: var(--dim); }
 .control-actions { display: flex; align-items: stretch; gap: 8px; }
-.start-button, .stop-button, .clip-button { appearance: none; min-height: 44px; padding: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 10px; cursor: pointer; font-weight: 700; }
+.start-button, .stop-button, .record-only-button, .clip-button { appearance: none; min-height: 44px; padding: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 10px; cursor: pointer; font-weight: 700; }
 .start-button, .stop-button { flex: 2; border: 0; font-size: 14px; }
 .start-button { color: var(--bg); background: var(--accent); }
 .stop-button { color: #fff; background: var(--danger); }
+.record-only-button { flex: 1.35; border: 1px solid #ef5a68; color: #ff8f99; background: #281a24; font-size: 13px; white-space: nowrap; }
 .clip-button { flex: 1; border: 1px solid var(--border-strong); color: var(--text-sub); background: #1a2032; font-size: 12.5px; white-space: nowrap; }
-.start-button:disabled, .stop-button:disabled, .clip-button:disabled { opacity: .42; cursor: not-allowed; }
+.start-button:disabled, .stop-button:disabled, .record-only-button:disabled, .clip-button:disabled { opacity: .42; cursor: not-allowed; }
 .control-reason { color: var(--muted); font-size: 11px; text-align: center; }
 .thumbnail-register-link { align-self: flex-start; padding: 2px 0; display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; }
 

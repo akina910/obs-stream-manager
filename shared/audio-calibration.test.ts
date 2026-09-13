@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AUDIO_CALIBRATION_TARGETS,
   analyzeAudioSamples,
+  normalizeMicrophoneGain,
   percentile,
   recommendInputVolume,
   recommendMicrophoneGain,
@@ -9,6 +10,16 @@ import {
 } from './audio-calibration.js'
 
 describe('audio calibration math', () => {
+  it('caps unmeasured legacy positive-fader profiles before the managed limiter chain', () => {
+    expect(normalizeMicrophoneGain(20, 15)).toEqual({
+      appliedDb: 0,
+      appliedBoostDb: 24,
+      constrainedByFader: false,
+      constrainedByBoost: true,
+    })
+    expect(normalizeMicrophoneGain(0, 30).appliedBoostDb).toBe(30)
+  })
+
   it('uses robust percentiles instead of a single transient sample', () => {
     expect(percentile([-30, -20, -10, 0], 0.75)).toBe(-7.5)
     const samples: AudioMeterSample[] = [
@@ -67,6 +78,16 @@ describe('audio calibration math', () => {
     expect(recommendation.constrainedByFader).toBe(false)
   })
 
+  it('recognizes a very quiet microphone from its pre-fader input peak', () => {
+    const samples = Array.from({ length: 40 }, () => ({ magnitudeDb: -78, peakDb: -74, inputPeakDb: -52 }))
+
+    expect(analyzeAudioSamples(samples, 8, -75)).toMatchObject({
+      activeSampleCount: 40,
+      referenceDb: -78,
+      peakDb: -74,
+    })
+  })
+
   it('still caps the OBS fader at a safe +20 dB', () => {
     const recommendation = recommendInputVolume(15, {
       sampleCount: 80,
@@ -78,7 +99,7 @@ describe('audio calibration math', () => {
     expect(recommendation.constrainedByFader).toBe(true)
   })
 
-  it('moves microphone makeup into the managed boost after the fader reaches +20 dB', () => {
+  it('moves positive microphone makeup before the limiter and respects the gain-filter ceiling', () => {
     const recommendation = recommendMicrophoneGain(18, 0, {
       sampleCount: 80,
       activeSampleCount: 72,
@@ -86,11 +107,32 @@ describe('audio calibration math', () => {
       peakDb: -22,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
-      appliedDb: 20,
-      appliedBoostDb: 14,
-      adjustmentDb: 16,
-      faderAdjustmentDb: 2,
-      boostAdjustmentDb: 14,
+      appliedDb: 0,
+      appliedBoostDb: 30,
+      adjustmentDb: 12,
+      faderAdjustmentDb: -18,
+      boostAdjustmentDb: 30,
+      constrainedByFader: true,
+      constrainedByBoost: true,
+    })
+  })
+
+  it('boosts the quiet real-stream microphone reading instead of lowering its +18 dB fader', () => {
+    // 2026-07-22 production calibration finished at -34 dB reference / -13 dB
+    // peak and the old implementation incorrectly reduced the fader to +3 dB.
+    const recommendation = recommendMicrophoneGain(18, 0, {
+      sampleCount: 80,
+      activeSampleCount: 72,
+      referenceDb: -34,
+      peakDb: -13,
+    }, AUDIO_CALIBRATION_TARGETS.microphone)
+    expect(recommendation).toMatchObject({
+      appliedDb: 0,
+      appliedBoostDb: 28,
+      adjustmentDb: 10,
+      faderAdjustmentDb: -18,
+      boostAdjustmentDb: 28,
+      constrainedByPeak: true,
       constrainedByFader: true,
       constrainedByBoost: false,
     })
@@ -104,26 +146,26 @@ describe('audio calibration math', () => {
       peakDb: -1,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
-      appliedDb: 5,
-      appliedBoostDb: 0,
+      appliedDb: 0,
+      appliedBoostDb: 5,
       adjustmentDb: -8,
-      faderAdjustmentDb: -5,
-      boostAdjustmentDb: -3,
+      faderAdjustmentDb: -10,
+      boostAdjustmentDb: 2,
       constrainedByPeak: false,
     })
   })
 
   it('reports the managed boost ceiling separately from the fader ceiling', () => {
-    const recommendation = recommendMicrophoneGain(20, 22, {
+    const recommendation = recommendMicrophoneGain(0, 29, {
       sampleCount: 80,
       activeSampleCount: 72,
       referenceDb: -40,
       peakDb: -30,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
-      appliedDb: 20,
-      appliedBoostDb: 24,
-      adjustmentDb: 2,
+      appliedDb: 0,
+      appliedBoostDb: 30,
+      adjustmentDb: 1,
       constrainedByFader: true,
       constrainedByBoost: true,
     })
@@ -153,14 +195,31 @@ describe('audio calibration math', () => {
       peakDb: -7,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
-      appliedDb: 1,
-      appliedBoostDb: 0,
-      adjustmentDb: 1,
+      appliedDb: 0,
+      appliedBoostDb: 4,
+      adjustmentDb: 4,
       constrainedByPeak: true,
     })
   })
 
-  it('moves a legacy fader value above +20 dB into managed boost without changing total gain', () => {
+  it('never turns a needed microphone boost into attenuation because of a short peak', () => {
+    const recommendation = recommendMicrophoneGain(18, 0, {
+      sampleCount: 80,
+      activeSampleCount: 72,
+      referenceDb: -34,
+      peakDb: -1,
+    }, AUDIO_CALIBRATION_TARGETS.microphone)
+
+    expect(recommendation).toMatchObject({
+      appliedDb: 0,
+      appliedBoostDb: 18,
+      adjustmentDb: 0,
+      constrainedByPeak: true,
+      withinTarget: false,
+    })
+  })
+
+  it('moves a legacy positive fader into managed boost without changing total gain', () => {
     const recommendation = recommendMicrophoneGain(25, 0, {
       sampleCount: 80,
       activeSampleCount: 72,
@@ -168,26 +227,26 @@ describe('audio calibration math', () => {
       peakDb: -6,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
-      appliedDb: 20,
-      appliedBoostDb: 5,
+      appliedDb: 0,
+      appliedBoostDb: 25,
       adjustmentDb: 0,
-      faderAdjustmentDb: -5,
-      boostAdjustmentDb: 5,
+      faderAdjustmentDb: -25,
+      boostAdjustmentDb: 25,
       constrainedByFader: true,
       withinTarget: true,
     })
   })
 
   it('reports normalization from an out-of-range existing boost against its actual value', () => {
-    const recommendation = recommendMicrophoneGain(20, 26, {
+    const recommendation = recommendMicrophoneGain(0, 32, {
       sampleCount: 80,
       activeSampleCount: 72,
       referenceDb: -18,
       peakDb: -6,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
-      appliedDb: 20,
-      appliedBoostDb: 24,
+      appliedDb: 0,
+      appliedBoostDb: 30,
       adjustmentDb: -2,
       boostAdjustmentDb: -2,
       constrainedByBoost: true,
@@ -200,7 +259,7 @@ describe('audio calibration math', () => {
       sampleCount: 80,
       activeSampleCount: 72,
       referenceDb: -23,
-      peakDb: -6.2,
+      peakDb: -3.2,
     }, AUDIO_CALIBRATION_TARGETS.microphone)
     expect(recommendation).toMatchObject({
       adjustmentDb: 0,

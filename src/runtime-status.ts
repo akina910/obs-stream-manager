@@ -3,11 +3,12 @@ import type { RuntimeStatus } from '../shared/contracts'
 export type BroadcastStatus = {
   label: string
   detail: string
+  detailValues?: Record<string, string | number>
   tone: 'live' | 'sending' | 'stopped' | 'unknown'
 }
 
 export type RuntimeOutputStatus = {
-  key: 'obs' | 'youtube' | 'twitch' | 'recording' | 'replay' | 'source' | 'vertical'
+  key: 'obs' | 'youtube' | 'twitch' | 'recording' | 'replay' | 'vertical'
   label: string
   state: string
   active: boolean
@@ -15,7 +16,7 @@ export type RuntimeOutputStatus = {
   detail?: string
 }
 
-export function getBroadcastStatus(status: RuntimeStatus): BroadcastStatus {
+export function getBroadcastStatus(status: RuntimeStatus, selectedGameName?: string | null): BroadcastStatus {
   const livePlatforms = ([['YouTube', status.platforms.youtube], ['Twitch', status.platforms.twitch]] as const)
     .filter(([, platform]) => platform.state === 'live')
     .map(([name]) => name)
@@ -29,6 +30,11 @@ export function getBroadcastStatus(status: RuntimeStatus): BroadcastStatus {
   }
   if ([status.platforms.youtube.state, status.platforms.twitch.state].some((state) => state === 'stopping')) {
     return { label: '外部配信終了中', detail: '終了確認中', tone: 'sending' }
+  }
+  if (status.recordingOnly) {
+    return selectedGameName?.trim()
+      ? { label: '録画専用モード', detail: '配信停止・{game}録画中', detailValues: { game: selectedGameName.trim() }, tone: 'sending' }
+      : { label: '録画専用モード', detail: '配信停止・選択中ゲーム録画中', tone: 'sending' }
   }
   return { label: '配信停止中', detail: status.busy ? '切替処理中' : 'OFFLINE', tone: 'stopped' }
 }
@@ -56,9 +62,8 @@ export function getRuntimeOutputs(status: RuntimeStatus): RuntimeOutputStatus[] 
     { key: 'obs', label: 'OBS送信', state: !status.obsConnected ? '未接続' : status.streaming ? '送信中' : '停止', active: status.streaming, tone: status.streaming ? 'active' : status.obsConnected ? 'inactive' : 'error' },
     { key: 'youtube', label: 'YouTube', state: platformStateLabel(status.platforms.youtube.state), active: status.platforms.youtube.state === 'live', tone: platformTone(status.platforms.youtube.state), detail: status.platforms.youtube.detail },
     { key: 'twitch', label: 'Twitch', state: platformStateLabel(status.platforms.twitch.state), active: status.platforms.twitch.state === 'live', tone: platformTone(status.platforms.twitch.state), detail: status.platforms.twitch.detail },
-    { key: 'recording', label: '録画', state: status.recording ? '録画中' : '停止', active: status.recording, tone: status.recording ? 'active' : 'inactive' },
+    { key: 'recording', label: status.recordingOnly ? '録画のみ' : '録画', state: status.recording ? '録画中' : '停止', active: status.recording, tone: status.recording ? 'active' : 'inactive' },
     { key: 'replay', label: 'リプレイ', state: status.replayBuffer ? '動作中' : '停止', active: status.replayBuffer, tone: status.replayBuffer ? 'active' : 'inactive' },
-    { key: 'source', label: '素材', state: status.sourceRecord ? '録画中' : '停止', active: status.sourceRecord, tone: status.sourceRecord ? 'active' : 'inactive' },
     { key: 'vertical', label: '縦録画', state: status.verticalRecording ? '録画中' : '停止', active: status.verticalRecording, tone: status.verticalRecording ? 'active' : 'inactive' },
   ]
 }

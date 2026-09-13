@@ -11,8 +11,8 @@ export type AudioCalibrationTarget = {
 }
 
 export const AUDIO_CALIBRATION_TARGETS: Record<AudioCalibrationRole, AudioCalibrationTarget> = {
-  microphone: { referenceDb: -18, peakCeilingDb: -6, toleranceDb: 2.5, required: true },
-  game: { referenceDb: -24, peakCeilingDb: -10, toleranceDb: 3, required: true },
+  microphone: { referenceDb: -18, peakCeilingDb: -3, toleranceDb: 2.5, required: true },
+  game: { referenceDb: -24, peakCeilingDb: -10, toleranceDb: 3, required: false },
   discord: { referenceDb: -21, peakCeilingDb: -8, toleranceDb: 3, required: false },
   bgm: { referenceDb: -30, peakCeilingDb: -14, toleranceDb: 3, required: false },
 }
@@ -20,6 +20,7 @@ export const AUDIO_CALIBRATION_TARGETS: Record<AudioCalibrationRole, AudioCalibr
 export type AudioMeterSample = {
   magnitudeDb: number
   peakDb: number
+  inputPeakDb?: number
 }
 
 export type AudioMeasurement = {
@@ -88,6 +89,44 @@ export type AudioCalibrationResult = {
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value))
 const roundHalfDb = (value: number) => Math.round(value * 2) / 2
+export const MICROPHONE_FADER_MIN_DB = -30
+export const MICROPHONE_FADER_MAX_DB = 0
+export const MICROPHONE_BOOST_MAX_DB = 30
+export const LEGACY_MICROPHONE_TOTAL_MAX_DB = 24
+
+export type NormalizedMicrophoneGain = {
+  appliedDb: number
+  appliedBoostDb: number
+  constrainedByFader: boolean
+  constrainedByBoost: boolean
+}
+
+export function normalizeMicrophoneGain(currentDb: number, currentBoostDb: number): NormalizedMicrophoneGain {
+  const roundedCurrentDb = roundHalfDb(currentDb)
+  const totalDb = roundHalfDb(roundedCurrentDb + roundHalfDb(currentBoostDb))
+  if (totalDb >= 0) {
+    // Old profiles could store a positive OBS fader and an additional managed
+    // gain at the same time. That combination was never measured after the
+    // gain moved in front of the compressor/limiter, so do not silently turn a
+    // legacy +35 dB profile into +30 dB. A real calibration may still prove and
+    // save up to the full managed +30 dB range with a non-positive fader.
+    const maximumBoostDb = roundedCurrentDb > MICROPHONE_FADER_MAX_DB && roundHalfDb(currentBoostDb) > 0
+      ? LEGACY_MICROPHONE_TOTAL_MAX_DB
+      : MICROPHONE_BOOST_MAX_DB
+    return {
+      appliedDb: MICROPHONE_FADER_MAX_DB,
+      appliedBoostDb: roundHalfDb(clamp(totalDb, 0, maximumBoostDb)),
+      constrainedByFader: false,
+      constrainedByBoost: totalDb > maximumBoostDb,
+    }
+  }
+  return {
+    appliedDb: roundHalfDb(clamp(totalDb, MICROPHONE_FADER_MIN_DB, MICROPHONE_FADER_MAX_DB)),
+    appliedBoostDb: 0,
+    constrainedByFader: totalDb < MICROPHONE_FADER_MIN_DB,
+    constrainedByBoost: false,
+  }
+}
 
 export function percentile(values: number[], ratio: number): number {
   if (!values.length) throw new Error('percentile requires at least one value')
@@ -99,9 +138,11 @@ export function percentile(values: number[], ratio: number): number {
   return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower)
 }
 
-export function analyzeAudioSamples(samples: AudioMeterSample[], minimumActiveSamples = 8): AudioMeasurement | null {
+export function analyzeAudioSamples(samples: AudioMeterSample[], minimumActiveSamples = 8, activityFloorDb = -60): AudioMeasurement | null {
   const usable = samples.filter(({ magnitudeDb, peakDb }) => Number.isFinite(magnitudeDb) && Number.isFinite(peakDb))
-  const active = usable.filter(({ magnitudeDb, peakDb }) => magnitudeDb > -60 || peakDb > -55)
+  const active = usable.filter(({ magnitudeDb, peakDb, inputPeakDb }) => magnitudeDb > activityFloorDb
+    || peakDb > activityFloorDb + 5
+    || (Number.isFinite(inputPeakDb) && (inputPeakDb as number) > activityFloorDb + 5))
   if (active.length < minimumActiveSamples) return null
   return {
     sampleCount: usable.length,
@@ -122,7 +163,7 @@ export function recommendInputVolume(
   const alreadyWithinTarget = Math.abs(levelDifference) <= target.toleranceDb && peakHeadroom >= -1
   if (alreadyWithinTarget) {
     return {
-      appliedDb: roundHalfDb(currentDb),
+      appliedDb: currentDb,
       adjustmentDb: 0,
       constrainedByPeak: false,
       constrainedByFader: false,
@@ -152,17 +193,16 @@ export function recommendMicrophoneGain(
   currentBoostDb: number,
   measurement: AudioMeasurement,
   target: AudioCalibrationTarget,
-  maximumAdjustmentDb = 30,
+  maximumAdjustmentDb = 44,
 ): AudioMicrophoneGainRecommendation {
   const levelDifference = target.referenceDb - measurement.referenceDb
   const peakHeadroom = target.peakCeilingDb - measurement.peakDb
   const alreadyWithinTarget = Math.abs(levelDifference) <= target.toleranceDb && peakHeadroom >= -1
   const roundedCurrentDb = roundHalfDb(currentDb)
   const roundedCurrentBoostDb = roundHalfDb(currentBoostDb)
-  const normalizedDb = roundHalfDb(clamp(roundedCurrentDb, -30, 20))
-  const faderOverflowDb = roundHalfDb(roundedCurrentDb - normalizedDb)
-  const requestedNormalizedBoostDb = roundedCurrentBoostDb + faderOverflowDb
-  const normalizedBoostDb = roundHalfDb(clamp(requestedNormalizedBoostDb, 0, 24))
+  const normalized = normalizeMicrophoneGain(roundedCurrentDb, roundedCurrentBoostDb)
+  const normalizedDb = normalized.appliedDb
+  const normalizedBoostDb = normalized.appliedBoostDb
   const normalizationFaderAdjustmentDb = roundHalfDb(normalizedDb - roundedCurrentDb)
   const normalizationBoostAdjustmentDb = roundHalfDb(normalizedBoostDb - roundedCurrentBoostDb)
   if (alreadyWithinTarget) {
@@ -173,34 +213,41 @@ export function recommendMicrophoneGain(
       faderAdjustmentDb: normalizationFaderAdjustmentDb,
       boostAdjustmentDb: normalizationBoostAdjustmentDb,
       constrainedByPeak: false,
-      constrainedByFader: normalizationFaderAdjustmentDb !== 0,
-      constrainedByBoost: requestedNormalizedBoostDb !== normalizedBoostDb,
+      constrainedByFader: normalizationFaderAdjustmentDb !== 0 || normalized.constrainedByFader,
+      constrainedByBoost: normalized.constrainedByBoost,
       withinTarget: true,
     }
   }
 
-  const peakSafeDifference = Math.min(levelDifference, peakHeadroom)
+  // A short peak above the target must not turn a required average-level boost
+  // into attenuation. The managed compressor and -2 dB limiter contain those
+  // transients; hold the level when no safe boost remains and report the peak
+  // constraint instead of making an already quiet microphone quieter.
+  const peakSafeDifference = levelDifference > 0
+    ? Math.max(0, Math.min(levelDifference, peakHeadroom))
+    : Math.min(levelDifference, peakHeadroom)
   const requestedAdjustment = roundHalfDb(clamp(peakSafeDifference, -maximumAdjustmentDb, maximumAdjustmentDb))
   let nextDb = normalizedDb
   let nextBoostDb = normalizedBoostDb
-  let constrainedByFader = normalizationFaderAdjustmentDb !== 0
-  let constrainedByBoost = requestedNormalizedBoostDb !== normalizedBoostDb
+  let constrainedByFader = normalizationFaderAdjustmentDb !== 0 || normalized.constrainedByFader
+  let constrainedByBoost = normalized.constrainedByBoost
 
   if (requestedAdjustment > 0) {
-    const faderIncrease = Math.min(requestedAdjustment, Math.max(0, 20 - nextDb))
+    const boostIncrease = Math.min(requestedAdjustment, Math.max(0, MICROPHONE_BOOST_MAX_DB - nextBoostDb))
+    nextBoostDb = roundHalfDb(nextBoostDb + boostIncrease)
+    let remaining = roundHalfDb(requestedAdjustment - boostIncrease)
+    constrainedByBoost ||= remaining > 0
+    const faderIncrease = Math.min(remaining, Math.max(0, MICROPHONE_FADER_MAX_DB - nextDb))
     nextDb = roundHalfDb(nextDb + faderIncrease)
-    const remaining = roundHalfDb(requestedAdjustment - faderIncrease)
+    remaining = roundHalfDb(remaining - faderIncrease)
     constrainedByFader ||= remaining > 0
-    const requestedBoostDb = nextBoostDb + remaining
-    constrainedByBoost ||= requestedBoostDb > 24
-    nextBoostDb = roundHalfDb(Math.min(24, requestedBoostDb))
   } else if (requestedAdjustment < 0) {
     const boostReduction = Math.max(requestedAdjustment, -nextBoostDb)
     nextBoostDb = roundHalfDb(nextBoostDb + boostReduction)
     const remaining = roundHalfDb(requestedAdjustment - boostReduction)
     const requestedFaderDb = nextDb + remaining
     constrainedByFader ||= requestedFaderDb < -30
-    nextDb = roundHalfDb(clamp(requestedFaderDb, -30, 20))
+    nextDb = roundHalfDb(clamp(requestedFaderDb, MICROPHONE_FADER_MIN_DB, MICROPHONE_FADER_MAX_DB))
   }
 
   const faderAdjustmentDb = roundHalfDb(nextDb - roundedCurrentDb)

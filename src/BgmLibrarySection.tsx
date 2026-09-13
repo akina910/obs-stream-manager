@@ -125,7 +125,7 @@ export function BgmLibrarySection({ obsConnected }: { obsConnected: boolean }) {
         <button className="bgm-primary-control" type="button" disabled={busy || !obsConnected || !selected} onClick={() => selectedPlaybackState === 'playing' ? void attempt(() => api.controlBgm('pause')) : playSelected()}>{selectedPlaybackState === 'playing' ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}{t(selectedPlaybackState === 'playing' ? '一時停止' : '再生')}</button>
         <button className="bgm-square-control" type="button" aria-label={t('停止')} disabled={busy || !obsConnected || !activeTrack || library?.playback.state === 'stopped'} onClick={() => void attempt(() => api.controlBgm('stop'))}><Square size={12} fill="currentColor" /></button>
       </div>
-      <p>{t('全シーン共通のメディアソースで再生します。曲の行は選択のみ。再生は操作ボタンから行います。')}</p>
+      <p>{t('ここではストック曲を試聴できます。配信で使う曲とループ設定は各ゲームの設定に保存され、ゲーム切替時に前の設定を停止して入れ替えます。')}</p>
     </section>
 
     <div className="bgm-upload-row"><label className={`secondary-button file-button ${busy || uploading ? 'disabled' : ''}`}><Upload size={14} />{uploading ? t('アップロード中…') : t('曲を追加')}<input hidden type="file" disabled={busy || uploading} accept=".mp3,.wav,.ogg,.flac,.m4a,audio/mpeg,audio/wav,audio/ogg,audio/flac,audio/mp4" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); event.currentTarget.value = '' }} /></label><span>MP3 / WAV / OGG / FLAC / M4A · {t('1曲50MBまで')}</span></div>
