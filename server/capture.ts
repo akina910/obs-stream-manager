@@ -3,6 +3,7 @@ import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import type { CaptureMethod, GameProfile } from '../shared/contracts.js'
+import { starterProfiles } from './defaults.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -54,6 +55,30 @@ export type RunningGameMatch = {
   method: CaptureMethod
   executableName: string
   windowTitle?: string
+}
+
+type JavaGameWindow = { executableName: string; windowTitle: string }
+
+const javaExecutables = new Set(['java.exe', 'javaw.exe'])
+
+export function isMinecraftGameWindowTitle(title: string): boolean {
+  return /^Minecraft\*?(?:\s+\d(?:\.\d+)*(?:\b|$)|\s*$)/i.test(title)
+}
+
+function configuredRunningMatch(profile: GameProfile, processes: Set<string>, javaWindows: JavaGameWindow[]): Pick<RunningGameMatch, 'executableName' | 'windowTitle'> | undefined {
+  const names = profile.capture.executableNames.map((name) => name.trim().toLowerCase()).filter(Boolean)
+  if (profile.id === 'minecraft' && names.some((name) => javaExecutables.has(name))) names.push('java.exe', 'javaw.exe')
+  for (const executableName of names) {
+    if (!processes.has(executableName)) continue
+    if (profile.id === 'minecraft' && javaExecutables.has(executableName)) {
+      const window = javaWindows.find((item) => item.executableName === executableName
+        && isMinecraftGameWindowTitle(item.windowTitle))
+      if (window) return window
+      continue
+    }
+    return { executableName }
+  }
+  return undefined
 }
 
 function wait(milliseconds: number): Promise<void> {
@@ -146,6 +171,26 @@ export class CaptureDetector {
       .filter((title): title is string => Boolean(title && title !== 'N/A' && title !== 'OleMainThreadWndName'))
   }
 
+  async runningJavaGameWindows(): Promise<JavaGameWindow[]> {
+    if (process.platform !== 'win32') return []
+    const { stdout } = await execFileAsync(windowsTasklistExecutable(), [
+      '/v', '/fi', 'imagename eq java*.exe', '/fo', 'csv', '/nh',
+    ], { windowsHide: true })
+    return stdout.split(/\r?\n/).flatMap((line) => {
+      const columns = parseCsvLine(line)
+      const executableName = columns[0]?.trim().toLowerCase()
+      const windowTitle = columns[8]?.trim()
+      return executableName && javaExecutables.has(executableName) && windowTitle
+        ? [{ executableName, windowTitle }]
+        : []
+    })
+  }
+
+  private async minecraftWindows(profiles: GameProfile[], processes: Set<string>): Promise<JavaGameWindow[]> {
+    if (!profiles.some(({ id }) => id === 'minecraft') || ![...javaExecutables].some((name) => processes.has(name))) return []
+    return this.runningJavaGameWindows().catch(() => [])
+  }
+
   private async safeRunningProcesses(): Promise<string[]> {
     try {
       const processes = await this.runningProcesses()
@@ -170,7 +215,7 @@ export class CaptureDetector {
     const cached = this.installExecutables.get(cacheKey)
     if (cached && cached.expiresAt > Date.now()) return cached.names
 
-    const names = [...new Set((await readdir(installDirectory, { recursive: true, withFileTypes: true }))
+    const names = [...new Set((await readdir(installDirectory, { recursive: true, withFileTypes: true }).catch(() => []))
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.exe'))
       .map((entry) => entry.name.toLowerCase())
       .filter((name) => !ignoredInstallExecutables.has(name) && !/^unins\d*\.exe$/i.test(name)))]
@@ -180,8 +225,7 @@ export class CaptureDetector {
 
   private async detectRunning(profile: GameProfile): Promise<{ localRunning: boolean; gfnRunning: boolean; gfnWindowTitle?: string }> {
     const processes = new Set(await this.safeRunningProcesses())
-    const configuredExecutables = profile.capture.executableNames.map((name) => name.toLowerCase())
-    const configuredRunning = configuredExecutables.some((name) => processes.has(name))
+    const configuredRunning = Boolean(configuredRunningMatch(profile, processes, await this.minecraftWindows([profile], processes)))
     const installedRunning = configuredRunning
       ? false
       : (await this.installedExecutableNames(profile).catch(() => [])).some((name) => processes.has(name))
@@ -200,19 +244,26 @@ export class CaptureDetector {
     const processes = new Set((await this.safeRunningProcesses())
       .map((name) => name.trim().toLowerCase())
       .filter(Boolean))
+    if (!processes.size) return null
     const candidates: Array<RunningGameMatch & { score: number }> = []
-    const eligible = profiles.filter(({ hidden, platformGroup }) => !hidden && platformGroup !== 'switch')
+    const existingIds = new Set(profiles.map(({ id }) => id))
+    const eligible = [
+      ...profiles,
+      ...starterProfiles.filter(({ id, platformGroup }) => platformGroup !== 'switch' && !existingIds.has(id)).map((profile) => structuredClone(profile)),
+    ].filter(({ hidden, platformGroup }) => !hidden && platformGroup !== 'switch')
+    const javaWindows = await this.minecraftWindows(eligible, processes)
 
     for (const profile of eligible) {
-      const configured = profile.capture.executableNames
-        .map((name) => name.trim().toLowerCase())
-        .find((name) => name && processes.has(name))
+      const configured = configuredRunningMatch(profile, processes, javaWindows)
       if (!configured) continue
       const method = profile.capture.preferred === 'auto' ? 'local' : profile.capture.preferred
+      const matchedProfile = profile.capture.executableNames.some((name) => name.toLowerCase() === configured.executableName)
+        ? profile
+        : { ...profile, capture: { ...profile.capture, executableNames: [...profile.capture.executableNames, configured.executableName] } }
       candidates.push({
-        profile,
+        profile: matchedProfile,
         method,
-        executableName: configured,
+        ...configured,
         score: 100 + (profile.id === preferredProfileId ? 1_000 : 0) + (profile.favorite ? 10 : 0),
       })
     }
@@ -233,21 +284,26 @@ export class CaptureDetector {
       }
     }
 
-    if (!candidates.length) {
-      for (const profile of eligible.filter(({ library }) => Boolean(library.installDirectory))) {
-        const installed = (await this.installedExecutableNames(profile).catch(() => []))
-          .map((name) => name.trim().toLowerCase())
-          .filter(Boolean)
-          .find((name) => processes.has(name))
-        if (!installed) continue
-        const method = profile.capture.preferred === 'auto' ? 'local' : profile.capture.preferred
-        candidates.push({
-          profile,
-          method,
-          executableName: installed,
-          score: 50 + (profile.id === preferredProfileId ? 1_000 : 0) + (profile.favorite ? 10 : 0),
-        })
-      }
+    const matchedProfileIds = new Set(candidates.map(({ profile }) => profile.id))
+    let bestCandidateScore = candidates.reduce((score, candidate) => Math.max(score, candidate.score), -Infinity)
+    for (const profile of eligible.filter(({ id, library }) => Boolean(library.installDirectory) && !matchedProfileIds.has(id))) {
+      const score = 50 + (profile.id === preferredProfileId ? 1_000 : 0) + (profile.favorite ? 10 : 0)
+      // Avoid scanning whole game installations when they cannot beat a known
+      // match. Equal scores still need the existing last-used tie breaker.
+      if (score < bestCandidateScore) continue
+      const installed = (await this.installedExecutableNames(profile).catch(() => []))
+        .map((name) => name.trim().toLowerCase())
+        .filter(Boolean)
+        .find((name) => processes.has(name))
+      if (!installed) continue
+      const method = profile.capture.preferred === 'auto' ? 'local' : profile.capture.preferred
+      candidates.push({
+        profile,
+        method,
+        executableName: installed,
+        score,
+      })
+      bestCandidateScore = Math.max(bestCandidateScore, score)
     }
 
     const selected = candidates.sort((left, right) => {

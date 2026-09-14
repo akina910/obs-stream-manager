@@ -8,6 +8,7 @@ import { normalizeMicrophoneGain, type AudioCalibrationResult } from '../shared/
 import { STOCK_BGM_INPUT_NAME } from '../shared/bgm.js'
 import { OBS_OUTPUT_PLUGIN_VENDOR } from '../shared/obs-output-plugin.js'
 import { AudioCalibrationService } from './audio-calibration.js'
+import { isMinecraftGameWindowTitle } from './capture.js'
 import { SecretStore } from './secrets.js'
 
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -53,7 +54,7 @@ export type BgmControlAction = 'play' | 'pause' | 'stop' | 'restart'
 export type ProfileApplyResult = { warnings: string[]; audioApplied: boolean }
 
 export function recordingGameName(profile: Pick<GameProfile, 'displayName' | 'presentation'>): string {
-  const preferred = profile.presentation.templateLabel.trim() || profile.displayName.trim()
+  const preferred = profile.displayName.trim()
   const sanitized = preferred
     .normalize('NFKC')
     .replace(/[<>:"/\\|?*]/g, '_')
@@ -124,6 +125,7 @@ export class ObsController {
   private readonly streamStateListeners = new Set<(active: boolean) => void>()
   private started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
   private recordingOnlyActive = false
+  private recordingGame: { id: string; name: string } | null = null
 
   constructor(
     private readonly secrets: SecretStore,
@@ -198,6 +200,7 @@ export class ObsController {
   private resetTransientOutputOwnership(): void {
     this.started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
     this.recordingOnlyActive = false
+    this.recordingGame = null
   }
 
   private captureSource(profile: GameProfile, method: CaptureMethod): string {
@@ -786,6 +789,37 @@ export class ObsController {
     }
   }
 
+  private async prepareLocalRecordingCapture(profile: GameProfile, sourceName: string, method: CaptureMethod): Promise<void> {
+    if (method !== 'local' && method !== 'window') return
+    const input = await this.obs.call('GetInputSettings', { inputName: sourceName })
+    if (input.inputKind !== 'game_capture' && input.inputKind !== 'window_capture') return
+    const executables = new Set(profile.capture.executableNames.map((name) => name.trim().toLowerCase()))
+    const windows = await this.obs.call('GetInputPropertiesListPropertyItems', { inputName: sourceName, propertyName: 'window' })
+    const candidates = windows.propertyItems.filter((item) => {
+      if (!item.itemEnabled || typeof item.itemValue !== 'string') return false
+      const executable = item.itemValue.match(/:([^:]+\.exe)$/i)?.[1]?.toLowerCase()
+      if (!executable || !executables.has(executable)) return false
+      // A Java executable can host many unrelated applications. OBS must expose
+      // a Minecraft window as well before it is used as a Minecraft recording.
+      const title = item.itemValue.split(':').slice(0, -2).join(':')
+      return !/^javaw?\.exe$/.test(executable) || isMinecraftGameWindowTitle(title)
+    })
+    const current = input.inputSettings as Record<string, unknown>
+    const target = candidates.find((item) => item.itemValue === current.window) ?? candidates[0]
+    if (!target || typeof target.itemValue !== 'string') {
+      throw new Error(`「${profile.displayName}」のゲーム画面をOBSで確認できません。ゲーム画面が開いてから録画してください`)
+    }
+    await this.obs.call('SetInputSettings', {
+      inputName: sourceName,
+      inputSettings: {
+        window: target.itemValue,
+        ...(input.inputKind === 'game_capture' ? { capture_mode: 'window' } : {}),
+        priority: /:javaw?\.exe$/i.test(target.itemValue) ? 0 : 2,
+      },
+      overlay: true,
+    })
+  }
+
   private async assertSelectedGameCapture(profile: GameProfile, selectedSource: string, method: CaptureMethod): Promise<void> {
     const input = await this.obs.call('GetInputSettings', { inputName: selectedSource }).catch(() => null)
     if (!input) {
@@ -801,12 +835,13 @@ export class ObsController {
     if (!supportedKinds.has(input.inputKind)) {
       throw new Error(`「${profile.displayName}」の録画ソース「${selectedSource}」が選択した取得方法と一致しません（現在: ${input.inputKind}）`)
     }
-    if (input.inputKind === 'game_capture' && profile.capture.executableNames.length) {
+    if (input.inputKind === 'game_capture' || input.inputKind === 'window_capture') {
       const settings = input.inputSettings as Record<string, unknown>
       const targetWindow = typeof settings.window === 'string' ? settings.window : ''
       const targetExecutable = targetWindow.match(/:([^:]+\.exe)$/i)?.[1]
-      if (settings.capture_mode === 'window' && targetExecutable
-        && !profile.capture.executableNames.some((name) => name.localeCompare(targetExecutable, undefined, { sensitivity: 'accent' }) === 0)) {
+      const expectedExecutables = method === 'geforce_now' ? ['GeForceNOW.exe'] : profile.capture.executableNames
+      if (targetExecutable && (input.inputKind === 'window_capture' || settings.capture_mode === 'window')
+        && !expectedExecutables.some((name) => name.localeCompare(targetExecutable, undefined, { sensitivity: 'accent' }) === 0)) {
         throw new Error(`ゲームキャプチャ「${selectedSource}」は「${profile.displayName}」ではなく${targetExecutable}を対象にしています`)
       }
     }
@@ -1643,13 +1678,14 @@ export class ObsController {
     captureWindowTitle?: string,
     knownCaptureSources: string[] = [],
     preserveMicrophoneMute = false,
+    recordingOnly = false,
   ): Promise<ProfileApplyResult> {
     await this.connect(config)
     const warnings: string[] = []
-    await this.configureManagedOutput(warnings)
+    if (!recordingOnly) await this.configureManagedOutput(warnings)
     if (await this.anyOutputActive()) {
       warnings.push('配信エンコーダー設定は出力中のため変更していません。配信・録画・リプレイ・Twitch副出力を停止してゲームを選び直すと反映されます')
-    } else {
+    } else if (!recordingOnly) {
       const primaryVideoBitrateKbps = this.primaryVideoBitrateKbps(config, profile)
       await this.configureStreamEncoder(primaryVideoBitrateKbps).catch((error) => {
         warnings.push(`配信エンコーダーをCBR ${primaryVideoBitrateKbps} kbps・look-ahead無効へ事前設定できませんでした: ${error instanceof Error ? error.message : String(error)}`)
@@ -2009,6 +2045,7 @@ export class ObsController {
       .catch(() => profile.obs.sceneName)
     let recordingStarted = false
     try {
+      await this.prepareLocalRecordingCapture(profile, selectedSource, method)
       await this.assertSelectedGameCapture(profile, selectedSource, method)
       await this.configureRecordingOnlyProfile(this.recordingDirectory(profile), recordingFilenameFormat(profile))
       await this.assertSelectedGameCapture(profile, selectedSource, method)
@@ -2020,10 +2057,14 @@ export class ObsController {
       const active = await this.obs.call('GetSourceActive', { sourceName: selectedSource }).catch(() => null)
       if (!active?.videoActive) throw new Error(`「${profile.displayName}」の録画ソース「${selectedSource}」に映像が来ていないため録画を開始しません`)
 
+      const recordingGame = { id: profile.id, name: profile.displayName.trim() }
+      await this.obs.call('SetProfileParameter', { parameterCategory: 'OBSStreamManager', parameterName: 'RecordingGameId', parameterValue: recordingGame.id })
+      await this.obs.call('SetProfileParameter', { parameterCategory: 'OBSStreamManager', parameterName: 'RecordingGameName', parameterValue: recordingGame.name })
       await this.obs.call('StartRecord')
       recordingStarted = true
       this.started.record = true
       this.recordingOnlyActive = true
+      this.recordingGame = recordingGame
       if (!await this.waitForRecordActive()) throw new Error('OBSが録画専用モードの開始を確認できませんでした')
       if (!await this.waitForRecordFrameProgress()) throw new Error('録画専用モードのMKV書き込みが進んでいません')
       return warnings
@@ -2034,6 +2075,7 @@ export class ObsController {
       }
       this.started.record = false
       this.recordingOnlyActive = false
+      this.recordingGame = null
       await this.restorePreviousRecordingProfile(warnings).catch((restoreError) => {
         warnings.push(`元のOBSプロファイルへ戻せませんでした: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
       })
@@ -2061,6 +2103,7 @@ export class ObsController {
     }
     this.started.record = false
     this.recordingOnlyActive = false
+    this.recordingGame = null
     const remuxedPath = outputPath ? await this.waitForRemuxedMp4(outputPath) : null
     if (outputPath?.toLowerCase().endsWith('.mkv') && !remuxedPath) warnings.push('録画MKVは保存されましたが、自動変換したMP4を30秒以内に確認できませんでした')
     await this.restorePreviousRecordingProfile(warnings).catch((error) => {
@@ -2228,7 +2271,14 @@ export class ObsController {
         this.obs.call('GetProfileList'),
       ])
       const recordingOnly = record.outputActive && (this.recordingOnlyActive || profiles.currentProfileName === recordingOnlyPreset.profileName)
-      return { obsConnected: true, streaming: streamOutputRunning(stream), streamElapsedMs: stream.outputDuration, recording: record.outputActive, recordingOnly, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy, twitchOutputPluginReady: twitchOutputPlugin.state === 'ready', twitchOutputPlugin }
+      if (!record.outputActive) this.recordingGame = null
+      if (recordingOnly && !this.recordingGame) {
+        const [id, name] = await Promise.all(['RecordingGameId', 'RecordingGameName'].map((parameterName) =>
+          this.obs.call('GetProfileParameter', { parameterCategory: 'OBSStreamManager', parameterName })
+            .then(({ parameterValue }) => parameterValue?.trim() || null).catch(() => null)))
+        if (id && name) this.recordingGame = { id, name }
+      }
+      return { obsConnected: true, streaming: streamOutputRunning(stream), streamElapsedMs: stream.outputDuration, recording: record.outputActive, recordingOnly, recordingGameId: recordingOnly ? this.recordingGame?.id ?? null : null, recordingGameName: recordingOnly ? this.recordingGame?.name ?? null : null, replayBuffer: replay.outputActive, sourceRecord: this.started.sourceRecord, verticalRecording: this.started.vertical, selectedGameId, captureMethod, currentScene: scene.currentProgramSceneName, warning, busy, twitchOutputPluginReady: twitchOutputPlugin.state === 'ready', twitchOutputPlugin }
     } catch {
       this.connected = false
       this.resetTransientOutputOwnership()

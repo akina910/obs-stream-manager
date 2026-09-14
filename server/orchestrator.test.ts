@@ -11,37 +11,59 @@ import type { BgmLibraryStore } from './bgm-library.js'
 import type { GameProfile } from '../shared/contracts.js'
 
 describe('StreamOrchestrator operation exclusion', () => {
-  it('starts and stops recording-only without touching YouTube or Twitch services', async () => {
-    const config = structuredClone(defaultConfig)
-    const profile = structuredClone(starterProfiles.find(({ id }) => id === 'ark_survival_ascended')!)
-    const store = { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore
+  function recordingHarness(profile = structuredClone(starterProfiles[0]), select = true) {
+    let config = structuredClone(defaultConfig)
+    const profiles = structuredClone(starterProfiles)
+    const store = {
+      getConfig: vi.fn(async () => config),
+      saveConfig: vi.fn(async (value) => { config = value; return value }),
+      listProfiles: vi.fn(async () => profiles),
+      getProfile: vi.fn(async (id: string) => profiles.find((candidate) => candidate.id === id) ?? null),
+      saveProfile: vi.fn(async (value: GameProfile) => {
+        const index = profiles.findIndex(({ id }) => id === value.id)
+        if (index < 0) profiles.push(value)
+        else profiles[index] = value
+        return value
+      }),
+    }
     const obs = {
+      status: vi.fn().mockResolvedValue({ obsConnected: true, streaming: false, recording: false, replayBuffer: false, sourceRecord: false, verticalRecording: false, twitchOutputPlugin: { outputActive: false } }),
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }),
+      preparePrimaryStream: vi.fn(),
       startRecordingOnly: vi.fn().mockResolvedValue([]),
-      stopRecordingOnly: vi.fn().mockResolvedValue({ warnings: [], outputPath: 'J:\\Recordings\\ASA\\capture.mkv', remuxedPath: 'J:\\Recordings\\ASA\\capture.mp4' }),
-    } as unknown as ObsController
-    const capture = { runningProcesses: vi.fn().mockResolvedValue(['steam.exe', 'arkascended.exe']) } as unknown as CaptureDetector
+      stopRecordingOnly: vi.fn().mockResolvedValue({ warnings: [], outputPath: 'J:\\Recordings\\capture.mkv', remuxedPath: 'J:\\Recordings\\capture.mp4' }),
+    }
+    const capture = {
+      runningProcesses: vi.fn().mockResolvedValue(['steam.exe', 'arkascended.exe']),
+      detectRunningProfile: vi.fn().mockResolvedValue({ profile, method: 'local', executableName: profile.capture.executableNames[0] }),
+      processInventoryWarning: vi.fn().mockReturnValue(null),
+    }
     const platforms = {
-      getLiveStatus: vi.fn(),
-      prepare: vi.fn(),
-      startYouTubeBroadcast: vi.fn(),
-      completeYouTubeBroadcast: vi.fn(),
-      startComments: vi.fn(),
-      stopComments: vi.fn(),
-      invalidateLiveStatus: vi.fn(),
-    } as unknown as PlatformServices
-    const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
-    const orchestrator = new StreamOrchestrator(store, obs, capture, platforms, logger)
-    Object.assign(orchestrator as unknown as { selected: GameProfile; method: 'local' }, { selected: profile, method: 'local' })
+      getLiveStatus: vi.fn(), prepare: vi.fn(), startYouTubeBroadcast: vi.fn(),
+      completeYouTubeBroadcast: vi.fn(), startComments: vi.fn(), stopComments: vi.fn(), invalidateLiveStatus: vi.fn(),
+    }
+    const logger = { write: vi.fn().mockResolvedValue(undefined) }
+    const orchestrator = new StreamOrchestrator(store as unknown as DataStore, obs as unknown as ObsController,
+      capture as unknown as CaptureDetector, platforms as unknown as PlatformServices, logger as unknown as AppLogger)
+    if (select) Object.assign(orchestrator, { selected: profile, method: 'local' })
+    return { config, store, obs, capture, platforms, logger, orchestrator }
+  }
+
+  it('starts and stops recording-only without touching YouTube or Twitch services', async () => {
+    const profile = structuredClone(starterProfiles.find(({ id }) => id === 'ark_survival_ascended')!)
+    const { store, obs, platforms, orchestrator } = recordingHarness(profile)
 
     await expect(orchestrator.startRecordingOnly()).resolves.toEqual([])
-    expect(obs.startRecordingOnly).toHaveBeenCalledWith(config, profile, profile.capture.localSourceName, 'local')
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(await store.getConfig(), expect.objectContaining({ id: profile.id }), profile.capture.localSourceName, 'local')
+    expect(obs.preparePrimaryStream).not.toHaveBeenCalled()
+    expect(obs.applyProfile).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: profile.id }), 'local', undefined, expect.any(Array), false, true)
     expect(platforms.getLiveStatus).not.toHaveBeenCalled()
     expect(platforms.prepare).not.toHaveBeenCalled()
     expect(platforms.startYouTubeBroadcast).not.toHaveBeenCalled()
     expect(platforms.startComments).not.toHaveBeenCalled()
 
     await expect(orchestrator.stopRecordingOnly()).resolves.toMatchObject({ remuxedPath: expect.stringContaining('capture.mp4') })
-    expect(obs.stopRecordingOnly).toHaveBeenCalledWith(config)
+    expect(obs.stopRecordingOnly).toHaveBeenCalledWith(await store.getConfig())
     expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
     expect(platforms.stopComments).not.toHaveBeenCalled()
     expect(platforms.invalidateLiveStatus).not.toHaveBeenCalled()
@@ -49,36 +71,124 @@ describe('StreamOrchestrator operation exclusion', () => {
 
   it('blocks recording-only while post-production software is running', async () => {
     const profile = structuredClone(starterProfiles.find(({ id }) => id === 'ark_survival_ascended')!)
-    const obs = { startRecordingOnly: vi.fn() } as unknown as ObsController
-    const capture = { runningProcesses: vi.fn().mockResolvedValue(['ArkAscended.exe', 'VOCALOID6.exe', 'AfterFX.exe']) } as unknown as CaptureDetector
-    const orchestrator = new StreamOrchestrator(
-      { getConfig: vi.fn().mockResolvedValue(structuredClone(defaultConfig)) } as unknown as DataStore,
-      obs,
-      capture,
-      {} as PlatformServices,
-      { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger,
-    )
-    Object.assign(orchestrator as unknown as { selected: GameProfile; method: 'local' }, { selected: profile, method: 'local' })
+    const { obs, capture, orchestrator } = recordingHarness(profile)
+    capture.runningProcesses.mockResolvedValue(['ArkAscended.exe', 'VOCALOID6.exe', 'AfterFX.exe'])
 
     await expect(orchestrator.startRecordingOnly()).rejects.toThrow('VOCALOID6、Adobe After Effects')
     expect(obs.startRecordingOnly).not.toHaveBeenCalled()
   })
 
   it('records any selected game without touching YouTube or Twitch', async () => {
-    const config = structuredClone(defaultConfig)
     const profile = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
-    const obs = { startRecordingOnly: vi.fn().mockResolvedValue([]) } as unknown as ObsController
-    const orchestrator = new StreamOrchestrator(
-      { getConfig: vi.fn().mockResolvedValue(config) } as unknown as DataStore,
-      obs,
-      { runningProcesses: vi.fn().mockResolvedValue(['Minecraft.Windows.exe']) } as unknown as CaptureDetector,
-      { getLiveStatus: vi.fn(), prepare: vi.fn(), startYouTubeBroadcast: vi.fn() } as unknown as PlatformServices,
-      { write: vi.fn() } as unknown as AppLogger,
-    )
-    Object.assign(orchestrator as unknown as { selected: GameProfile; method: 'local' }, { selected: profile, method: 'local' })
+    const { store, obs, capture, orchestrator } = recordingHarness(profile)
+    capture.runningProcesses.mockResolvedValue(['Minecraft.Windows.exe'])
 
     await expect(orchestrator.startRecordingOnly()).resolves.toEqual([])
-    expect(obs.startRecordingOnly).toHaveBeenCalledWith(config, profile, profile.capture.localSourceName, 'local')
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(await store.getConfig(), expect.objectContaining({ id: profile.id }), profile.capture.localSourceName, 'local')
+  })
+
+  it.each([true, false])('detects Minecraft at recording start with a previous ASA selection: %s', async (select) => {
+    const { config, store, obs, capture, platforms, orchestrator } = recordingHarness(undefined, select)
+    const minecraft = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+    capture.detectRunningProfile.mockResolvedValue({ profile: minecraft, method: 'local', executableName: 'Minecraft.Windows.exe' })
+
+    await expect(orchestrator.startRecordingOnly()).resolves.toEqual([])
+
+    expect(capture.detectRunningProfile).toHaveBeenCalledWith(expect.any(Array), select ? 'ark_survival_ascended' : undefined)
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'minecraft' }), minecraft.capture.localSourceName, 'local')
+    expect(await store.getConfig()).toEqual({ ...config, ui: { ...config.ui, lastSelectedGameId: 'minecraft' } })
+    expect(obs.preparePrimaryStream).not.toHaveBeenCalled()
+    for (const call of Object.values(platforms)) expect(call).not.toHaveBeenCalled()
+  })
+
+  it('saves a newly recognized built-in game only after idle output checks', async () => {
+    const { store, obs, capture, orchestrator } = recordingHarness()
+    const missingProfile = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+    missingProfile.id = 'missing_minecraft'
+    capture.detectRunningProfile.mockResolvedValue({ profile: missingProfile, method: 'local', executableName: 'Minecraft.Windows.exe' })
+
+    await orchestrator.startRecordingOnly()
+
+    expect(store.saveProfile).toHaveBeenCalledWith(missingProfile)
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: missingProfile.id }), missingProfile.capture.localSourceName, 'local')
+    expect(store.saveProfile.mock.invocationCallOrder[0]).toBeGreaterThan(obs.status.mock.invocationCallOrder[1])
+  })
+
+  it('does not record the stale local profile when no game is recognized', async () => {
+    const { store, obs, capture, orchestrator } = recordingHarness()
+    capture.detectRunningProfile.mockResolvedValue(null)
+
+    await expect(orchestrator.startRecordingOnly()).rejects.toThrow('録画するゲームを自動認識できません')
+
+    expect(obs.applyProfile).not.toHaveBeenCalled()
+    expect(obs.startRecordingOnly).not.toHaveBeenCalled()
+    expect(store.saveProfile).not.toHaveBeenCalled()
+  })
+
+  it('preserves existing game settings while saving a positively recognized Java executable alias', async () => {
+    const { store, obs, capture, orchestrator } = recordingHarness()
+    const minecraft = (await store.getProfile('minecraft'))!
+    minecraft.audio.microphoneDb = -7
+    const recognized = structuredClone(minecraft)
+    recognized.capture.executableNames.push('java.exe')
+    recognized.audio.microphoneDb = -99
+    capture.detectRunningProfile.mockResolvedValue({ profile: recognized, method: 'local', executableName: 'java.exe', windowTitle: 'Minecraft 1.21.1' })
+
+    await orchestrator.startRecordingOnly()
+
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      id: 'minecraft', audio: expect.objectContaining({ microphoneDb: -7 }),
+      capture: expect.objectContaining({ executableNames: expect.arrayContaining(['java.exe']) }),
+    }), minecraft.capture.localSourceName, 'local')
+  })
+
+  it('persists an installed executable discovered for a profile without configured process names', async () => {
+    const { store, obs, capture, orchestrator } = recordingHarness()
+    const profile = (await store.getProfile('minecraft'))!
+    profile.capture.executableNames = []
+    capture.detectRunningProfile.mockResolvedValue({ profile, method: 'window', executableName: 'ActualGame.exe' })
+
+    await orchestrator.startRecordingOnly()
+
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      id: profile.id, capture: expect.objectContaining({ executableNames: ['ActualGame.exe'] }),
+    }), expect.any(String), 'window')
+  })
+
+  it.each(['streaming', 'recording', 'replayBuffer', 'sourceRecord', 'verticalRecording', 'secondary'])('leaves an active %s output untouched at recording start', async (output) => {
+    const { store, obs, capture, orchestrator } = recordingHarness()
+    obs.status.mockResolvedValue({ obsConnected: true, [output]: true, twitchOutputPlugin: { outputActive: output === 'secondary' } })
+
+    await expect(orchestrator.startRecordingOnly()).rejects.toThrow('すべて停止してから')
+
+    expect(capture.detectRunningProfile).not.toHaveBeenCalled()
+    expect(obs.applyProfile).not.toHaveBeenCalled()
+    expect(obs.startRecordingOnly).not.toHaveBeenCalled()
+    expect(store.saveProfile).not.toHaveBeenCalled()
+  })
+
+  it('rechecks for a recording started externally while detection was running', async () => {
+    const { store, obs, orchestrator } = recordingHarness()
+    obs.status.mockResolvedValueOnce({ obsConnected: true }).mockResolvedValueOnce({ obsConnected: true, recording: true })
+
+    await expect(orchestrator.startRecordingOnly()).rejects.toThrow('すべて停止してから')
+
+    expect(obs.applyProfile).not.toHaveBeenCalled()
+    expect(obs.startRecordingOnly).not.toHaveBeenCalled()
+    expect(store.saveProfile).not.toHaveBeenCalled()
+  })
+
+  it.each(['elgato', 'display'] as const)('keeps the explicitly selected %s source without requiring a game process', async (method) => {
+    const { obs, capture, platforms, orchestrator } = recordingHarness()
+    Object.assign(orchestrator, { method })
+    capture.runningProcesses.mockResolvedValue([])
+    capture.detectRunningProfile.mockResolvedValue(null)
+
+    await expect(orchestrator.startRecordingOnly()).resolves.toEqual([])
+
+    expect(capture.detectRunningProfile).not.toHaveBeenCalled()
+    expect(obs.startRecordingOnly).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.any(String), method)
+    for (const call of Object.values(platforms)) expect(call).not.toHaveBeenCalled()
   })
 
   it('retries a deferred YouTube completion only after OBS is no longer streaming', async () => {

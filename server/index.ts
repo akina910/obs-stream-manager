@@ -9,6 +9,7 @@ import { CommonTemplateSettingsSchema } from '../shared/common-template.js'
 import { AppConfigSchema, AudioCalibrationRequestSchema, CaptureMethodSchema, GameIdSchema, GameProfileSchema, ObsSceneNameSchema } from '../shared/contracts.js'
 import { BgmLibraryStore, maxBackupRequestBytes, maxBgmTrackBytes } from './bgm-library.js'
 import { CaptureDetector } from './capture.js'
+import { clientBuildFromHtml, clientKindFromUserAgent } from './client-build.js'
 import { CommonTemplateService } from './common-template.js'
 import { selectFolder } from './folder-picker.js'
 import { fpsMotionTestHtml } from './fps-motion-fixture.js'
@@ -68,6 +69,7 @@ app.addHook('onRequest', async (request, reply) => {
 app.addHook('onSend', async (request, reply, payload) => {
   reply.header('X-Content-Type-Options', 'nosniff')
   reply.header('Referrer-Policy', 'no-referrer')
+  if (String(reply.getHeader('content-type') ?? '').includes('text/html')) reply.header('Cache-Control', 'no-store')
   if (!request.url.startsWith('/api/')) {
     reply.header(
       'Content-Security-Policy',
@@ -443,6 +445,19 @@ app.post<{ Body: unknown }>('/api/backup/import', { bodyLimit: maxBackupRequestB
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const clientRoot = path.resolve(here, '../client')
+const clientBuild = clientBuildFromHtml(await readFile(path.join(clientRoot, 'index.html'), 'utf8').catch(() => ''))
+const loadedClientKinds = new Set<string>()
+app.get<{ Querystring: { loaded?: string } }>('/api/client-build', async (request, reply) => {
+  if (clientBuild.entryScript && request.query.loaded === clientBuild.entryScript) {
+    const userAgent = request.headers['user-agent'] ?? ''
+    const client = clientKindFromUserAgent(userAgent)
+    if (!loadedClientKinds.has(client)) {
+      loadedClientKinds.add(client)
+      await logger.write('client.build_loaded', { client, entryScript: clientBuild.entryScript }).catch(() => undefined)
+    }
+  }
+  return reply.header('Cache-Control', 'no-store').send(clientBuild)
+})
 try {
   if ((await stat(clientRoot)).isDirectory()) {
     await app.register(fastifyStatic, { root: clientRoot, wildcard: false })

@@ -1,7 +1,7 @@
 import type { ApplyResult, AudioProfile, CaptureMethod, GameProfile, RuntimeStatus } from '../shared/contracts.js'
 import type { AudioCalibrationResult } from '../shared/audio-calibration.js'
 import { AppLogger } from './logger.js'
-import { CaptureDetector } from './capture.js'
+import { CaptureDetector, type RunningGameMatch } from './capture.js'
 import { ObsController } from './obs.js'
 import { PlatformServices } from './platforms.js'
 import { DataStore } from './storage.js'
@@ -127,8 +127,12 @@ export class StreamOrchestrator {
     method: CaptureMethod,
     captureWindowTitle?: string,
     preserveMicrophoneMute = false,
+    recordingOnly = false,
   ) {
     const inactiveSources = await this.inactiveCaptureSources(profile)
+    if (recordingOnly) {
+      return this.obs.applyProfile(config, profile, method, captureWindowTitle, inactiveSources, preserveMicrophoneMute, true)
+    }
     if (preserveMicrophoneMute) {
       return this.obs.applyProfile(config, profile, method, captureWindowTitle, inactiveSources, true)
     }
@@ -201,6 +205,24 @@ export class StreamOrchestrator {
     const latest = await this.store.getConfig()
     if (latest.ui.lastSelectedGameId === gameId) return
     await this.store.saveConfig({ ...latest, ui: { ...latest.ui, lastSelectedGameId: gameId } })
+  }
+
+  private async persistDetectedProfile(match: RunningGameMatch): Promise<void> {
+    let profile = match.profile
+    if ((match.method === 'local' || match.method === 'window')
+      && !profile.capture.executableNames.some((name) => name.trim().toLowerCase() === match.executableName.trim().toLowerCase())) {
+      profile = { ...profile, capture: { ...profile.capture, executableNames: [...profile.capture.executableNames, match.executableName] } }
+    }
+    const saved = await this.store.getProfile(profile.id)
+    if (!saved) {
+      await this.store.saveProfile(profile)
+      return
+    }
+    const knownExecutables = new Set(saved.capture.executableNames.map((name) => name.trim().toLowerCase()))
+    const recognizedAliases = profile.capture.executableNames.filter((name) => !knownExecutables.has(name.trim().toLowerCase()))
+    if (recognizedAliases.length) {
+      await this.store.saveProfile({ ...saved, capture: { ...saved.capture, executableNames: [...saved.capture.executableNames, ...recognizedAliases] } })
+    }
   }
 
   async restoreSelection(): Promise<void> {
@@ -281,10 +303,12 @@ export class StreamOrchestrator {
     return this.exclusive(async () => {
       const config = await this.store.getConfig()
       const status = await this.obs.status(config, this.selected?.id ?? null, this.method, true, this.warning)
-      if (!status.obsConnected || status.streaming || status.recording || status.replayBuffer) {
+      if (!status.obsConnected || status.streaming || status.recording || status.replayBuffer
+        || status.sourceRecord || status.verticalRecording || status.twitchOutputPlugin?.outputActive) {
         return { detected: true, applied: false, gameId: match.profile.id, executableName: match.executableName, captureMethod: match.method }
       }
 
+      await this.persistDetectedProfile(match)
       await this.applySelection(match.profile.id, match.method, false, match.windowTitle)
       await this.logger.write('profile.auto_detected', {
         gameId: match.profile.id,
@@ -331,7 +355,7 @@ export class StreamOrchestrator {
       return { services, thumbnail, thumbnailWarning }
   }
 
-  private async applySelection(gameId: string, override?: CaptureMethod, preparePlatforms = true, captureWindowTitle?: string): Promise<SelectionResult> {
+  private async applySelection(gameId: string, override?: CaptureMethod, preparePlatforms = true, captureWindowTitle?: string, localOnly = false): Promise<SelectionResult> {
       this.pendingAutoSelection = null
       this.interruptedStreamSelectionId = null
       const profile = await this.store.getProfile(gameId)
@@ -349,7 +373,7 @@ export class StreamOrchestrator {
         }
       }
       if (this.bgm) await this.obs.stopBgm(config)
-      const appliedProfile = await this.applyObsProfile(config, profile, detection.method, detection.windowTitle)
+      const appliedProfile = await this.applyObsProfile(config, profile, detection.method, detection.windowTitle, false, localOnly)
       const obsWarnings = appliedProfile.warnings
       await this.applyProfileBgm(config, profile, obsWarnings, true, true)
       this.ensuredAudioKey = appliedProfile.audioApplied ? this.profileApplicationKey(profile, detection.method) : null
@@ -364,7 +388,7 @@ export class StreamOrchestrator {
       let services: Awaited<ReturnType<PlatformServices['prepare']>> = []
       let thumbnail: Awaited<ReturnType<PlatformServices['prepare']>>[number]['thumbnail'] | undefined
       let thumbnailWarning: string[] = []
-      if (preparePlatforms) {
+      if (preparePlatforms && !localOnly) {
         ({ services, thumbnail, thumbnailWarning } = await this.preparePlatformServices(config, profile, obsWarnings))
       } else {
         // Automatic process detection runs every few seconds. Applying OBS's
@@ -375,10 +399,12 @@ export class StreamOrchestrator {
         this.failedServices.clear()
         this.serviceFailures = []
         this.platformPreparationPending = true
-        try {
-          await this.obs.preparePrimaryStream(config, profile)
-        } catch (error) {
-          obsWarnings.push(`保存済みのOBS配信先を維持できませんでした。配信開始時に再準備します: ${error instanceof Error ? error.message : String(error)}`)
+        if (!localOnly) {
+          try {
+            await this.obs.preparePrimaryStream(config, profile)
+          } catch (error) {
+            obsWarnings.push(`保存済みのOBS配信先を維持できませんでした。配信開始時に再準備します: ${error instanceof Error ? error.message : String(error)}`)
+          }
         }
       }
       const updated = await this.store.saveProfile({
@@ -397,7 +423,7 @@ export class StreamOrchestrator {
       await this.persistSelectedGame(updated.id)
       const warnings = [...detection.warnings, ...obsWarnings, ...thumbnailWarning, ...this.serviceFailures]
       this.warning = warnings[0] ?? null
-      this.platforms.invalidateLiveStatus()
+      if (!localOnly) this.platforms.invalidateLiveStatus()
       await this.logger.write('profile.applied', { gameId, captureMethod: detection.method, warnings, services, thumbnail, platformPreparationDeferred: !preparePlatforms })
       return { profile: updated, captureMethod: detection.method, warnings, services }
   }
@@ -543,13 +569,17 @@ export class StreamOrchestrator {
 
   async startRecordingOnly(): Promise<string[]> {
     return this.exclusive(async () => {
-      if (!this.selected || !this.method) {
-        throw Object.assign(new Error('録画するゲームを先に選択してください'), { statusCode: 409 })
-      }
-      const config = await this.store.getConfig()
-      const selected = this.selected
-      const method = this.method
       try {
+        const config = await this.store.getConfig()
+        const assertIdle = async () => {
+          const status = await this.obs.status(config, this.selected?.id ?? null, this.method, true, this.warning)
+          if (!status.obsConnected) throw Object.assign(new Error('OBSへ接続してから録画を開始してください'), { statusCode: 409 })
+          if (status.streaming || status.recording || status.replayBuffer || status.sourceRecord
+            || status.verticalRecording || status.twitchOutputPlugin?.outputActive) {
+            throw Object.assign(new Error('配信・録画・リプレイ・Twitch副出力をすべて停止してから「録画のみ」を開始してください'), { statusCode: 409 })
+          }
+        }
+        await assertIdle()
         const runningProcesses = await this.capture.runningProcesses().catch((error) => {
           throw new Error(`録画前に編集ソフトの停止を確認できませんでした: ${error instanceof Error ? error.message : String(error)}`)
         })
@@ -560,15 +590,34 @@ export class StreamOrchestrator {
         if (conflicts.length) {
           throw Object.assign(new Error(`録画負荷を増やさないため、録画後に使う音声・字幕・編集ソフトを終了してください: ${conflicts.join('、')}`), { statusCode: 409 })
         }
+        // A recording click must not race the five-second background detector
+        // and freeze yesterday's game into the recording identity. Explicit
+        // HDMI/display sources have no local game process to discover.
+        const manualSource = this.selected && (this.method === 'elgato' || this.method === 'display')
+        const detected = manualSource
+          ? null
+          : await this.capture.detectRunningProfile(await this.store.listProfiles(), this.selected?.id)
+        if (!manualSource && !detected) {
+          throw Object.assign(new Error(this.capture.processInventoryWarning?.()
+            ?? '録画するゲームを自動認識できません。ゲームを起動し、ゲーム設定の認識対象を確認してください'), { statusCode: 409 })
+        }
+        await assertIdle()
+        if (detected) await this.persistDetectedProfile(detected)
+        const selection = detected
+          ? await this.applySelection(detected.profile.id, detected.method, false, detected.windowTitle, true)
+          : await this.applySelection(this.selected!.id, this.method!, false, undefined, true)
+        const selected = selection.profile
+        const method = selection.captureMethod
         // This path deliberately does not call PlatformServices. Recording-only
         // must never create, start, stop, or otherwise mutate a live platform.
-        const warnings = await this.obs.startRecordingOnly(config, selected, this.captureSource(selected, method), method)
+        const recordingWarnings = await this.obs.startRecordingOnly(await this.store.getConfig(), selected, this.captureSource(selected, method), method)
+        const warnings = [...selection.warnings, ...recordingWarnings]
         this.warning = warnings[0] ?? null
         await this.logger.write('recording_only.started', { gameId: selected.id, captureMethod: method, warnings })
         return warnings
       } catch (error) {
         this.warning = error instanceof Error ? error.message : String(error)
-        await this.logger.write('recording_only.start_failed', { gameId: selected.id, captureMethod: method, error: this.warning }).catch(() => undefined)
+        await this.logger.write('recording_only.start_failed', { gameId: this.selected?.id ?? null, captureMethod: this.method, error: this.warning }).catch(() => undefined)
         throw error
       }
     })

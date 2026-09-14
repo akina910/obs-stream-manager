@@ -65,6 +65,13 @@ describe('runtime status labels', () => {
     expect(getRuntimeOutputs(recordingOnly).find(({ key }) => key === 'obs')).toMatchObject({ state: '停止', active: false })
   })
 
+  it('uses the actual recording identity even when the old profile list still says ASA', () => {
+    const status = { ...stoppedStatus, recording: true, recordingOnly: true, recordingGameId: 'minecraft', recordingGameName: 'Minecraft' }
+    expect(getBroadcastStatus(status, 'ASA').detailValues).toEqual({ game: 'Minecraft' })
+    expect(getBroadcastStatus({ ...status, recordingGameName: null }, 'ASA').detail).toBe('配信停止・選択中ゲーム録画中')
+    expect(getBroadcastStatus({ ...status, recording: false }, 'ASA').label).toBe('配信停止中')
+  })
+
   it('reports external streaming only after a platform confirms live', () => {
     const youtubeLive = {
       ...stoppedStatus,

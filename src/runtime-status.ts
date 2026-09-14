@@ -31,9 +31,10 @@ export function getBroadcastStatus(status: RuntimeStatus, selectedGameName?: str
   if ([status.platforms.youtube.state, status.platforms.twitch.state].some((state) => state === 'stopping')) {
     return { label: '外部配信終了中', detail: '終了確認中', tone: 'sending' }
   }
-  if (status.recordingOnly) {
-    return selectedGameName?.trim()
-      ? { label: '録画専用モード', detail: '配信停止・{game}録画中', detailValues: { game: selectedGameName.trim() }, tone: 'sending' }
+  if (status.recordingOnly && status.recording) {
+    const gameName = status.recordingGameName === undefined ? selectedGameName : status.recordingGameName
+    return gameName?.trim()
+      ? { label: '録画専用モード', detail: '配信停止・{game}録画中', detailValues: { game: gameName.trim() }, tone: 'sending' }
       : { label: '録画専用モード', detail: '配信停止・選択中ゲーム録画中', tone: 'sending' }
   }
   return { label: '配信停止中', detail: status.busy ? '切替処理中' : 'OFFLINE', tone: 'stopped' }

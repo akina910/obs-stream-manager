@@ -25,6 +25,63 @@ function youtubeSecrets(): SecretStore {
 }
 
 describe('ObsController stream events', () => {
+  it('retargets the recording source from ASA to the detected Minecraft window', async () => {
+    const profile = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+    const call = vi.fn(async (request: string) => {
+      if (request === 'GetInputSettings') return { inputKind: 'game_capture', inputSettings: { capture_mode: 'window', window: 'ARK:UnrealWindow:ArkAscended.exe' } }
+      if (request === 'GetInputPropertiesListPropertyItems') return { propertyItems: [
+        { itemEnabled: true, itemValue: 'Other Java:SunAwtFrame:javaw.exe', itemName: 'Other Java' },
+        { itemEnabled: true, itemValue: 'Minecraft server:SunAwtFrame:javaw.exe', itemName: 'Minecraft server' },
+        { itemEnabled: true, itemValue: 'Minecraft 1.21:GLFW30:javaw.exe', itemName: 'Minecraft 1.21' },
+      ] }
+      return {}
+    })
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: { call: typeof call } }).obs = { call }
+    await (controller as unknown as { prepareLocalRecordingCapture(profile: typeof profile, source: string, method: string): Promise<void> })
+      .prepareLocalRecordingCapture(profile, 'PC Game Capture', 'local')
+    expect(call).toHaveBeenCalledWith('SetInputSettings', {
+      inputName: 'PC Game Capture',
+      inputSettings: { window: 'Minecraft 1.21:GLFW30:javaw.exe', capture_mode: 'window', priority: 0 },
+      overlay: true,
+    })
+  })
+
+  it('does not relabel another Java window as a Minecraft recording', async () => {
+    const profile = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+    const call = vi.fn(async (request: string) => request === 'GetInputSettings'
+      ? { inputKind: 'game_capture', inputSettings: {} }
+      : { propertyItems: [{ itemEnabled: true, itemValue: 'Other Java:SunAwtFrame:javaw.exe', itemName: 'Other Java' }] })
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: { call: typeof call } }).obs = { call }
+    await expect((controller as unknown as { prepareLocalRecordingCapture(profile: typeof profile, source: string, method: string): Promise<void> })
+      .prepareLocalRecordingCapture(profile, 'PC Game Capture', 'local')).rejects.toThrow('Minecraft')
+    expect(call.mock.calls.some(([request]) => request === 'SetInputSettings')).toBe(false)
+  })
+
+  it('recovers the actual recording game after reconnect without trusting an old selection', async () => {
+    let recording = true
+    const fake = {
+      connect: vi.fn(),
+      call: vi.fn(async (request: string, data?: { parameterName: string }) => {
+        if (request === 'GetRecordStatus') return { outputActive: recording }
+        if (request === 'GetStreamStatus' || request === 'GetReplayBufferStatus') return { outputActive: false }
+        if (request === 'GetProfileList') return { currentProfileName: recordingOnlyPreset.profileName }
+        if (request === 'GetProfileParameter') return { parameterValue: data?.parameterName === 'RecordingGameId' ? 'minecraft' : 'Minecraft' }
+        if (request === 'GetCurrentProgramScene') return { currentProgramSceneName: '10_GAME_PC' }
+        if (request === 'CallVendorRequest') return { responseData: { success: true, apiVersion: 4, outputActive: false } }
+        return {}
+      }),
+    }
+    const controller = new ObsController(memorySecrets())
+    ;(controller as unknown as { obs: typeof fake }).obs = fake
+    expect(await controller.status(structuredClone(defaultConfig), 'ark_survival_ascended', 'local', false, null))
+      .toMatchObject({ recordingOnly: true, recordingGameId: 'minecraft', recordingGameName: 'Minecraft' })
+    recording = false
+    expect(await controller.status(structuredClone(defaultConfig), 'ark_survival_ascended', 'local', false, null))
+      .toMatchObject({ recordingOnly: false, recordingGameId: null, recordingGameName: null })
+  })
+
   it('creates a dedicated 1440p recording profile and leaves the stream profile available', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'obs-recording-only-'))
     const calls: Array<{ request: string; data: unknown }> = []
@@ -137,12 +194,13 @@ describe('ObsController stream events', () => {
     }
   })
 
-  it('uses the selected game label in a Windows-safe recording filename', () => {
+  it('uses the actual game name rather than a thumbnail label in the recording filename', () => {
     const profile = structuredClone(starterProfiles.find(({ id }) => id === 'ark_survival_ascended')!)
-    profile.presentation.templateLabel = 'ARK: ASA / Main*'
+    profile.displayName = 'Minecraft: Java / Main*'
+    profile.presentation.templateLabel = 'ASA'
 
-    expect(recordingGameName(profile)).toBe('ARK_ASA_Main')
-    expect(recordingFilenameFormat(profile)).toBe('ARK_ASA_Main_%CCYY-%MM-%DD_%hh-%mm-%ss')
+    expect(recordingGameName(profile)).toBe('Minecraft_Java_Main')
+    expect(recordingFilenameFormat(profile)).toBe('Minecraft_Java_Main_%CCYY-%MM-%DD_%hh-%mm-%ss')
   })
 
   it('reports a plugin permission failure instead of an endless OBS restart wait', async () => {

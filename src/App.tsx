@@ -5,6 +5,7 @@ import {
   Search, Settings, Star, Trash2, Upload, Users, X,
 } from 'lucide-react'
 import type { AppConfig, BgmTrack, CaptureMethod, ChatMessage, GameProfile, LocalObsSetupStatus, PlatformGroup, RuntimeStatus } from '../shared/contracts'
+import { RuntimeStatusSchema } from '../shared/contracts'
 import { normalizeMicrophoneGain, type AudioCalibrationResult, type AudioCalibrationRole } from '../shared/audio-calibration'
 import { defaultCommonTemplateConfig } from '../shared/common-template'
 import { createGameProfile } from '../shared/profile-factory'
@@ -12,6 +13,7 @@ import { renderTitleTemplate, TITLE_TEMPLATE_VARIABLES } from '../shared/title-t
 import { api, type OAuthConnectionStatus, type OAuthConnectionStatuses, type OAuthProvider, type SteamSyncResult } from './api'
 import { createTranslator, I18nProvider, useI18n, type TranslationValues, type Translator, type UiLanguage } from './i18n'
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
+import { clientUpdateIntervalMs, createClientUpdateCheck } from './client-update'
 import { orderProfiles, recentProfiles, replaceOrderedProfile } from './profile-order'
 import { getBroadcastStatus, getExternalDeliveryWarning, getRuntimeOutputs, type RuntimeOutputStatus } from './runtime-status'
 import { CommentsSection } from './CommentsSection'
@@ -682,7 +684,7 @@ function ControlPanel({ status, selected, busy, onChooseGame, onStart, onStop, o
   const showStop = showRecordingStop || showStreamStop
   const restartDetected = status.streaming && !selected
   const disabled = busy || status.busy || !status.obsConnected || !selected
-  const recordingOnlyDisabled = disabled || status.recording || status.replayBuffer
+  const recordingOnlyDisabled = busy || status.busy || !status.obsConnected || status.recording || status.replayBuffer || status.streaming || externalActive
   const reason = !status.obsConnected ? t('OBSへ接続すると配信を開始できます') : !selected ? t('配信前にゲームを選択してください') : status.busy || busy ? t('処理が完了するまでお待ちください') : null
   return <aside className="control-panel" aria-label={t('配信・録画操作')}>
     {restartDetected && <div className="control-warning"><AlertTriangle size={14} /><span>{t('アプリ再起動後の配信を検出しました。現在の配信を安全に終了できます。')}</span></div>}
@@ -741,6 +743,31 @@ export default function App() {
   const refresh = async () => { const [data] = await Promise.all([api.bootstrap(), loadOAuthStatus()]); setProfiles(orderProfiles(data.profiles)); setConfig(data.config); setStatus(data.status); setObsSetup(data.obsSetup); setLoading(false) }
   const refreshOAuth = async () => { const connections = await loadOAuthStatus(); if (!connections) return; setOAuthProgress((current) => ({ youtube: connections.youtube.authorizationInProgress ? current.youtube : undefined, twitch: connections.twitch.authorizationInProgress ? current.twitch : undefined })) }
   const oauthPollingInterval = oauthRefreshInterval(oauthStatus)
+  const clientUpdateBlocked = loading || actionBusy || !!editing || adding || setupOpen || tab === 'settings' || tab === 'bgm'
+    || !!oauthStatus?.youtube.authorizationInProgress || !!oauthStatus?.twitch.authorizationInProgress
+  useEffect(() => {
+    if (clientUpdateBlocked) return
+    const entryScript = Array.from(document.scripts)
+      .filter((script) => script.type === 'module' && script.src)
+      .map((script) => new URL(script.src, document.baseURI))
+      .find((url) => url.origin === window.location.origin && /^\/assets\/[^/?#]+\.js$/.test(url.pathname))?.pathname ?? null
+    if (!entryScript) return
+    const abort = new AbortController()
+    const request = async (url: string) => {
+      const response = await fetch(url, { cache: 'no-store', signal: abort.signal })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return response.json()
+    }
+    const check = createClientUpdateCheck({
+      loadedEntryScript: entryScript,
+      getBuild: () => request(`/api/client-build?loaded=${encodeURIComponent(entryScript)}`),
+      getStatus: async () => RuntimeStatusSchema.parse(await request('/api/status')),
+      isBlocked: () => abort.signal.aborted || actionLock.current,
+      reload: () => window.location.reload(),
+    })
+    const timer = window.setInterval(() => void check(), clientUpdateIntervalMs)
+    return () => { abort.abort(); window.clearInterval(timer) }
+  }, [clientUpdateBlocked])
   useEffect(() => {
     let active = true
     const initialize = async () => {
@@ -777,6 +804,13 @@ export default function App() {
     return () => { active = false }
   }, [loadOAuthStatus])
   useEffect(() => { const timer = window.setInterval(() => void Promise.all([api.status(), api.obsSetup()]).then(([nextStatus, nextSetup]) => { setStatus(nextStatus); setObsSetup(nextSetup) }).catch(() => undefined), 2_000); return () => window.clearInterval(timer) }, [])
+  const missingSelectedGameId = status?.selectedGameId && !profiles.some(({ id }) => id === status.selectedGameId) ? status.selectedGameId : null
+  useEffect(() => {
+    if (!missingSelectedGameId) return
+    let active = true
+    void api.profiles().then((next) => { if (active) setProfiles(orderProfiles(next)) }).catch(() => undefined)
+    return () => { active = false }
+  }, [missingSelectedGameId])
   useEffect(() => {
     if (!status?.obsConnected) {
       audioEnsureAttemptKey.current = null
@@ -1009,7 +1043,7 @@ export default function App() {
     <header className="app-header"><div className="brand"><div className="brand-mark"><BrandGlyph /></div><strong>STREAM MANAGER</strong></div><div className={`header-status ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} /><span>OBS {t(status.obsConnected ? '接続中' : '未接続')}</span></div></header>
     <DesktopLaunchNotice />
     <nav className="tabs">{groups.map(({ id, label }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{t(label)}</button>)}</nav>
-    <RuntimeStatusBar status={status} selectedGameName={selected ? (selected.presentation.templateLabel.trim() || selected.displayName) : null} />
+    <RuntimeStatusBar status={status} selectedGameName={selected?.displayName} />
     <CommentsSection comments={comments} language={language} streaming={status.streaming} t={t} />
     {tab === 'settings' ? (oauthStatus ? <SettingsView
       key={JSON.stringify(config)}

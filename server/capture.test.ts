@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { GameProfile } from '../shared/contracts.js'
 import { CaptureDetector, windowsTasklistExecutable } from './capture.js'
 import { starterProfiles } from './defaults.js'
 
@@ -157,6 +158,119 @@ describe('CaptureDetector', () => {
       profile: { id: roblox?.id },
       executableName: 'robloxplayerbeta.exe',
     })
+  })
+
+  it('recognizes Minecraft Bedrock even when its preset is not saved in the library', async () => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['minecraft.windows.exe'])
+    const profiles = [structuredClone(starterProfiles[0])]
+
+    const match = await detector.detectRunningProfile(profiles, profiles[0].id)
+    expect(match).toMatchObject({
+      profile: { id: 'minecraft', displayName: 'Minecraft', recording: { enabled: true } },
+      method: 'local',
+      executableName: 'minecraft.windows.exe',
+    })
+    expect(profiles).toHaveLength(1)
+    expect(match?.profile).not.toBe(starterProfiles.find(({ id }) => id === 'minecraft'))
+  })
+
+  it('does not restore a hidden Minecraft preset or register an idle starter game', async () => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    const processes = vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['minecraft.windows.exe'])
+    const minecraft = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+    minecraft.hidden = true
+
+    await expect(detector.detectRunningProfile([minecraft])).resolves.toBeNull()
+    processes.mockResolvedValue(['steam.exe'])
+    await expect(detector.detectRunningProfile([])).resolves.toBeNull()
+  })
+
+  it.each(['javaw.exe', 'java.exe'])('requires Minecraft window evidence for the shared %s process', async (executableName) => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue([executableName])
+    const windows = vi.spyOn(detector, 'runningJavaGameWindows').mockResolvedValue([
+      { executableName, windowTitle: 'IntelliJ IDEA' },
+      { executableName, windowTitle: 'Minecraft server' },
+      { executableName, windowTitle: 'Minecraft Launcher' },
+    ])
+
+    await expect(detector.detectRunningProfile([])).resolves.toBeNull()
+    windows.mockResolvedValue([{ executableName, windowTitle: 'Minecraft* 1.21.1 - Multiplayer (3rd-party Server)' }])
+    const match = await detector.detectRunningProfile([])
+    expect(match).toMatchObject({
+      profile: { id: 'minecraft' },
+      method: 'local',
+      executableName,
+      windowTitle: 'Minecraft* 1.21.1 - Multiplayer (3rd-party Server)',
+    })
+    expect(match?.profile.capture.executableNames.map((name) => name.toLowerCase())).toContain(executableName)
+  })
+
+  it('does not accept another Java application when applying the Minecraft profile', async () => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['javaw.exe'])
+    vi.spyOn(detector, 'runningJavaGameWindows').mockResolvedValue([{ executableName: 'javaw.exe', windowTitle: 'IntelliJ IDEA' }])
+    const minecraft = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+
+    await expect(detector.detect(minecraft)).rejects.toThrow('ゲームまたは GeForce NOW を検出できません')
+  })
+
+  it('checks installed-game matches even when another configured game process is still running', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'obs-capture-detect-concurrent-'))
+    directories.push(directory)
+    await writeFile(path.join(directory, 'ActualGame.exe'), '')
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['arkascended.exe', 'actualgame.exe'])
+    const profile = structuredClone(starterProfiles[0])
+    profile.id = 'steam_selected_game'
+    profile.capture.executableNames = []
+    profile.library.installDirectory = directory
+
+    await expect(detector.detectRunningProfile([profile], profile.id)).resolves.toMatchObject({
+      profile: { id: profile.id },
+      executableName: 'actualgame.exe',
+    })
+  })
+
+  it('does not scan unrelated game installations when the selected running game is already known', async () => {
+    const detector = new CaptureDetector({ attempts: 1, executableCacheMs: 0 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['arkascended.exe'])
+    const scan = vi.spyOn(detector as unknown as {
+      installedExecutableNames: (profile: GameProfile) => Promise<string[]>
+    }, 'installedExecutableNames').mockResolvedValue([])
+    const selected = structuredClone(starterProfiles[0])
+    const unrelated = Array.from({ length: 100 }, (_, index) => {
+      const profile = structuredClone(selected)
+      profile.id = `steam_unrelated_${index}`
+      profile.capture.executableNames = []
+      profile.library.installDirectory = `J:\\SteamLibrary\\steamapps\\common\\Unrelated${index}`
+      return profile
+    })
+
+    await expect(detector.detectRunningProfile([selected, ...unrelated], selected.id)).resolves.toMatchObject({
+      profile: { id: selected.id },
+    })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
+  it('still checks equal-scoring installed games and selects the more recently used match', async () => {
+    const detector = new CaptureDetector({ attempts: 1 })
+    vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['older.exe', 'newer.exe'])
+    const scan = vi.spyOn(detector as unknown as {
+      installedExecutableNames: (profile: GameProfile) => Promise<string[]>
+    }, 'installedExecutableNames').mockImplementation(async (profile) => [`${profile.id}.exe`])
+    const profiles = ['older', 'newer'].map((id, index) => {
+      const profile = structuredClone(starterProfiles[0])
+      profile.id = id
+      profile.capture.executableNames = []
+      profile.library.installDirectory = `J:\\SteamLibrary\\steamapps\\common\\${id}`
+      profile.state.lastUsedAt = `2026-09-${12 + index}T00:00:00.000Z`
+      return profile
+    })
+
+    await expect(detector.detectRunningProfile(profiles)).resolves.toMatchObject({ profile: { id: 'newer' } })
+    expect(scan).toHaveBeenCalledTimes(2)
   })
 
   it('maps a GeForce NOW window title to the matching game profile', async () => {

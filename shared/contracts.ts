@@ -211,6 +211,8 @@ export const RuntimeStatusSchema = z.object({
   streamElapsedMs: z.number().nonnegative().optional(),
   recording: z.boolean(),
   recordingOnly: z.boolean().default(false),
+  recordingGameId: z.string().nullable().optional(),
+  recordingGameName: z.string().nullable().optional(),
   replayBuffer: z.boolean(),
   sourceRecord: z.boolean(),
   verticalRecording: z.boolean(),
