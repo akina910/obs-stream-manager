@@ -33,12 +33,12 @@
   },
   "platformConfig": {
     "macos": {
-      "bundleId": "io.github.akina910.obs-stream-manager-output"
+      "bundleId": "io.github.akina910.obs-stream-manager-output-v2"
     }
   },
-  "name": "obs-stream-manager-output",
-  "displayName": "OBS Stream Manager Output",
-  "version": "0.2.2",
+  "name": "obs-stream-manager-output-v2",
+  "displayName": "OBS Stream Manager Output v2",
+  "version": "0.2.20",
   "author": "OBS Stream Manager contributors",
   "website": "https://github.com/akina910/obs-stream-manager",
   "email": ""

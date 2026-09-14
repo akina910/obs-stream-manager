@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const output = path.resolve('build/provider-oauth.json')
+const requireAllProviders = process.argv.includes('--require-all')
 const source = process.env.OBS_STREAM_MANAGER_PROVIDER_OAUTH_FILE?.trim()
 let input = {}
 
@@ -25,6 +26,15 @@ if (youtubeClientId && youtubeClientType !== 'desktop') {
 }
 if (youtubeClientId && !youtubeClientSecret) {
   throw new Error('The Google Desktop app client credential is required for YouTube token exchange and refresh.')
+}
+if (requireAllProviders) {
+  const missing = [
+    !youtubeClientId || !youtubeClientSecret ? 'YouTube Desktop app credentials' : '',
+    !twitchClientId ? 'Twitch public client ID' : '',
+  ].filter(Boolean)
+  if (missing.length) {
+    throw new Error(`Distribution build requires ${missing.join(' and ')}. Refusing to create an unusable package.`)
+  }
 }
 
 const bundle = {

@@ -15,6 +15,8 @@ declare global {
       downloadUpdate: () => Promise<DesktopUpdateState>
       installUpdate: () => Promise<DesktopUpdateState>
       openReleasePage: () => Promise<void>
+      beginAudioCalibration: () => Promise<boolean>
+      endAudioCalibration: (succeeded: boolean) => Promise<boolean>
       onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void
       quit: () => Promise<void>
     }

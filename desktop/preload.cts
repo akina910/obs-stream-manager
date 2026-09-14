@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('obsStreamManagerDesktop', {
   downloadUpdate: () => ipcRenderer.invoke('desktop:download-update') as Promise<DesktopUpdateState>,
   installUpdate: () => ipcRenderer.invoke('desktop:install-update') as Promise<DesktopUpdateState>,
   openReleasePage: () => ipcRenderer.invoke('desktop:open-release-page') as Promise<void>,
+  beginAudioCalibration: () => ipcRenderer.invoke('desktop:begin-audio-calibration') as Promise<boolean>,
+  endAudioCalibration: (succeeded: boolean) => ipcRenderer.invoke('desktop:end-audio-calibration', succeeded) as Promise<boolean>,
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: DesktopUpdateState) => listener(state)
     ipcRenderer.on('desktop:update-state', handler)

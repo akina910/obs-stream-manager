@@ -29,14 +29,12 @@ const comments: ChatMessage[] = [
 
 describe('CommentsSection', () => {
   it('renders YouTube and Twitch comments with service, author, moderator, mention and body state', () => {
-    const html = renderToStaticMarkup(<CommentsSection comments={comments} language="ja" streaming t={translate} />)
+    const html = renderToStaticMarkup(<CommentsSection comments={comments} language="ja" streaming t={translate} initiallyOpen />)
 
     expect(html).toContain('data-service="youtube"')
     expect(html).toContain('data-service="twitch"')
-    expect(html).toContain('ライブコメント')
-    expect(html).toContain('2件')
-    expect(html).toContain('comment-service youtube')
-    expect(html).toContain('comment-service twitch')
+    expect(html).toContain('コメント')
+    expect(html).toContain('更新中')
     expect(html).toContain('YouTube視聴者')
     expect(html).toContain('YouTubeからのコメント')
     expect(html).toContain('Twitchモデレーター')

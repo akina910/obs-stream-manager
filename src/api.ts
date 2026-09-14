@@ -1,6 +1,10 @@
-import type { AppConfig, CaptureMethod, ChatMessage, GameProfile, RuntimeStatus } from '../shared/contracts'
+import type { AppConfig, BgmLibraryStatus, CaptureMethod, ChatMessage, GameProfile, LocalObsSetupStatus, RuntimeStatus } from '../shared/contracts'
+import type { CommonTemplateConfig, CommonTemplateSettings } from '../shared/common-template'
+import type { AudioCalibrationResult } from '../shared/audio-calibration'
 
-export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus }
+export type { CommonTemplateSettings } from '../shared/common-template'
+
+export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus; obsSetup: LocalObsSetupStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
 export type OAuthProvider = 'youtube' | 'twitch'
 export type OAuthConnectionStage = 'setup_required' | 'ready' | 'authorizing' | 'partial' | 'connected'
@@ -18,10 +22,28 @@ export type OAuthConnectionStatuses = Record<OAuthProvider, OAuthConnectionStatu
 export type OAuthStartResult =
   | { mode: 'redirect'; url: string }
   | { mode: 'device'; url: string; userCode: string; requestId: string; intervalMs: number; expiresAt: number }
-export type TwitchIngestTestResult = { ok: true; durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number; congestion: number }
+type OutputTestMetrics = { durationMs: number; bytesSent: number; totalFrames: number; skippedFrames: number; measuredFps: number }
+export type TwitchIngestTestResult = {
+  ok: true
+  output: { width: number; height: number; fpsNumerator: number; fpsDenominator: number; videoBitrateKbps: number; audioBitrateKbps: number; encoderConfigured: boolean }
+  durationMs: number
+  bytesSent: number
+  totalFrames: number
+  skippedFrames: number
+  measuredFps: number
+  congestion: number
+  secondary: OutputTestMetrics | null
+  recording: { durationMs: number; bytesWritten: number } | null
+  replayBuffer: { active: true } | null
+  obs: { activeFps: number; renderTotalFrames: number; renderSkippedFrames: number; outputTotalFrames: number; outputSkippedFrames: number }
+  verticalBacktrackStopped: boolean
+  warnings: string[]
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } })
+  const headers = new Headers(init?.headers)
+  if (init?.body !== undefined && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  const response = await fetch(url, { ...init, headers })
   const body = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
   return body as T
@@ -30,7 +52,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   bootstrap: () => request<Bootstrap>('/api/bootstrap'),
   status: () => request<RuntimeStatus>('/api/status'),
+  obsSetup: () => request<LocalObsSetupStatus>('/api/obs/setup-status'),
+  prepareObs: () => request<LocalObsSetupStatus>('/api/obs/prepare', { method: 'POST', body: '{}' }),
   comments: () => request<ChatMessage[]>('/api/comments'),
+  bgm: () => request<BgmLibraryStatus>('/api/bgm'),
+  addBgm: (filename: string, data: string) => request<BgmLibraryStatus>('/api/bgm', { method: 'POST', body: JSON.stringify({ filename, data }) }),
+  playBgm: (id: string) => request<BgmLibraryStatus>(`/api/bgm/${encodeURIComponent(id)}/play`, { method: 'POST', body: '{}' }),
+  controlBgm: (action: 'play' | 'pause' | 'stop' | 'restart') => request<BgmLibraryStatus>('/api/bgm/control', { method: 'POST', body: JSON.stringify({ action }) }),
+  deleteBgm: (id: string) => request<BgmLibraryStatus>(`/api/bgm/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  commonTemplate: () => request<CommonTemplateConfig>('/api/templates/common'),
+  saveCommonTemplate: (settings: CommonTemplateSettings) => request<CommonTemplateConfig>('/api/templates/common', { method: 'PUT', body: JSON.stringify(settings) }),
+  uploadCommonTemplateImage: (mime: string, data: string, filename: string) => request<CommonTemplateConfig>('/api/templates/common/image', { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
+  deleteCommonTemplateImage: () => request<CommonTemplateConfig>('/api/templates/common/image', { method: 'DELETE' }),
+  applyCommonTemplate: () => request<{ ok: true; rendered: number }>('/api/templates/common/apply', { method: 'POST', body: '{}' }),
   oauthStatus: () => request<OAuthConnectionStatuses>('/api/oauth/status'),
   oauthStart: (provider: OAuthProvider, openerOrigin: string) => request<OAuthStartResult>(`/api/oauth/${provider}/start`, { method: 'POST', body: JSON.stringify({ openerOrigin }) }),
   oauthPollTwitch: (requestId: string) => request<{ status: 'pending' | 'complete' }>(`/api/oauth/twitch/device/${encodeURIComponent(requestId)}`),
@@ -39,10 +73,14 @@ export const api = {
   deleteProfile: (id: string) => request<{ ok: true }>(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   uploadThumbnail: (id: string, mime: string, data: string, filename: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
   deleteThumbnail: (id: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'DELETE' }),
-  select: (gameId: string, captureMethod?: CaptureMethod) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod }) }),
+  select: (gameId: string, captureMethod?: CaptureMethod, preparePlatforms = true) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod, preparePlatforms }) }),
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
-  testTwitchOutput: () => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: '{}' }),
+  startRecordingOnly: () => request<{ ok: true; warnings: string[] }>('/api/recording/start', { method: 'POST', body: '{}' }),
+  stopRecordingOnly: () => request<{ ok: true; warnings: string[]; outputPath: string | null; remuxedPath: string | null }>('/api/recording/stop', { method: 'POST', body: '{}' }),
+  testTwitchOutput: (options: { durationMs?: number; includeSecondary?: boolean; includeRecording?: boolean; includeReplayBuffer?: boolean } = {}) => request<TwitchIngestTestResult>('/api/twitch/output-test', { method: 'POST', body: JSON.stringify(options) }),
+  autoAdjustAudio: (gameId: string, audio: GameProfile['audio'], durationMs = 15_000) => request<AudioCalibrationResult>('/api/audio/auto-adjust', { method: 'POST', body: JSON.stringify({ gameId, audio, durationMs }) }),
+  ensureAudio: () => request<{ ok: true; applied: boolean; warnings: string[] }>('/api/audio/ensure', { method: 'POST', body: '{}' }),
   replay: () => request<{ ok: true }>('/api/replay/save', { method: 'POST', body: '{}' }),
   scene: (sceneName: string) => request<{ ok: true }>('/api/scene', { method: 'POST', body: JSON.stringify({ sceneName }) }),
   selectFolder: (initialPath: string) => request<{ path: string | null }>('/api/folders/select', { method: 'POST', body: JSON.stringify({ initialPath }) }),
