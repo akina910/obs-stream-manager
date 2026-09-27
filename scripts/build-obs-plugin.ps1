@@ -13,6 +13,10 @@ $source = Join-Path $PSScriptRoot '..\native\obs-stream-manager-output'
 $pluginSource = Join-Path $source 'src\plugin-main.c'
 $originalCi = $env:CI
 $appVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
+$nativeVersion = (Get-Content -LiteralPath (Join-Path $source 'buildspec.json') -Raw | ConvertFrom-Json).version
+if ($nativeVersion -ne $appVersion) {
+  throw "Native OBS plugin version $nativeVersion does not match application version $appVersion"
+}
 
 try {
   git clone --quiet https://github.com/obsproject/obs-plugintemplate.git $workspace
@@ -47,16 +51,23 @@ try {
   & (Join-Path $workspace '.github\scripts\Build-Windows.ps1') -Target x64 -Configuration Release
   if ($LASTEXITCODE -ne 0) { throw "OBS plugin build failed with exit code $LASTEXITCODE" }
 
-  $dll = Get-ChildItem $workspace -Recurse -Filter 'obs-stream-manager-output.dll' -File | Select-Object -First 1
+  $dll = Get-ChildItem $workspace -Recurse -Filter 'obs-stream-manager-output-v2.dll' -File | Select-Object -First 1
   if (-not $dll) { throw 'Built OBS plugin DLL was not found' }
   $dllText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll.FullName))
   foreach ($requiredMarker in @('pluginVersion', 'apiVersion')) {
     if (-not $dllText.Contains($requiredMarker)) { throw "Built OBS plugin DLL is missing required marker: $requiredMarker" }
   }
+  if (-not $dllText.Contains($appVersion)) {
+    throw "Built OBS plugin DLL does not contain application version $appVersion"
+  }
   $dllSha256 = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
   $binaryDirectory = Join-Path $OutputDirectory 'bin\64bit'
   $localeDirectory = Join-Path $OutputDirectory 'data\locale'
   New-Item -ItemType Directory -Force -Path $binaryDirectory, $localeDirectory | Out-Null
+  $staleLegacyDll = Join-Path $binaryDirectory 'obs-stream-manager-output.dll'
+  if (Test-Path -LiteralPath $staleLegacyDll) {
+    Remove-Item -LiteralPath $staleLegacyDll -Force
+  }
   Copy-Item $dll.FullName (Join-Path $binaryDirectory $dll.Name) -Force
   Copy-Item (Join-Path $source 'data\locale\en-US.ini') (Join-Path $localeDirectory 'en-US.ini') -Force
   $license = Join-Path $OutputDirectory 'GPL-2.0.txt'

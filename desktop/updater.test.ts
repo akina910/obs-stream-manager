@@ -65,7 +65,8 @@ class FakeElectronUpdater extends EventEmitter {
 const stoppedStatus: RuntimeStatus = {
   obsConnected: true,
   streaming: false,
-  recording: false,
+      recording: false,
+      recordingOnly: false,
   replayBuffer: false,
   sourceRecord: false,
   verticalRecording: false,

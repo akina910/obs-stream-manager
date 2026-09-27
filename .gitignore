@@ -3,11 +3,10 @@ dist/
 coverage/
 output/
 release/
-build/provider-oauth.json
-build/obs-plugin/
-build/icon.ico
-build/icon-32.png
+build/
+artifacts/
 .playwright-cli/
+.artifacts/
 .DS_Store
 *.log
 

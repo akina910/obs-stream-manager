@@ -6,6 +6,7 @@ const stoppedStatus: RuntimeStatus = {
   obsConnected: true,
   streaming: false,
   recording: false,
+  recordingOnly: false,
   replayBuffer: false,
   sourceRecord: false,
   verticalRecording: false,
@@ -29,7 +30,6 @@ describe('runtime status labels', () => {
       ['Twitch', 'オフライン'],
       ['録画', '停止'],
       ['リプレイ', '停止'],
-      ['素材', '停止'],
       ['縦録画', '停止'],
     ])
   })
@@ -48,9 +48,28 @@ describe('runtime status labels', () => {
     expect(getExternalDeliveryWarning(active)).toContain('公開配信中とは確認できていません')
     expect(getRuntimeOutputs(active).find(({ key }) => key === 'recording')?.state).toBe('録画中')
     expect(getRuntimeOutputs(active).find(({ key }) => key === 'replay')?.state).toBe('動作中')
-    expect(getRuntimeOutputs(active).find(({ key }) => key === 'source')?.state).toBe('録画中')
     expect(getRuntimeOutputs(active).find(({ key }) => key === 'vertical')?.state).toBe('録画中')
     expect(getBroadcastStatus({ ...stoppedStatus, busy: true })).toEqual({ label: '配信停止中', detail: '切替処理中', tone: 'stopped' })
+  })
+
+  it('labels recording-only separately while keeping broadcast delivery stopped', () => {
+    const recordingOnly = { ...stoppedStatus, recording: true, recordingOnly: true }
+    expect(getBroadcastStatus(recordingOnly, 'Minecraft')).toEqual({
+      label: '録画専用モード',
+      detail: '配信停止・{game}録画中',
+      detailValues: { game: 'Minecraft' },
+      tone: 'sending',
+    })
+    expect(getBroadcastStatus(recordingOnly)).toEqual({ label: '録画専用モード', detail: '配信停止・選択中ゲーム録画中', tone: 'sending' })
+    expect(getRuntimeOutputs(recordingOnly).find(({ key }) => key === 'recording')).toMatchObject({ label: '録画のみ', active: true })
+    expect(getRuntimeOutputs(recordingOnly).find(({ key }) => key === 'obs')).toMatchObject({ state: '停止', active: false })
+  })
+
+  it('uses the actual recording identity even when the old profile list still says ASA', () => {
+    const status = { ...stoppedStatus, recording: true, recordingOnly: true, recordingGameId: 'minecraft', recordingGameName: 'Minecraft' }
+    expect(getBroadcastStatus(status, 'ASA').detailValues).toEqual({ game: 'Minecraft' })
+    expect(getBroadcastStatus({ ...status, recordingGameName: null }, 'ASA').detail).toBe('配信停止・選択中ゲーム録画中')
+    expect(getBroadcastStatus({ ...status, recording: false }, 'ASA').label).toBe('配信停止中')
   })
 
   it('reports external streaming only after a platform confirms live', () => {
@@ -71,5 +90,70 @@ describe('runtime status labels', () => {
     }
     expect(getBroadcastStatus(stopping)).toEqual({ label: '外部配信終了中', detail: '終了確認中', tone: 'sending' })
     expect(getExternalDeliveryWarning(stopping)).toContain('終了完了を確認しています')
+  })
+
+  it('labels a deferred live snapshot as previous information while retaining its safety active state', () => {
+    const status: RuntimeStatus = {
+      ...stoppedStatus, recording: true, recordingOnly: true, recordingGameName: 'Minecraft',
+      platforms: { ...stoppedStatus.platforms, youtube: { ...stoppedStatus.platforms.youtube, state: 'live', observation: 'deferred' } },
+    }
+    expect(getBroadcastStatus(status)).toEqual({ label: '録画専用モード', detail: '{game}録画中・外部配信は現在未確認', detailValues: { game: 'Minecraft' }, tone: 'sending' })
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: '前回ライブ・現在未確認', observation: 'deferred', active: true, tone: 'pending' })
+    expect(getExternalDeliveryWarning(status)).toContain('前回確認時')
+    expect(getExternalDeliveryWarning(status)).toContain('現在のライブ・終了状態は未確認')
+    expect(status.platforms.youtube.state).toBe('live')
+  })
+
+  it('does not claim a deferred stopping snapshot is currently stopping', () => {
+    const status: RuntimeStatus = { ...stoppedStatus, platforms: { ...stoppedStatus.platforms, youtube: { ...stoppedStatus.platforms.youtube, state: 'stopping', observation: 'deferred' } } }
+    expect(getBroadcastStatus(status)).toEqual({ label: '外部配信は現在未確認', detail: '前回確認した配信先: {services}', detailValues: { services: 'YouTube' }, tone: 'unknown' })
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')?.state).toBe('前回終了確認中・現在未確認')
+    expect(getExternalDeliveryWarning(status)).not.toContain('終了完了を確認しています')
+  })
+
+  it('does not hide fresh external live states or errors alongside deferred snapshots', () => {
+    const status: RuntimeStatus = {
+      ...stoppedStatus,
+      platforms: {
+        youtube: { ...stoppedStatus.platforms.youtube, state: 'live', observation: 'deferred' },
+        twitch: { ...stoppedStatus.platforms.twitch, state: 'live' },
+      },
+    }
+    expect(getBroadcastStatus(status)).toEqual({ label: '外部配信中', detail: 'Twitch', tone: 'live' })
+    expect(getExternalDeliveryWarning(status)).toContain('外部サービスではまだライブ状態')
+    status.platforms.twitch = { ...status.platforms.twitch, state: 'error', detail: 'Twitch connection failed' }
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'twitch')).toMatchObject({ state: '確認失敗', tone: 'error', detail: 'Twitch connection failed' })
+  })
+
+  it('does not call an unobserved deferred destination offline or unprepared', () => {
+    const status: RuntimeStatus = { ...stoppedStatus, platforms: { ...stoppedStatus.platforms, youtube: { state: 'unprepared', observation: 'deferred', detail: '録画中は配信状態を確認しません', checkedAt: null } } }
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: '現在未確認', active: false })
+    expect(getBroadcastStatus(status).label).toBe('外部配信は現在未確認')
+  })
+
+  it('classifies an expired connection as an actionable pending state instead of repeated check failure', () => {
+    const status: RuntimeStatus = { ...stoppedStatus, platforms: { ...stoppedStatus.platforms, youtube: { state: 'error', connectionIssue: 'reconnect_required', detail: 'YouTubeを再接続してください', checkedAt: null } } }
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: '再接続が必要', tone: 'pending', active: false, connectionIssue: 'reconnect_required' })
+    expect(getBroadcastStatus(status)).toEqual({ label: '配信先の再接続が必要', detail: '外部配信は現在未確認', tone: 'sending' })
+    expect(status.platforms.youtube.state).toBe('error')
+  })
+
+  it('keeps local recording independent from deferred authentication without claiming the connection recovered', () => {
+    const status: RuntimeStatus = { ...stoppedStatus, recording: true, recordingOnly: true, recordingGameName: 'Minecraft', platforms: { ...stoppedStatus.platforms, youtube: { state: 'unprepared', observation: 'deferred', connectionIssue: 'reconnect_required', detail: '配信するときに再接続してください', checkedAt: null } } }
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: '配信には再接続が必要', tone: 'pending', active: false, observation: 'deferred' })
+    expect(getBroadcastStatus(status)).toMatchObject({ label: '録画専用モード', detail: '{game}録画中・外部配信は現在未確認', detailValues: { game: 'Minecraft' } })
+    status.platforms.youtube = { ...status.platforms.youtube, state: 'live' }
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: '前回ライブ・現在未確認', active: true, connectionIssue: 'reconnect_required' })
+  })
+
+  it('does not downgrade a confirmed live destination or suppress normal network failures', () => {
+    const status: RuntimeStatus = { ...stoppedStatus, streaming: true, platforms: { ...stoppedStatus.platforms, youtube: { state: 'live', connectionIssue: 'reconnect_required', detail: '公開ページでライブ確認済み、管理操作には再認証が必要', checkedAt: null } } }
+    expect(getBroadcastStatus(status)).toMatchObject({ label: '外部配信中', detail: 'YouTube', tone: 'live' })
+    expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: 'ライブ', tone: 'active', active: true })
+    for (const detail of ['Network request failed', 'HTTP 503']) {
+      status.platforms.youtube = { state: 'error', detail, checkedAt: null }
+      expect(getRuntimeOutputs(status).find(({ key }) => key === 'youtube')).toMatchObject({ state: '確認失敗', tone: 'error', detail })
+      expect(getExternalDeliveryWarning(status)).toContain('公開配信中とは確認できていません')
+    }
   })
 })

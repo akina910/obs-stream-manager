@@ -5,7 +5,7 @@ import { OAuthManager } from './oauth.js'
 import type { SecretStore } from './secrets.js'
 import type { DataStore } from './storage.js'
 
-function harness() {
+function harness(onYouTubeAuthenticated: () => void = () => undefined) {
   let config = structuredClone(defaultConfig)
   const secretValues = new Map<string, string>()
   const store = {
@@ -20,7 +20,7 @@ function harness() {
     }),
   } as unknown as SecretStore
   return {
-    oauth: new OAuthManager(store, secrets, 'http://127.0.0.1:4417'),
+    oauth: new OAuthManager(store, secrets, 'http://127.0.0.1:4417', undefined, onYouTubeAuthenticated),
     config: () => config,
     setConfig: (next: AppConfig) => { config = structuredClone(next) },
     secretValues,
@@ -33,6 +33,36 @@ afterEach(() => {
 })
 
 describe('OAuthManager one-button authorization', () => {
+  it('fences in-flight authentication before successful credential updates, including a reused refresh token', async () => {
+    const authenticated = vi.fn(() => {
+      expect(test.secretValues.get('youtube-oauth-health')).toBe('reconnect_required')
+      expect(test.secretValues.get('youtube-refresh-token')).toBe('same-token')
+    })
+    const test = harness(authenticated)
+    test.setConfig({ ...test.config(), youtube: { ...test.config().youtube, clientId: 'youtube-client' } })
+    test.secretValues.set('youtube-client-secret', 'youtube-secret')
+    test.secretValues.set('youtube-refresh-token', 'same-token')
+    test.secretValues.set('youtube-oauth-health', 'reconnect_required')
+    const started = await test.oauth.start('youtube', 'http://127.0.0.1:4417')
+    if (started.mode !== 'redirect') throw new Error('Expected redirect')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ refresh_token: 'same-token' }), { status: 200 }))
+    await test.oauth.exchange('youtube', 'code', new URL(started.url).searchParams.get('state')!)
+    expect(authenticated).toHaveBeenCalledTimes(1)
+    expect(test.secretValues.has('youtube-oauth-health')).toBe(false)
+  })
+
+  it('does not invalidate existing authentication when a new OAuth exchange fails', async () => {
+    const authenticated = vi.fn()
+    const test = harness(authenticated)
+    test.setConfig({ ...test.config(), youtube: { ...test.config().youtube, clientId: 'youtube-client' } })
+    test.secretValues.set('youtube-client-secret', 'youtube-secret')
+    const started = await test.oauth.start('youtube', 'http://127.0.0.1:4417')
+    if (started.mode !== 'redirect') throw new Error('Expected redirect')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 }))
+    await expect(test.oauth.exchange('youtube', 'code', new URL(started.url).searchParams.get('state')!)).rejects.toThrow()
+    expect(authenticated).not.toHaveBeenCalled()
+  })
+
   it('reports setup, ready, and in-progress stages from the real OAuth session state', async () => {
     const test = harness()
 

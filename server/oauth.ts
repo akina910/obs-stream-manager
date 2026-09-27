@@ -58,6 +58,7 @@ export class OAuthManager {
     private readonly secrets: SecretStore,
     private readonly callbackOrigin: string,
     private readonly allowedOpenerOrigins: ReadonlySet<string> = new Set([callbackOrigin]),
+    private readonly onYouTubeAuthenticated: () => void = () => undefined,
   ) {}
 
   private redirectUri(): string {
@@ -255,6 +256,9 @@ export class OAuthManager {
     })
     const token = await response.json().catch(() => ({})) as { refresh_token?: string }
     if (!response.ok || !token.refresh_token) throw new Error(message(token, 'YouTube refresh token was not returned'))
+    // Fence old refresh/status requests even if Google reuses the same refresh
+    // token string. No await may separate this fence from credential updates.
+    this.onYouTubeAuthenticated()
     clearYouTubeStreamSecrets(this.secrets)
     this.secrets.set('youtube-oauth-health', '')
     this.secrets.set('youtube-refresh-token', token.refresh_token)
