@@ -13,6 +13,108 @@ afterEach(async () => {
 })
 
 describe('CaptureDetector', () => {
+  describe('probeRunningGame', () => {
+    it.each(['local', 'window'] as const)('checks only the saved executable for %s capture without scanning installations', async (method) => {
+      const detector = new CaptureDetector()
+      const processes = vi.spyOn(detector, 'runningProcesses').mockResolvedValue([' ArkAscended.exe ', 'steam.exe'])
+      const scan = vi.spyOn(detector as unknown as {
+        installedExecutableNames: (profile: GameProfile) => Promise<string[]>
+      }, 'installedExecutableNames').mockRejectedValue(new Error('unexpected filesystem scan'))
+      const profile = structuredClone(starterProfiles[0])
+      profile.library.installDirectory = 'J:\\SteamLibrary\\steamapps\\common\\ARK Survival Ascended'
+      const before = structuredClone(profile)
+
+      await expect(detector.probeRunningGame(profile, method)).resolves.toBe('running')
+      processes.mockResolvedValue(['steam.exe', 'Minecraft.Windows.exe'])
+      await expect(detector.probeRunningGame(profile, method)).resolves.toBe('stopped')
+      expect(scan).not.toHaveBeenCalled()
+      expect(profile).toEqual(before)
+    })
+
+    it('returns unknown for failed or empty inventories and uses the next successful observation independently', async () => {
+      const detector = new CaptureDetector()
+      vi.spyOn(detector, 'runningProcesses')
+        .mockRejectedValueOnce(new Error('tasklist unavailable'))
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([' ', ''])
+        .mockResolvedValueOnce(['steam.exe'])
+      const profile = structuredClone(starterProfiles[0])
+
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('stopped')
+      expect(detector.processInventoryWarning()).toBeNull()
+    })
+
+    it('does not infer a stopped game when no executable is saved', async () => {
+      const detector = new CaptureDetector()
+      vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['steam.exe'])
+      const profile = structuredClone(starterProfiles[0])
+      profile.capture.executableNames = []
+
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+    })
+
+    it.each(['elgato', 'display', 'auto'] as const)('cannot infer game exit from %s capture', async (method) => {
+      const detector = new CaptureDetector()
+      const processes = vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['steam.exe'])
+
+      await expect(detector.probeRunningGame(structuredClone(starterProfiles[0]), method)).resolves.toBe('unknown')
+      expect(processes).not.toHaveBeenCalled()
+    })
+
+    it('recognizes Minecraft Java with its game title and treats missing title evidence as unknown', async () => {
+      const detector = new CaptureDetector()
+      const processes = vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['java.exe'])
+      const windows = vi.spyOn(detector, 'runningJavaGameWindows').mockResolvedValue([
+        { executableName: 'java.exe', windowTitle: 'Minecraft* 1.21.1 - Multiplayer (3rd-party Server)' },
+      ])
+      const profile = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('running')
+      windows.mockResolvedValue([{ executableName: 'java.exe', windowTitle: 'Minecraft server' }])
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      windows.mockResolvedValue([{ executableName: 'java.exe', windowTitle: 'IntelliJ IDEA' }])
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      windows.mockResolvedValue([])
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      windows.mockRejectedValue(new Error('window inventory unavailable'))
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('unknown')
+      processes.mockResolvedValue(['steam.exe'])
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('stopped')
+    })
+
+    it('recognizes Minecraft Bedrock without inspecting unrelated Java windows', async () => {
+      const detector = new CaptureDetector()
+      vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['minecraft.windows.exe', 'javaw.exe'])
+      const windows = vi.spyOn(detector, 'runningJavaGameWindows').mockRejectedValue(new Error('unavailable'))
+      const profile = structuredClone(starterProfiles.find(({ id }) => id === 'minecraft')!)
+
+      await expect(detector.probeRunningGame(profile, 'local')).resolves.toBe('running')
+      expect(windows).not.toHaveBeenCalled()
+    })
+
+    it('only confirms a GeForce NOW game from a matching title and confirms exit when the client disappears', async () => {
+      const detector = new CaptureDetector()
+      const processes = vi.spyOn(detector, 'runningProcesses').mockResolvedValue(['geforcenow.exe'])
+      const titles = vi.spyOn(detector, 'runningGeForceNowWindowTitles').mockResolvedValue(['ARK: Survival Ascended - GeForce NOW'])
+      const profile = structuredClone(starterProfiles[0])
+
+      await expect(detector.probeRunningGame(profile, 'geforce_now')).resolves.toBe('running')
+      titles.mockResolvedValue(['GeForce NOW'])
+      await expect(detector.probeRunningGame(profile, 'geforce_now')).resolves.toBe('unknown')
+      titles.mockResolvedValue(['PRAGMATA - GeForce NOW'])
+      await expect(detector.probeRunningGame(profile, 'geforce_now')).resolves.toBe('unknown')
+      titles.mockResolvedValue([])
+      await expect(detector.probeRunningGame(profile, 'geforce_now')).resolves.toBe('unknown')
+      titles.mockRejectedValue(new Error('window inventory unavailable'))
+      await expect(detector.probeRunningGame(profile, 'geforce_now')).resolves.toBe('unknown')
+      processes.mockResolvedValue(['steam.exe'])
+      await expect(detector.probeRunningGame(profile, 'geforce_now')).resolves.toBe('stopped')
+    })
+  })
+
   it('uses the trusted Windows system tasklist path instead of PATH lookup', () => {
     expect(windowsTasklistExecutable('C:\\Windows')).toBe('C:\\Windows\\System32\\tasklist.exe')
     expect(windowsTasklistExecutable('  D:\\Windows  ')).toBe('D:\\Windows\\System32\\tasklist.exe')

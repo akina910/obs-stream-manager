@@ -103,12 +103,15 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .platform-card.pending > strong { color: var(--pending); }
 .platform-card.error > strong { color: var(--error); }
 .destination-card { min-height: 56px; justify-content: center; gap: 6px; }
-.destination-head { justify-content: space-between; gap: 8px !important; }
+.destination-head { justify-content: space-between; flex-wrap: wrap; gap: 8px !important; }
 .destination-name { min-width: 0; display: flex; align-items: center; gap: 5px; overflow: hidden; color: #aab2c5; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.destination-head > strong { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.destination-head > strong { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; white-space: normal; }
 .destination-card.active .destination-head > strong { color: var(--live); }
 .destination-card.pending .destination-head > strong { color: var(--pending); }
 .destination-card.error .destination-head > strong { color: var(--error); }
+.destination-note { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.destination-settings-button { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border: 1px solid var(--border-mid); border-radius: 5px; background: var(--surface-2); color: var(--text); font-size: 11px; cursor: pointer; }
+.destination-settings-button:focus-visible { outline: 2px solid var(--pending); outline-offset: 2px; }
 .viewer-count { width: 100%; min-height: 28px; padding: 4px 8px; display: flex; align-items: center; gap: 5px; overflow: hidden; border: 1px solid rgba(70, 212, 126, .32); border-radius: 7px; color: #9aebba; background: rgba(70, 212, 126, .1); font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .viewer-count small { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .viewer-count strong { margin-left: auto; color: #c5f8d9; font: 800 17px 'IBM Plex Mono', monospace; line-height: 1; }

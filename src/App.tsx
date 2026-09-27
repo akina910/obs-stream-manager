@@ -15,6 +15,7 @@ import { createTranslator, I18nProvider, useI18n, type TranslationValues, type T
 import { completedOAuthProviders, oauthRefreshInterval } from './oauth-refresh'
 import { clientUpdateIntervalMs, createClientUpdateCheck } from './client-update'
 import { orderProfiles, recentProfiles, replaceOrderedProfile } from './profile-order'
+import { startStreamWithFallback } from './stream-start'
 import { getBroadcastStatus, getExternalDeliveryWarning, getRuntimeOutputs, type RuntimeOutputStatus } from './runtime-status'
 import { CommentsSection } from './CommentsSection'
 import { BgmLibrarySection } from './BgmLibrarySection'
@@ -124,7 +125,7 @@ function LiveElapsed({ milliseconds }: { milliseconds: number }) {
   return <>{[hours, minutes, remainder].map((value) => String(value).padStart(2, '0')).join(':')}</>
 }
 
-export function RuntimeStatusBar({ status, selectedGameName }: { status: RuntimeStatus; selectedGameName?: string | null }) {
+export function RuntimeStatusBar({ status, selectedGameName, onOpenConnectionSettings }: { status: RuntimeStatus; selectedGameName?: string | null; onOpenConnectionSettings?: (provider: OAuthProvider) => void }) {
   const { t } = useI18n()
   const [recordingsOpen, setRecordingsOpen] = useState(false)
   const broadcast = getBroadcastStatus(status, selectedGameName)
@@ -132,8 +133,8 @@ export function RuntimeStatusBar({ status, selectedGameName }: { status: Runtime
   const platformOutputs = outputs.slice(0, 3)
   const obsOutput = platformOutputs[0]
   const destinationOutputs = platformOutputs.slice(1)
-  const activeDestinations = destinationOutputs.filter((output) => output.active).length
-  const activeViewerPlatforms = destinationOutputs.flatMap((output) => output.active && (output.key === 'youtube' || output.key === 'twitch') ? [status.platforms[output.key]] : [])
+  const activeDestinations = destinationOutputs.filter((output) => output.active && output.observation !== 'deferred').length
+  const activeViewerPlatforms = destinationOutputs.flatMap((output) => output.active && output.observation !== 'deferred' && (output.key === 'youtube' || output.key === 'twitch') ? [status.platforms[output.key]] : [])
   const activeViewerCounts = activeViewerPlatforms.flatMap((platform) => platform.viewerCountState === 'available' && platform.viewerCount != null ? [platform.viewerCount] : [])
   const combinedViewerCount = activeViewerCounts.reduce((total, count) => total + count, 0)
   const viewerCountHidden = activeViewerPlatforms.some(({ viewerCountState }) => viewerCountState === 'hidden')
@@ -147,6 +148,7 @@ export function RuntimeStatusBar({ status, selectedGameName }: { status: Runtime
   const activeRecordings = recordingOutputs.filter((output) => output.active).length
   const deliveryWarning = getExternalDeliveryWarning(status)
   const live = broadcast.tone === 'live'
+  const localRecording = status.recordingOnly && status.recording && !status.streaming
 
   return (
     <section className={`runtime-status tone-${broadcast.tone}`} aria-label={t('現在の配信状態')}>
@@ -158,7 +160,7 @@ export function RuntimeStatusBar({ status, selectedGameName }: { status: Runtime
         </div>
         <span className="scene-label">SCENE: {status.currentScene ?? t('不明')}{live && <> · LIVE{status.streaming && status.streamElapsedMs !== undefined ? <> <LiveElapsed milliseconds={status.streamElapsedMs} /></> : null}</>}</span>
       </div>
-      {deliveryWarning && <div className={`runtime-status-warning ${!status.streaming && status.platforms.youtube.state === 'live' || !status.streaming && status.platforms.twitch.state === 'live' ? 'danger' : ''}`} role="alert"><AlertTriangle size={14} /><span>{t(deliveryWarning)}</span></div>}
+      {deliveryWarning && <div className={`runtime-status-warning ${!status.streaming && destinationOutputs.some((output) => output.active && output.observation !== 'deferred') ? 'danger' : ''}`} role="alert"><AlertTriangle size={14} /><span>{t(deliveryWarning)}</span></div>}
       <div className="delivery-map">
         <div className={`platform-card delivery-source ${obsOutput.tone}`} aria-label={`${t(obsOutput.label)}: ${t(obsOutput.state)}`}>
           <div><ServiceIcon service="obs" /><span>{t(obsOutput.label)}</span></div>
@@ -169,14 +171,19 @@ export function RuntimeStatusBar({ status, selectedGameName }: { status: Runtime
           {destinationOutputs.map((output) => {
             const platform = output.key === 'youtube' || output.key === 'twitch' ? status.platforms[output.key] : null
             const viewerState = platform?.viewerCountState ?? (platform?.viewerCount != null ? 'available' : 'unavailable')
-            const viewerLabel = viewerState === 'hidden'
+            const viewerLabel = platform?.observation === 'deferred' ? t('現在未確認') : platform?.connectionIssue === 'reconnect_required' && !output.active ? t('再接続が必要') : viewerState === 'hidden'
               ? t('視聴者数は非表示')
               : viewerState === 'available' && platform?.viewerCount != null
                 ? t('同時視聴 {count}', { count: platform.viewerCount })
                 : t('視聴者数取得待ち')
-            return <div className={`platform-card destination-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}; ${viewerLabel}`} title={output.detail ? t(output.detail) : undefined}>
-              <div className="destination-head"><span className="destination-name"><ServiceIcon service={output.key === 'youtube' ? 'youtube' : 'twitch'} />{t(output.label)}</span><strong><StatusDot tone={output.tone} pulse={output.active} />{t(output.state)}</strong></div>
-              {output.active && <span className={`viewer-count ${viewerState}`} title={platform?.viewerCountDetail ? t(platform.viewerCountDetail) : undefined}>{viewerState === 'available' && platform?.viewerCount != null ? <><Users size={14} /><small>{t('同時視聴')}</small><strong>{platform.viewerCount.toLocaleString()}</strong></> : <><Users size={13} /><span>{viewerLabel}</span></>}</span>}
+            return <div className={`platform-card destination-card ${output.tone}`} key={output.key} aria-label={`${t(output.label)}: ${t(output.state)}${output.active && output.observation !== 'deferred' ? `; ${viewerLabel}` : ''}`} title={output.detail ? t(output.detail) : undefined}>
+              <div className="destination-head"><span className="destination-name"><ServiceIcon service={output.key === 'youtube' ? 'youtube' : 'twitch'} />{t(output.label)}</span><strong><StatusDot tone={output.tone} pulse={output.active && output.observation !== 'deferred'} />{t(output.state)}</strong></div>
+              {output.active && output.observation !== 'deferred' && <span className={`viewer-count ${viewerState}`} title={platform?.viewerCountDetail ? t(platform.viewerCountDetail) : undefined}>{viewerState === 'available' && platform?.viewerCount != null ? <><Users size={14} /><small>{t('同時視聴')}</small><strong>{platform.viewerCount.toLocaleString()}</strong></> : <><Users size={13} /><span>{viewerLabel}</span></>}</span>}
+              {localRecording && (output.observation === 'deferred' || output.connectionIssue === 'reconnect_required') && <p className="destination-note">{t('録画のみでは配信先への接続は不要です')}</p>}
+              {output.connectionIssue === 'reconnect_required' && <>
+                <p className="destination-note">{t(output.active && output.observation !== 'deferred' ? '配信の管理・状態確認には再接続が必要です' : '配信するには設定画面で再接続してください')}</p>
+                {onOpenConnectionSettings && <button type="button" className="destination-settings-button" aria-label={t('{service}の接続設定を開く', { service: output.label })} onClick={() => onOpenConnectionSettings(output.key === 'youtube' ? 'youtube' : 'twitch')}><Settings size={12} />{t('接続設定を開く')}</button>}
+              </>}
             </div>
           })}
         </div>
@@ -899,11 +906,12 @@ export default function App() {
     void run(async () => { const saved = await api.saveProfile({ ...profile, favorite: !profile.favorite }); setProfiles((current) => replaceOrderedProfile(current, saved)); setToast({ kind: 'success', text: saved.favorite ? 'お気に入りに追加しました' : 'お気に入りから外しました' }) })
   }
   const start = () => void run(async () => {
-    const failures = selectedServiceResults.current.filter((service) => !service.ok)
-    const twitchFailure = failures.find((service) => service.service === 'twitch')
-    const canContinueYouTubeOnly = Boolean(twitchFailure) && failures.every((service) => service.service === 'twitch')
-    if (canContinueYouTubeOnly && !window.confirm(`${t('Twitchの配信準備に失敗しています: {error}', { error: twitchFailure?.message ?? '' })}\n\n${t('YouTubeだけで続行しますか？')}`)) return
-    const result = await api.start(canContinueYouTubeOnly)
+    const result = await startStreamWithFallback({
+      start: api.start,
+      onServices: (services) => { selectedServiceResults.current = services },
+      confirmYouTubeOnly: (message) => window.confirm(`${t('Twitchの配信準備に失敗しています: {error}', { error: message })}\n\n${t('YouTubeだけで続行しますか？')}`),
+    })
+    if (!result) return
     setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信と録画を開始しました' })
   })
   const stop = () => void run(async () => { const result = await api.stop(); setToast({ kind: result.warnings.length ? 'warning' : 'success', text: result.warnings[0] ?? '配信を終了しました' }) })
@@ -1043,7 +1051,7 @@ export default function App() {
     <header className="app-header"><div className="brand"><div className="brand-mark"><BrandGlyph /></div><strong>STREAM MANAGER</strong></div><div className={`header-status ${status.obsConnected ? 'connected' : 'error'}`}><StatusDot tone={status.obsConnected ? 'live' : 'error'} /><span>OBS {t(status.obsConnected ? '接続中' : '未接続')}</span></div></header>
     <DesktopLaunchNotice />
     <nav className="tabs">{groups.map(({ id, label }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{t(label)}</button>)}</nav>
-    <RuntimeStatusBar status={status} selectedGameName={selected?.displayName} />
+    <RuntimeStatusBar status={status} selectedGameName={selected?.displayName} onOpenConnectionSettings={() => setTab('settings')} />
     <CommentsSection comments={comments} language={language} streaming={status.streaming} t={t} />
     {tab === 'settings' ? (oauthStatus ? <SettingsView
       key={JSON.stringify(config)}

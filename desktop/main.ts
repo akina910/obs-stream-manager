@@ -7,6 +7,8 @@ import { RuntimeStatusSchema } from '../shared/contracts.js'
 import { OBS_OUTPUT_PLUGIN_DIRECTORY, OBS_OUTPUT_PLUGIN_FILENAME } from '../shared/obs-output-plugin.js'
 import { redactSensitiveText } from '../shared/redaction.js'
 import type { DesktopUpdateState, UpdateBlockReason } from '../shared/update-contracts.js'
+import type { GameExitAction, GameExitPrompt, GameExitResponse } from '../shared/game-exit.js'
+import { GameExitDialogController, gameExitActionFromResponse, gameExitDialogOptions, type GameExitDialogEvent } from './game-exit-dialog.js'
 import {
   backgroundLaunchArgument,
   DesktopPreferenceStore,
@@ -33,6 +35,8 @@ import { createElectronUpdateAdapter, getUpdateBlockReason, ManualUpdateService 
 type ServerModule = {
   startServer: () => Promise<{ url: string }>
   stopServer: () => Promise<void>
+  pollGameExitPrompt: () => Promise<GameExitPrompt | null>
+  respondToGameExitPrompt: (id: string, action: GameExitAction) => Promise<GameExitResponse>
 }
 
 const dockUrl = 'http://127.0.0.1:4317'
@@ -58,6 +62,14 @@ let closeNoticeShown = false
 let audioCalibrationWindow: BrowserWindow | null = null
 let audioCalibrationHideTimer: ReturnType<typeof setTimeout> | null = null
 let obsPluginRetry: ObsPluginInstallRetry | null = null
+let gameExitDialogs: GameExitDialogController | null = null
+let gameExitLogWrite = Promise.resolve()
+
+function notifyGameExitResult(content: string, failed = false): void {
+  try {
+    tray?.displayBalloon({ title: 'OBS Stream Manager', content: content.slice(0, 250), iconType: failed ? 'warning' : 'info' })
+  } catch { /* A notification failure must not retry a completed stop. */ }
+}
 
 function clearAudioCalibrationWindow(window?: BrowserWindow): void {
   if (window && audioCalibrationWindow !== window) return
@@ -163,6 +175,21 @@ async function installObsOutputPlugin(): Promise<ObsPluginInstallState> {
     pluginRoot,
     localeSource: path.join(process.resourcesPath, 'obs-plugin', 'data', 'locale', 'en-US.ini'),
   })
+}
+
+function recordGameExitDialogEvent(event: GameExitDialogEvent): void {
+  const timestamp = new Date().toISOString()
+  const directory = process.env.OBS_STREAM_MANAGER_DATA_DIR?.trim()
+    || path.join(app.getPath('appData'), 'obs-stream-manager')
+  const safeEvent = {
+    ...event,
+    ...(event.error ? { error: redactSensitiveText(event.error) } : {}),
+    ...(event.warnings ? { warnings: event.warnings.map((warning) => redactSensitiveText(warning)) } : {}),
+  }
+  gameExitLogWrite = gameExitLogWrite.then(async () => {
+    await mkdir(path.join(directory, 'logs'), { recursive: true })
+    await appendFile(path.join(directory, 'logs', 'game-exit-dialog.jsonl'), `${JSON.stringify({ timestamp, ...safeEvent })}\n`, 'utf8')
+  }).catch(() => undefined)
 }
 
 function isAllowedExternalUrl(value: string): boolean {
@@ -346,13 +373,17 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', (event) => {
     quitRequested = true
+    const gameExitShutdown = gameExitDialogs?.stop() ?? Promise.resolve()
+    gameExitDialogs = null
     if (shutdownComplete || !serverModule) return
     event.preventDefault()
     if (shutdownStarted) return
     shutdownStarted = true
-    void serverModule.stopServer()
+    const stoppingServer = serverModule
+    void gameExitShutdown.then(() => stoppingServer.stopServer())
       .catch(async (error) => { await writeStartupError(error) })
-      .finally(() => {
+      .finally(async () => {
+        await gameExitLogWrite
         shutdownComplete = true
         obsPluginRetry?.stop()
         obsPluginRetry = null
@@ -418,6 +449,27 @@ if (!app.requestSingleInstanceLock()) {
         onStateChange: broadcastUpdateState,
       })
       createTray()
+      const runningServer = serverModule
+      gameExitDialogs = new GameExitDialogController({
+        poll: () => runningServer.pollGameExitPrompt(),
+        show: async (prompt, signal) => {
+          if (signal.aborted) return 'dismiss'
+          const result = await dialog.showMessageBox(gameExitDialogOptions(prompt, signal))
+          return gameExitActionFromResponse(result.response)
+        },
+        respond: (id, action) => runningServer.respondToGameExitPrompt(id, action),
+        recordEvent: recordGameExitDialogEvent,
+        completed: (result) => {
+          if (result.warnings.length) notifyGameExitResult(result.warnings.join('\n'), true)
+          else if (result.stopped) notifyGameExitResult('選択した録画・配信を終了しました。')
+        },
+        failed: (error) => {
+          void markLifecycle(`game-exit-confirmation-failed ${safeError(error)}`).catch(() => undefined)
+          notifyGameExitResult(`終了操作を完了できませんでした。Stream Managerで状態を確認してください。\n${safeError(error)}`, true)
+        },
+      })
+      gameExitDialogs.start()
+      await markLifecycle('game-exit-monitor-ready').catch(() => undefined)
       if (!hasDesktopArgument(process.argv, backgroundLaunchArgument)) {
         mainWindow = createWindow()
         await markLifecycle('window-created').catch(() => undefined)

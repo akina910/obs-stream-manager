@@ -1090,6 +1090,100 @@ describe('PlatformServices YouTube broadcast lifecycle', () => {
     expect(transitionUrl.searchParams.get('broadcastStatus')).toBe('complete')
   })
 
+  it.each(['token', 'broadcast', 'lifecycle', 'lookup', 'failure'] as const)('cancels a confirmed stop if OBS resumes during the %s request without completing YouTube', async (waitingAt) => {
+    const secrets = new Map([
+      ['youtube-refresh-token', 'youtube-refresh'],
+      ['youtube-client-secret', 'youtube-client-secret'],
+      ['youtube-pending-completion-id', 'broadcast-id'],
+    ])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.clientId = 'youtube-client-id'
+    configured.youtube.broadcastId = 'broadcast-id'
+    const profile = structuredClone(starterProfiles[0])
+    let releaseRequest!: () => void
+    let requestEntered!: () => void
+    const requestPending = new Promise<void>((resolve) => { releaseRequest = resolve })
+    const entered = new Promise<void>((resolve) => { requestEntered = resolve })
+    const pauseRequest = async () => {
+      requestEntered()
+      await requestPending
+    }
+    const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
+    let broadcastReads = 0
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.toString() === 'https://oauth2.googleapis.com/token') {
+        if (waitingAt === 'token') await pauseRequest()
+        return json({ access_token: 'youtube-access', expires_in: 3600 })
+      }
+      if (url.pathname.endsWith('/liveBroadcasts')) {
+        broadcastReads += 1
+        if (waitingAt === 'lookup' && broadcastReads === 1) return json({ items: [] })
+        if (waitingAt === 'lifecycle' && broadcastReads === 1) {
+          return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus: 'liveStarting' }, contentDetails: {} }] })
+        }
+        await pauseRequest()
+        if (waitingAt === 'failure') throw new Error('temporary network failure')
+        return json({ items: [{ id: 'broadcast-id', status: { lifeCycleStatus: 'live' }, contentDetails: { enableAutoStop: false } }] })
+      }
+      if (url.pathname.endsWith('/liveBroadcasts/transition')) return json({ id: 'broadcast-id', status: { lifeCycleStatus: 'complete' } })
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const platforms = new PlatformServices(secretStore, {} as DataStore, { pollIntervalMs: 1, transitionTimeoutMs: 100, broadcastLookupTimeoutMs: 100 })
+    const invalidate = vi.spyOn(platforms, 'invalidateLiveStatus')
+    const internals = platforms as unknown as {
+      youtubePendingCompletionId: string | null
+      youtubeLocallyStopped: { broadcastId: string } | null
+    }
+    let outputStopped = true
+    const cancelled = new Error('OBS output resumed after confirmation')
+    const completion = platforms.completeYouTubeBroadcast(configured, profile, () => {
+      if (!outputStopped) throw cancelled
+    })
+    const rejection = expect(completion).rejects.toBe(cancelled)
+    await entered
+    outputStopped = false
+    releaseRequest()
+    await rejection
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/liveBroadcasts/transition'))).toBe(false)
+    expect(internals.youtubePendingCompletionId).toBeNull()
+    expect(internals.youtubeLocallyStopped).toBeNull()
+    expect(secrets.get('youtube-pending-completion-id')).toBe('')
+    expect(invalidate).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects an already-stale stop confirmation without HTTP requests or retry markers', async () => {
+    const secrets = new Map([['youtube-pending-completion-id', 'broadcast-id']])
+    const secretStore = {
+      get: vi.fn((name: string) => secrets.get(name) ?? null),
+      set: vi.fn((name: string, value: string) => { secrets.set(name, value) }),
+    } as unknown as SecretStore
+    const configured = structuredClone(defaultConfig)
+    configured.youtube.broadcastId = 'broadcast-id'
+    const platforms = new PlatformServices(secretStore, {} as DataStore)
+    const internals = platforms as unknown as {
+      youtubePendingCompletionId: string | null
+      youtubeLocallyStopped: { broadcastId: string; expiresAt: number } | null
+      youtubeApiLimitUntil: number
+    }
+    internals.youtubeLocallyStopped = { broadcastId: 'broadcast-id', expiresAt: Date.now() + 60_000 }
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    const cancelled = new Error('quotaExceeded-looking guard cancellation')
+
+    await expect(platforms.completeYouTubeBroadcast(configured, null, () => { throw cancelled })).rejects.toBe(cancelled)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(internals.youtubePendingCompletionId).toBeNull()
+    expect(internals.youtubeLocallyStopped).toBeNull()
+    expect(internals.youtubeApiLimitUntil).toBe(0)
+    expect(secrets.get('youtube-pending-completion-id')).toBe('')
+  })
+
   it('reports OBS output stopped immediately while YouTube auto-stop is still updating its public lifecycle', async () => {
     const secrets = new Map([
       ['youtube-refresh-token', 'youtube-refresh'],

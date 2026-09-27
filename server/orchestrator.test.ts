@@ -4,7 +4,7 @@ import { defaultConfig } from './defaults.js'
 import { starterProfiles } from './defaults.js'
 import type { AppLogger } from './logger.js'
 import type { ObsController } from './obs.js'
-import { StreamOrchestrator } from './orchestrator.js'
+import { StreamOrchestrator, streamPreparationErrorServices } from './orchestrator.js'
 import type { PlatformServices } from './platforms.js'
 import type { DataStore } from './storage.js'
 import type { BgmLibraryStore } from './bgm-library.js'
@@ -39,7 +39,16 @@ describe('StreamOrchestrator operation exclusion', () => {
       processInventoryWarning: vi.fn().mockReturnValue(null),
     }
     const platforms = {
-      getLiveStatus: vi.fn(), prepare: vi.fn(), startYouTubeBroadcast: vi.fn(),
+      getLiveStatus: vi.fn().mockResolvedValue({
+        youtube: { state: 'error', detail: 'YouTube requires reconnection', checkedAt: '2026-09-27T00:00:00Z' },
+        twitch: { state: 'offline', detail: '', checkedAt: '2026-09-27T00:00:00Z' },
+      }),
+      getDeferredLiveStatus: vi.fn().mockReturnValue({
+        youtube: { state: 'unprepared', detail: 'Recording only; streaming status not requested', checkedAt: null },
+        twitch: { state: 'unprepared', detail: 'Recording only; streaming status not requested', checkedAt: null },
+      }),
+      retryPendingYouTubeCompletion: vi.fn().mockResolvedValue(false),
+      prepare: vi.fn(), startYouTubeBroadcast: vi.fn(),
       completeYouTubeBroadcast: vi.fn(), startComments: vi.fn(), stopComments: vi.fn(), invalidateLiveStatus: vi.fn(),
     }
     const logger = { write: vi.fn().mockResolvedValue(undefined) }
@@ -67,6 +76,240 @@ describe('StreamOrchestrator operation exclusion', () => {
     expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
     expect(platforms.stopComments).not.toHaveBeenCalled()
     expect(platforms.invalidateLiveStatus).not.toHaveBeenCalled()
+  })
+
+  it('defers provider preparation on ordinary game selection and requires it only for explicit stream start', async () => {
+    const { orchestrator, platforms, logger } = recordingHarness()
+    platforms.prepare.mockResolvedValue([
+      { service: 'youtube', ok: false, message: '400 {"error":"invalid_grant","error_description":"Bad Request"}' },
+      { service: 'twitch', ok: true, message: 'ok' },
+    ])
+    Object.assign(orchestrator, { warning: 'youtube: old invalid_grant' })
+
+    expect(await orchestrator.select('ark_survival_ascended', 'local')).toMatchObject({ warnings: [], services: [] })
+    expect(platforms.prepare).not.toHaveBeenCalled()
+    expect(logger.write).toHaveBeenCalledWith('profile.applied', expect.objectContaining({ platformPreparationDeferred: true, warnings: [] }))
+    await expect(orchestrator.start()).rejects.toMatchObject({
+      message: expect.stringContaining('invalid_grant'),
+      services: [
+        { service: 'youtube', ok: false, message: '400 {"error":"invalid_grant","error_description":"Bad Request"}' },
+        { service: 'twitch', ok: true, message: 'ok' },
+      ],
+    })
+    expect(platforms.prepare).toHaveBeenCalledOnce()
+  })
+
+  it('does not carry a failed explicit streaming preparation into a later recording-only start', async () => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    platforms.prepare.mockResolvedValue([{ service: 'youtube', ok: false, message: '400 invalid_grant' }])
+    expect((await orchestrator.select('ark_survival_ascended', 'local', true)).warnings).toContain('youtube: 400 invalid_grant')
+    const preparedCalls = platforms.prepare.mock.calls.length
+
+    await expect(orchestrator.startRecordingOnly()).resolves.toEqual([])
+
+    expect(obs.startRecordingOnly).toHaveBeenCalledOnce()
+    expect(platforms.prepare).toHaveBeenCalledTimes(preparedCalls)
+    expect((orchestrator as unknown as { warning: string | null }).warning).toBeNull()
+  })
+
+  it.each(['start', 'stop'] as const)('uses no OAuth refresh or YouTube completion retry while recording-only %s is in progress', async (operation) => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    let release!: () => void
+    if (operation === 'start') obs.startRecordingOnly.mockImplementationOnce(() => new Promise<string[]>((resolve) => { release = () => resolve([]) }))
+    else obs.stopRecordingOnly.mockImplementationOnce(() => new Promise((resolve) => {
+      release = () => resolve({ warnings: [], outputPath: 'capture.mkv', remuxedPath: 'capture.mp4' })
+    }))
+    const pending = operation === 'start' ? orchestrator.startRecordingOnly() : orchestrator.stopRecordingOnly()
+    await vi.waitFor(() => expect(release).toBeDefined())
+    const status = await orchestrator.getStatus()
+    expect(status.platforms.youtube.state).toBe('unprepared')
+    expect(platforms.getLiveStatus).not.toHaveBeenCalled()
+    expect(platforms.retryPendingYouTubeCompletion).not.toHaveBeenCalled()
+    expect(platforms.getDeferredLiveStatus).toHaveBeenCalledOnce()
+    release()
+    await pending
+  })
+
+  it('does not refresh providers during an active recording-only session', async () => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    obs.status.mockResolvedValue({ obsConnected: true, streaming: false, recording: true, recordingOnly: true, twitchOutputPlugin: { outputActive: false } })
+
+    const status = await orchestrator.getStatus()
+
+    expect(status).toMatchObject({ recording: true, recordingOnly: true, warning: null })
+    expect(platforms.getLiveStatus).not.toHaveBeenCalled()
+    expect(platforms.retryPendingYouTubeCompletion).not.toHaveBeenCalled()
+  })
+
+  it.each(['primary', 'secondary'] as const)('preserves live provider status and viewers when %s output is actually streaming', async (output) => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    Object.assign(orchestrator, { recordingOnlyOperation: true, observedObsStreaming: output === 'primary' })
+    obs.status.mockResolvedValue({ obsConnected: true, streaming: output === 'primary', recording: true, recordingOnly: true, twitchOutputPlugin: { outputActive: output === 'secondary' } })
+    const liveStatus = {
+      youtube: { state: 'live', detail: 'live', checkedAt: '2026-09-27T01:00:00Z', viewerCount: 27, viewerCountState: 'available' },
+      twitch: { state: 'live', detail: 'live', checkedAt: '2026-09-27T01:00:00Z', viewerCount: 42, viewerCountState: 'available' },
+    }
+    platforms.getLiveStatus.mockResolvedValue(liveStatus)
+
+    expect((await orchestrator.getStatus()).platforms).toEqual(liveStatus)
+    expect(platforms.getDeferredLiveStatus).not.toHaveBeenCalled()
+    expect(platforms.retryPendingYouTubeCompletion).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('replaces a stale in-flight provider warning with the actual local recording result (capture fails: %s)', async (captureFails) => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    Object.assign(orchestrator, { warning: 'youtube: 400 invalid_grant', observedObsStreaming: false })
+    obs.status.mockImplementation(async (_config: unknown, _gameId: unknown, _method: unknown, _busy: unknown, warning: string | null) => ({
+      obsConnected: true, streaming: false, recording: false, replayBuffer: false, sourceRecord: false, verticalRecording: false,
+      twitchOutputPlugin: { outputActive: false }, warning,
+    }))
+    let finishProvider!: (value: Awaited<ReturnType<typeof platforms.getLiveStatus>>) => void
+    platforms.getLiveStatus.mockImplementationOnce(() => new Promise((resolve) => { finishProvider = resolve }))
+    const pendingStatus = orchestrator.getStatus()
+    await vi.waitFor(() => expect(finishProvider).toBeDefined())
+    const captureError = 'Robloxのゲーム画面をOBSで確認できません'
+    if (captureFails) {
+      obs.startRecordingOnly.mockRejectedValueOnce(new Error(captureError))
+      await expect(orchestrator.startRecordingOnly()).rejects.toThrow(captureError)
+    } else await orchestrator.startRecordingOnly()
+    finishProvider({
+      youtube: { state: 'error', detail: '400 invalid_grant', checkedAt: '2026-09-27T00:00:00Z' },
+      twitch: { state: 'offline', detail: '', checkedAt: '2026-09-27T00:00:00Z' },
+    })
+
+    const status = await pendingStatus
+    expect(status.warning).toBe(captureFails ? captureError : null)
+    expect(status.platforms.youtube.state).toBe('unprepared')
+    expect(platforms.retryPendingYouTubeCompletion).not.toHaveBeenCalled()
+  })
+
+  it('does not start an OAuth request when an old idle OBS response arrives after recording has started', async () => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    let finishOldObs!: () => void
+    obs.status.mockImplementationOnce(() => new Promise((resolve) => {
+      finishOldObs = () => resolve({ obsConnected: true, streaming: false, recording: false, replayBuffer: false, twitchOutputPlugin: { outputActive: false } })
+    }))
+    const pendingStatus = orchestrator.getStatus()
+    await vi.waitFor(() => expect(finishOldObs).toBeDefined())
+    await orchestrator.startRecordingOnly()
+    finishOldObs()
+
+    expect((await pendingStatus).platforms.youtube.state).toBe('unprepared')
+    expect(platforms.getLiveStatus).not.toHaveBeenCalled()
+    expect(platforms.retryPendingYouTubeCompletion).not.toHaveBeenCalled()
+  })
+
+  it.each(['start', 'stop'] as const)('does not make local recording %s wait for background OAuth and discards its late audio writes', async (operation) => {
+    const { orchestrator, platforms, obs } = recordingHarness()
+    let finishProvider!: (value: Awaited<ReturnType<typeof platforms.getLiveStatus>>) => void
+    platforms.getLiveStatus.mockImplementationOnce(() => new Promise((resolve) => { finishProvider = resolve }))
+    const pendingAudio = orchestrator.ensureSelectedAudio()
+    await vi.waitFor(() => expect(finishProvider).toBeDefined())
+    expect(obs.applyProfile).not.toHaveBeenCalled()
+
+    await (operation === 'start' ? orchestrator.startRecordingOnly() : orchestrator.stopRecordingOnly())
+    expect(operation === 'start' ? obs.startRecordingOnly : obs.stopRecordingOnly).toHaveBeenCalledOnce()
+    const localApplyCalls = obs.applyProfile.mock.calls.length
+    finishProvider({
+      youtube: { state: 'live', detail: 'live', checkedAt: '2026-09-27T00:00:00Z' },
+      twitch: { state: 'offline', detail: '', checkedAt: '2026-09-27T00:00:00Z' },
+    })
+    await expect(pendingAudio).resolves.toEqual({ applied: false, warnings: [] })
+    expect(obs.applyProfile).toHaveBeenCalledTimes(localApplyCalls)
+  })
+
+  it('still waits for background audio that has already begun applying OBS settings', async () => {
+    const { orchestrator, obs } = recordingHarness()
+    let finishAudio!: () => void
+    obs.applyProfile.mockImplementationOnce(() => new Promise((resolve) => {
+      finishAudio = () => resolve({ warnings: [], audioApplied: true })
+    }))
+    const pendingAudio = orchestrator.ensureSelectedAudio()
+    await vi.waitFor(() => expect(finishAudio).toBeDefined())
+    const pendingRecording = orchestrator.startRecordingOnly()
+    await Promise.resolve()
+    expect(obs.startRecordingOnly).not.toHaveBeenCalled()
+    finishAudio()
+    await expect(pendingAudio).resolves.toEqual({ applied: true, warnings: [] })
+    await expect(pendingRecording).resolves.toEqual([])
+    expect(obs.startRecordingOnly).toHaveBeenCalledOnce()
+  })
+
+  it('does not let an old stream-stop event stop a newly started local recording or end YouTube', async () => {
+    const { orchestrator, obs, platforms } = recordingHarness()
+    const finishObsTriggeredStream = vi.fn().mockResolvedValue([])
+    Object.assign(obs, { finishObsTriggeredStream })
+    Object.assign(orchestrator, { observedObsStreaming: true })
+    let finishRecording!: () => void
+    obs.startRecordingOnly.mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishRecording = () => resolve([]) }))
+    const pendingRecording = orchestrator.startRecordingOnly()
+    await vi.waitFor(() => expect(finishRecording).toBeDefined())
+
+    // The delayed old STOPPED can arrive after OBS has already accepted the
+    // new StartRecord request. It must not own this recording's teardown.
+    orchestrator.handleObsStreamStateChanged(false)
+    finishRecording()
+    await pendingRecording
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(finishObsTriggeredStream).not.toHaveBeenCalled()
+    expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+    expect((orchestrator as unknown as { warning: string | null }).warning).toBeNull()
+  })
+
+  it('fences a queued stop from a short stream cycle that preceded completion of the new recording', async () => {
+    const { orchestrator, obs, platforms, logger } = recordingHarness()
+    const finishObsTriggeredStream = vi.fn().mockResolvedValue([])
+    Object.assign(obs, { finishObsTriggeredStream })
+    let finishRecording!: () => void
+    obs.startRecordingOnly.mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishRecording = () => resolve([]) }))
+    const pendingRecording = orchestrator.startRecordingOnly()
+    await vi.waitFor(() => expect(finishRecording).toBeDefined())
+    orchestrator.handleObsStreamStateChanged(true)
+    orchestrator.handleObsStreamStateChanged(false)
+    finishRecording()
+    await pendingRecording
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(finishObsTriggeredStream).not.toHaveBeenCalled()
+    expect(platforms.completeYouTubeBroadcast).not.toHaveBeenCalled()
+    expect(logger.write).toHaveBeenCalledWith('stream.obs_stop_superseded', { reason: 'new-local-recording-operation' })
+  })
+
+  it('does not suppress a genuine new stream-start event received during local recording startup', async () => {
+    const { orchestrator, obs, platforms } = recordingHarness()
+    Object.assign(obs, { startSecondaryTwitchForObsStream: vi.fn().mockResolvedValue([]) })
+    platforms.startYouTubeBroadcast.mockResolvedValue(undefined)
+    platforms.startComments.mockResolvedValue(undefined)
+    let finishRecording!: () => void
+    obs.startRecordingOnly.mockImplementationOnce(() => new Promise<string[]>((resolve) => { finishRecording = () => resolve([]) }))
+    const pendingRecording = orchestrator.startRecordingOnly()
+    await vi.waitFor(() => expect(finishRecording).toBeDefined())
+    orchestrator.handleObsStreamStateChanged(true)
+    finishRecording()
+    await pendingRecording
+
+    await vi.waitFor(() => expect(platforms.startYouTubeBroadcast).toHaveBeenCalledOnce())
+  })
+
+  it('does not advance the local recording fence on capture failure and still processes a genuine queued stream stop', async () => {
+    const { orchestrator, obs, platforms } = recordingHarness()
+    const finishObsTriggeredStream = vi.fn().mockResolvedValue([])
+    Object.assign(obs, { finishObsTriggeredStream })
+    platforms.completeYouTubeBroadcast.mockResolvedValue(undefined)
+    platforms.stopComments.mockResolvedValue(undefined)
+    let failRecording!: () => void
+    obs.startRecordingOnly.mockImplementationOnce(() => new Promise<string[]>((_resolve, reject) => { failRecording = () => reject(new Error('capture unavailable')) }))
+    const pendingRecording = orchestrator.startRecordingOnly()
+    const caughtRecording = pendingRecording.catch((error: Error) => error.message)
+    await vi.waitFor(() => expect(failRecording).toBeDefined())
+    orchestrator.handleObsStreamStateChanged(true)
+    orchestrator.handleObsStreamStateChanged(false)
+    failRecording()
+    expect(await caughtRecording).toBe('capture unavailable')
+
+    await vi.waitFor(() => expect(finishObsTriggeredStream).toHaveBeenCalledOnce())
+    expect(platforms.completeYouTubeBroadcast).toHaveBeenCalledOnce()
   })
 
   it('blocks recording-only while post-production software is running', async () => {
@@ -988,6 +1231,74 @@ describe('StreamOrchestrator selection recovery', () => {
 })
 
 describe('StreamOrchestrator stream startup rollback', () => {
+  it('returns structured preparation failures and permits YouTube-only fallback only on an explicit retry', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile), getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value), saveConfig: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }), preparePrimaryStream: vi.fn(),
+      start: vi.fn().mockResolvedValue([]), isStreaming: vi.fn().mockResolvedValue(true), ownsCurrentStream: vi.fn().mockReturnValue(true),
+    } as unknown as ObsController
+    const services = [
+      { service: 'youtube', ok: true, message: 'ready' },
+      { service: 'twitch', ok: false, message: 'Twitch reconnect required' },
+    ]
+    const platforms = {
+      prepare: vi.fn().mockResolvedValue(services), startYouTubeBroadcast: vi.fn(), startComments: vi.fn(), invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger)
+    await orchestrator.select(profile.id, 'window')
+    expect(platforms.prepare).not.toHaveBeenCalled()
+
+    const error = await orchestrator.start().catch((failure: unknown) => failure)
+    expect(streamPreparationErrorServices(error)).toEqual(services)
+    expect(obs.start).not.toHaveBeenCalled()
+    expect(platforms.startYouTubeBroadcast).not.toHaveBeenCalled()
+
+    await expect(orchestrator.start(true)).resolves.toEqual([])
+    expect(obs.start).toHaveBeenCalledWith(expect.objectContaining({ features: expect.objectContaining({ youtube: true, twitch: false }) }), expect.anything(), expect.any(String))
+    expect(platforms.startYouTubeBroadcast).toHaveBeenCalledOnce()
+  })
+
+  it('serializes only validated public preparation fields', () => {
+    expect(streamPreparationErrorServices(new Error('ordinary local capture error'))).toBeUndefined()
+    expect(streamPreparationErrorServices({ services: [{ service: 'other', ok: false, message: 'invalid' }] })).toBeUndefined()
+    expect(streamPreparationErrorServices({ services: [{ service: 'twitch', ok: false, message: 'retry', internal: 'must not be returned' }] })).toEqual([
+      { service: 'twitch', ok: false, message: 'retry' },
+    ])
+  })
+
+  it('retries failed YouTube preparation on the next explicit start after reconnecting, without reselecting the game', async () => {
+    const config = structuredClone(defaultConfig)
+    const profile = structuredClone(starterProfiles[0])
+    const store = {
+      getProfile: vi.fn().mockResolvedValue(profile), getConfig: vi.fn().mockResolvedValue(config),
+      saveProfile: vi.fn(async (value) => value), saveConfig: vi.fn(async (value) => value),
+    } as unknown as DataStore
+    const obs = {
+      applyProfile: vi.fn().mockResolvedValue({ warnings: [], audioApplied: true }), preparePrimaryStream: vi.fn(),
+      start: vi.fn().mockResolvedValue([]), isStreaming: vi.fn().mockResolvedValue(true), ownsCurrentStream: vi.fn().mockReturnValue(true),
+    } as unknown as ObsController
+    const platforms = {
+      prepare: vi.fn()
+        .mockResolvedValueOnce([{ service: 'youtube', ok: false, message: 'invalid_grant' }])
+        .mockResolvedValueOnce([{ service: 'youtube', ok: true, message: 'ready' }]),
+      startYouTubeBroadcast: vi.fn(), startComments: vi.fn(), invalidateLiveStatus: vi.fn(),
+    } as unknown as PlatformServices
+    const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger)
+    await orchestrator.select(profile.id, 'window')
+    await expect(orchestrator.start()).rejects.toThrow('invalid_grant')
+    expect(obs.start).not.toHaveBeenCalled()
+
+    await expect(orchestrator.start()).resolves.toEqual([])
+
+    expect(platforms.prepare).toHaveBeenCalledTimes(2)
+    expect(obs.start).toHaveBeenCalledOnce()
+  })
+
   it('advances a persisted Part number only after startup succeeds', async () => {
     const config = structuredClone(defaultConfig)
     let profile = structuredClone(starterProfiles[0])
@@ -1021,7 +1332,9 @@ describe('StreamOrchestrator stream startup rollback', () => {
     expect(profile.state.nextPartNumber).toBe(1)
     await expect(orchestrator.start()).resolves.toEqual([])
     expect(profile.state.nextPartNumber).toBe(2)
-    expect(store.saveProfile).toHaveBeenCalledTimes(2)
+    // Selection and deferred preparation save metadata without incrementing
+    // Part; only successful stream startup advances the next recording label.
+    expect(vi.mocked(store.saveProfile).mock.calls.map(([value]) => value.state.nextPartNumber)).toEqual([1, 1, 2])
   })
 
   it('stops OBS and closes any partial YouTube lifecycle when publication fails', async () => {
@@ -1234,7 +1547,7 @@ describe('StreamOrchestrator OBS-triggered external sync', () => {
     const logger = { write: vi.fn().mockResolvedValue(undefined) } as unknown as AppLogger
     const orchestrator = new StreamOrchestrator(store, obs, {} as CaptureDetector, platforms, logger)
 
-    await orchestrator.select(profile.id, 'window')
+    await orchestrator.select(profile.id, 'window', true)
     expect(obs.preparePrimaryStream).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id }))
     orchestrator.handleObsStreamStateChanged(true)
     await vi.waitFor(() => expect(platforms.startYouTubeBroadcast).toHaveBeenCalledWith(config, expect.objectContaining({ id: profile.id })))

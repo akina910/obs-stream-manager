@@ -18,7 +18,7 @@ import { LocalObsProvisioner } from './local-obs-provisioning.js'
 import { ObsController } from './obs.js'
 import { OAuthManager } from './oauth.js'
 import { youtubeOAuthCallbackHtml } from './oauth-callback.js'
-import { StreamOrchestrator } from './orchestrator.js'
+import { StreamOrchestrator, streamPreparationErrorServices } from './orchestrator.js'
 import { PlatformServices } from './platforms.js'
 import { getDataDirectory } from './paths.js'
 import { clearYouTubeStreamSecrets, provisionDistributorOAuth } from './provider-provisioning.js'
@@ -26,6 +26,7 @@ import { isUnsafeCrossOriginRequest } from './request-security.js'
 import { reconcileImportedConfig } from './secret-flags.js'
 import { SecretStore, type SecretName } from './secrets.js'
 import { DataStore } from './storage.js'
+import type { GameExitAction, GameExitPrompt, GameExitResponse } from '../shared/game-exit.js'
 
 const dataDir = getDataDirectory()
 const store = new DataStore(dataDir)
@@ -42,6 +43,14 @@ const platforms = new PlatformServices(secrets, store)
 await platforms.restoreDiagnostics()
 const commonTemplates = new CommonTemplateService(store)
 const orchestrator = new StreamOrchestrator(store, obs, new CaptureDetector(), platforms, logger, commonTemplates, bgm)
+
+export async function pollGameExitPrompt(): Promise<GameExitPrompt | null> {
+  return orchestrator.pollGameExitPrompt()
+}
+
+export async function respondToGameExitPrompt(id: string, action: GameExitAction): Promise<GameExitResponse> {
+  return orchestrator.respondToGameExitPrompt(id, action)
+}
 await orchestrator.restoreSelection()
 obs.onStreamStateChanged((active) => orchestrator.handleObsStreamStateChanged(active))
 const listenPort = Number(process.env.PORT ?? 4317)
@@ -53,7 +62,7 @@ const allowedOAuthOpenerOrigins = new Set([
   'http://localhost:4318',
 ])
 const allowedMutationOrigins = new Set(allowedOAuthOpenerOrigins)
-const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpenerOrigins)
+const oauth = new OAuthManager(store, secrets, callbackOrigin, allowedOAuthOpenerOrigins, () => platforms.invalidateYouTubeAuthentication())
 
 export const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'body.secrets'] }, bodyLimit: 18 * 1024 * 1024 })
 await app.register(cors, { origin: ['http://127.0.0.1:4318', 'http://localhost:4318'] })
@@ -84,7 +93,7 @@ app.setErrorHandler((error, _request, reply) => {
   const statusCode = 'statusCode' in normalized && typeof normalized.statusCode === 'number' ? normalized.statusCode : 500
   const status = error instanceof ZodError ? 400 : statusCode >= 400 ? statusCode : 500
   void logger.write('api.error', { message: normalized.message, status })
-  return reply.status(status).send({ error: error instanceof ZodError ? '入力内容が正しくありません' : normalized.message, details: error instanceof ZodError ? error.issues : undefined })
+  return reply.status(status).send({ error: error instanceof ZodError ? '入力内容が正しくありません' : normalized.message, details: error instanceof ZodError ? error.issues : undefined, services: streamPreparationErrorServices(normalized) })
 })
 
 app.get('/api/health', async () => ({ ok: true, dataDirectory: dataDir }))
@@ -293,7 +302,7 @@ app.get<{ Params: { id: string } }>('/api/profiles/:id/thumbnail', async (reques
 app.post<{ Body: { gameId: string; captureMethod?: string; preparePlatforms?: boolean } }>('/api/select', async (request) => {
   await orchestrator.assertNotStreaming()
   const override = request.body.captureMethod ? CaptureMethodSchema.parse(request.body.captureMethod) : undefined
-  return orchestrator.select(GameIdSchema.parse(request.body.gameId), override, request.body.preparePlatforms !== false)
+  return orchestrator.select(GameIdSchema.parse(request.body.gameId), override, request.body.preparePlatforms === true)
 })
 app.post<{ Body: { allowServiceFailures?: boolean } }>('/api/stream/start', async (request) => ({ ok: true, warnings: await orchestrator.start(Boolean(request.body?.allowServiceFailures)) }))
 app.post('/api/stream/stop', async () => ({ ok: true, warnings: await orchestrator.stop() }))
@@ -487,6 +496,7 @@ export async function startServer(): Promise<{ host: string; port: number; url: 
     runAutomaticGameDetection()
     automaticGameDetectionTimer = setInterval(runAutomaticGameDetection, 5_000)
     automaticGameDetectionTimer.unref()
+    orchestrator.startGameExitMonitoring()
   }
   return { host, port: listenPort, url: `http://${host}:${listenPort}` }
 }
@@ -496,6 +506,7 @@ export async function stopServer(): Promise<void> {
     clearInterval(automaticGameDetectionTimer)
     automaticGameDetectionTimer = null
   }
+  await orchestrator.stopGameExitMonitoring()
   localObs.stop()
   await platforms.stopComments().catch(() => undefined)
   await obs.disconnect().catch(() => undefined)

@@ -7,6 +7,19 @@ export type { CommonTemplateSettings } from '../shared/common-template'
 export type Bootstrap = { config: AppConfig; profiles: GameProfile[]; status: RuntimeStatus; obsSetup: LocalObsSetupStatus }
 export type SteamSyncResult = { profiles: GameProfile[]; owned: number; installed: number; created: number; updated: number; libraries: string[]; warnings: string[]; skipped?: boolean }
 export type OAuthProvider = 'youtube' | 'twitch'
+export type ServicePreparationResult = { service: OAuthProvider; ok: boolean; message: string }
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly services?: ServicePreparationResult[]) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
+
+function servicePreparationResults(value: unknown): ServicePreparationResult[] | undefined {
+  if (!Array.isArray(value) || !value.length || !value.every((item) => item && typeof item === 'object'
+    && (item.service === 'youtube' || item.service === 'twitch') && typeof item.ok === 'boolean' && typeof item.message === 'string')) return undefined
+  return value.map(({ service, ok, message }) => ({ service, ok, message }))
+}
 export type OAuthConnectionStage = 'setup_required' | 'ready' | 'authorizing' | 'partial' | 'connected'
 export type OAuthConnectionStatus = {
   provider: OAuthProvider
@@ -44,8 +57,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   if (init?.body !== undefined && !headers.has('content-type')) headers.set('content-type', 'application/json')
   const response = await fetch(url, { ...init, headers })
-  const body = await response.json().catch(() => ({})) as { error?: string }
-  if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+  const body = await response.json().catch(() => ({})) as { error?: string; services?: unknown }
+  if (!response.ok) throw new ApiRequestError(body.error ?? `HTTP ${response.status}`, servicePreparationResults(body.services))
   return body as T
 }
 
@@ -73,7 +86,7 @@ export const api = {
   deleteProfile: (id: string) => request<{ ok: true }>(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   uploadThumbnail: (id: string, mime: string, data: string, filename: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'POST', body: JSON.stringify({ mime, data, filename }) }),
   deleteThumbnail: (id: string) => request<GameProfile>(`/api/profiles/${encodeURIComponent(id)}/thumbnail`, { method: 'DELETE' }),
-  select: (gameId: string, captureMethod?: CaptureMethod, preparePlatforms = true) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: Array<{ service: OAuthProvider; ok: boolean; message: string }> }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod, preparePlatforms }) }),
+  select: (gameId: string, captureMethod?: CaptureMethod, preparePlatforms = false) => request<{ profile: GameProfile; captureMethod: CaptureMethod; warnings: string[]; services: ServicePreparationResult[] }>('/api/select', { method: 'POST', body: JSON.stringify({ gameId, captureMethod, preparePlatforms }) }),
   start: (allowServiceFailures = false) => request<{ ok: true; warnings: string[] }>('/api/stream/start', { method: 'POST', body: JSON.stringify({ allowServiceFailures }) }),
   stop: () => request<{ ok: true; warnings: string[] }>('/api/stream/stop', { method: 'POST', body: '{}' }),
   startRecordingOnly: () => request<{ ok: true; warnings: string[] }>('/api/recording/start', { method: 'POST', body: '{}' }),

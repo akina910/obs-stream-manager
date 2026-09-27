@@ -290,6 +290,14 @@ async function apiJson<T>(url: string, init: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+class YouTubeReconnectRequiredError extends Error {
+  constructor() { super('YouTubeへの再接続が必要です。設定から接続し直してください。録画のみの利用には接続不要です') }
+}
+
+class YouTubeCredentialsChangedError extends Error {
+  constructor() { super('YouTubeの接続情報が更新されたため、以前の認証応答を破棄しました') }
+}
+
 export class PlatformServices {
   private readonly comments = new Map<string, ChatMessage>()
   private youtubeTimer: NodeJS.Timeout | null = null
@@ -299,13 +307,14 @@ export class PlatformServices {
   private youtubeCommentFailures = 0
   private youtubeToken: { value: string; expiresAt: number; credentialKey: string } | null = null
   private youtubeTokenRefresh: { credentialKey: string; promise: Promise<string> } | null = null
+  private youtubeAuthenticationGeneration = 0
   private twitchToken: { value: string; expiresAt: number; credentialKey: string } | null = null
   private twitchTokenRefresh: { credentialKey: string; promise: Promise<string> } | null = null
   private commentsGeneration = 0
   private twitchReconnectTimer: NodeJS.Timeout | null = null
   private twitchReconnectFailures = 0
   private readonly youtubeLifecyclePolling: Required<YouTubeLifecyclePolling>
-  private platformStatusCache: { key: string; value: PlatformRuntimeStatuses; expiresAt: number } | null = null
+  private platformStatusCache: { key: string; identityKey: string; value: PlatformRuntimeStatuses; expiresAt: number } | null = null
   private platformStatusRefresh: { key: string; promise: Promise<PlatformRuntimeStatuses> } | null = null
   private platformStatusGeneration = 0
   private youtubeConfiguredBroadcastCache: { broadcastId: string; value: YouTubeBroadcast; expiresAt: number } | null = null
@@ -400,6 +409,35 @@ export class PlatformServices {
     this.youtubePublicPageCache.clear()
   }
 
+  invalidateYouTubeAuthentication(): void {
+    this.youtubeAuthenticationGeneration += 1
+    this.youtubeToken = null
+    this.youtubeTokenRefresh = null
+    this.invalidateLiveStatus()
+  }
+
+  private youtubeCredentialKey(config: AppConfig): string {
+    return crypto.createHash('sha256').update(`${config.youtube.clientId}\0${this.secrets.get('youtube-refresh-token') ?? ''}\0${this.secrets.get('youtube-client-secret') ?? ''}`).digest('hex')
+  }
+
+  private async latestConfig(fallback: AppConfig): Promise<AppConfig> {
+    return typeof this.store.getConfig === 'function' ? await this.store.getConfig() ?? fallback : fallback
+  }
+
+  private async assertYouTubeCredentialsCurrent(config: AppConfig, credentialKey: string, generation: number): Promise<void> {
+    if (generation !== this.youtubeAuthenticationGeneration) throw new YouTubeCredentialsChangedError()
+    const current = await this.latestConfig(config)
+    if (generation !== this.youtubeAuthenticationGeneration || this.youtubeCredentialKey(current) !== credentialKey) throw new YouTubeCredentialsChangedError()
+  }
+
+  private assertYouTubeAuthenticationCurrent(config: AppConfig, credentialKey: string, generation: number): void {
+    if (generation !== this.youtubeAuthenticationGeneration || this.youtubeCredentialKey(config) !== credentialKey) throw new YouTubeCredentialsChangedError()
+  }
+
+  private youtubeReconnectStatus(checkedAt: string | null): PlatformRuntimeStatus {
+    return { state: 'error', connectionIssue: 'reconnect_required', detail: new YouTubeReconnectRequiredError().message, checkedAt }
+  }
+
   private recordLiveStatusDiagnostics(statuses: PlatformRuntimeStatuses): void {
     if (!this.diagnostics.active) return
     for (const service of ['youtube', 'twitch'] as const) {
@@ -482,9 +520,10 @@ export class PlatformServices {
     this.secrets.set('youtube-observed-active', value ? JSON.stringify(value) : '')
   }
 
-  private statusKey(config: AppConfig, profile: GameProfile | null): string {
+  private statusKey(config: AppConfig, profile: GameProfile | null, includeHealth = true): string {
     return JSON.stringify({
-      youtube: [config.features.youtube, config.youtube.clientId, config.youtube.refreshTokenStored, config.youtube.broadcastId, profile?.youtube.enabled ?? null],
+      youtube: [config.features.youtube, config.youtube.clientId, config.youtube.refreshTokenStored, config.youtube.broadcastId, profile?.youtube.enabled ?? null,
+        this.youtubeCredentialKey(config), includeHealth && this.secrets.get('youtube-oauth-health') === 'reconnect_required', this.youtubeAuthenticationGeneration],
       twitch: [config.features.twitch, config.twitch.clientId, config.twitch.accessTokenStored, config.twitch.refreshTokenStored, config.twitch.broadcasterId, profile?.twitch.enabled ?? null],
     })
   }
@@ -582,8 +621,13 @@ export class PlatformServices {
 
   private async youtubeLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatus> {
     if (!config.features.youtube || profile?.youtube.enabled === false) return { state: 'disabled', detail: 'YouTube配信は無効です', checkedAt: null }
+    if (this.secrets.get('youtube-oauth-health') === 'reconnect_required') return this.youtubeReconnectStatus(null)
     if (!config.youtube.clientId || !config.youtube.refreshTokenStored) return { state: 'unprepared', detail: 'YouTube接続が完了していません', checkedAt: null }
     const checkedAt = new Date().toISOString()
+    const credentialKey = this.youtubeCredentialKey(config)
+    const authenticationGeneration = this.youtubeAuthenticationGeneration
+    const assertCurrent = () => this.assertYouTubeCredentialsCurrent(config, credentialKey, authenticationGeneration)
+    const assertCurrentSync = () => this.assertYouTubeAuthenticationCurrent(config, credentialKey, authenticationGeneration)
     if (this.youtubeLocallyStopped?.broadcastId === config.youtube.broadcastId) {
       if (this.youtubeLocallyStopped.expiresAt > Date.now()) {
         return {
@@ -597,11 +641,15 @@ export class PlatformServices {
     if (this.youtubeApiCooldownRemaining() > 0) return this.youtubeStatusDuringApiLimit(config, checkedAt)
     try {
       const accessToken = await this.youtubeAccessToken(config)
+      await assertCurrent()
+      assertCurrentSync()
       const headers = { authorization: `Bearer ${accessToken}` }
       const loadBroadcast = async (broadcastId: string): Promise<YouTubeBroadcast | undefined> => {
         const url = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
         url.search = new URLSearchParams({ part: 'id,status,contentDetails', id: broadcastId }).toString()
         const result = await apiJson<{ items: YouTubeBroadcast[] }>(url.toString(), { headers })
+        await assertCurrent()
+        assertCurrentSync()
         return result.items[0]
       }
       let broadcast: YouTubeBroadcast | undefined
@@ -613,6 +661,7 @@ export class PlatformServices {
         : null
       if (observedActiveId) {
         broadcast = await loadBroadcast(observedActiveId)
+        assertCurrentSync()
         const observedLifeCycle = String(broadcast?.status.lifeCycleStatus ?? '')
         if (!['live', 'liveStarting', 'testing', 'testStarting'].includes(observedLifeCycle)) {
           this.setObservedActive(null)
@@ -624,6 +673,7 @@ export class PlatformServices {
           broadcast = this.youtubeConfiguredBroadcastCache.value
         } else {
           broadcast = await loadBroadcast(config.youtube.broadcastId)
+          assertCurrentSync()
           const lifeCycle = String(broadcast?.status.lifeCycleStatus ?? '')
           this.youtubeConfiguredBroadcastCache = broadcast && !['live', 'liveStarting', 'testing', 'testStarting'].includes(lifeCycle)
             ? { broadcastId: config.youtube.broadcastId, value: broadcast, expiresAt: Date.now() + 5 * 60_000 }
@@ -640,6 +690,8 @@ export class PlatformServices {
           const activeUrl = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
           activeUrl.search = new URLSearchParams({ part: 'id,status,contentDetails', broadcastStatus: 'active', maxResults: '50' }).toString()
           const active = await apiJson<{ items: YouTubeBroadcast[] }>(activeUrl.toString(), { headers })
+          await assertCurrent()
+          assertCurrentSync()
           activeItems = active.items
           this.youtubeActiveBroadcastSearchCache = {
             configuredBroadcastId: config.youtube.broadcastId,
@@ -671,6 +723,8 @@ export class PlatformServices {
           const videoUrl = new URL('https://www.googleapis.com/youtube/v3/videos')
           videoUrl.search = new URLSearchParams({ part: 'liveStreamingDetails,status', id: broadcast.id }).toString()
           const video = await apiJson<{ items: Array<{ liveStreamingDetails?: { concurrentViewers?: string }; status?: { publicStatsViewable?: boolean } }> }>(videoUrl.toString(), { headers })
+          await assertCurrent()
+          assertCurrentSync()
           const item = video.items[0]
           const parsed = parseViewerCount(item?.liveStreamingDetails?.concurrentViewers)
           if (parsed !== null) {
@@ -691,11 +745,15 @@ export class PlatformServices {
             viewerCountDetail = 'YouTubeがライブ視聴統計をまだ返していません。30秒ごとに再取得します'
           }
         } catch (error) {
+          await assertCurrent()
+          assertCurrentSync()
+          if (error instanceof YouTubeCredentialsChangedError) throw error
           // `liveBroadcasts.list` can still succeed immediately before
           // `videos.list` reaches the daily quota. The public watch page does
           // not consume Data API quota, so use it here as well instead of
           // leaving the viewer counter unavailable for the whole broadcast.
           const publicCount = await this.youtubePublicViewerCount(broadcast.id).catch(() => null)
+          assertCurrentSync()
           this.deferYouTubeApiAfterLimit(error)
           if (publicCount !== null) {
             viewerCount = publicCount
@@ -716,11 +774,15 @@ export class PlatformServices {
       if (lifeCycle === 'complete') return { state: 'offline', detail: 'YouTube配信は終了済み', checkedAt }
       return { state: 'error', detail: `YouTube状態を判定できません（${lifeCycle || 'unknown'}）`, checkedAt }
     } catch (error) {
-      if (isYouTubeApiLimitError(error)) {
-        this.deferYouTubeApiAfterLimit(error)
+      let currentError = error
+      try { await assertCurrent(); assertCurrentSync() } catch (staleError) { currentError = staleError }
+      if (currentError instanceof YouTubeCredentialsChangedError) return { state: 'unprepared', detail: currentError.message, checkedAt: null }
+      if (currentError instanceof YouTubeReconnectRequiredError || this.secrets.get('youtube-oauth-health') === 'reconnect_required') return this.youtubeReconnectStatus(checkedAt)
+      if (isYouTubeApiLimitError(currentError)) {
+        this.deferYouTubeApiAfterLimit(currentError)
         return this.youtubeStatusDuringApiLimit(config, checkedAt)
       }
-      return { state: 'error', detail: `YouTube状態の確認に失敗: ${error instanceof Error ? error.message : String(error)}`, checkedAt }
+      return { state: 'error', detail: `YouTube状態の確認に失敗: ${currentError instanceof Error ? currentError.message : String(currentError)}`, checkedAt }
     }
   }
 
@@ -743,16 +805,54 @@ export class PlatformServices {
     }
   }
 
-  async getLiveStatus(config: AppConfig, profile: GameProfile | null): Promise<PlatformRuntimeStatuses> {
+  getDeferredLiveStatus(config: AppConfig, profile: GameProfile | null): PlatformRuntimeStatuses {
+    const cached = this.platformStatusCache?.identityKey === this.statusKey(config, profile, false)
+      ? this.platformStatusCache.value : null
+    const status = (service: 'youtube' | 'twitch'): PlatformRuntimeStatus => {
+      const name = service === 'youtube' ? 'YouTube' : 'Twitch'
+      if (!config.features[service] || profile?.[service].enabled === false) {
+        return { state: 'disabled', detail: `${name}配信は無効です`, checkedAt: null }
+      }
+      const previous = cached?.[service]
+      const connectionIssue = service === 'youtube' && this.secrets.get('youtube-oauth-health') === 'reconnect_required'
+        ? 'reconnect_required' as const : undefined
+      // Do not hide a previously observed external live output, but never pass
+      // stale audience counts off as a new observation during local recording.
+      if (previous && ['starting', 'live', 'stopping'].includes(previous.state)) {
+        return {
+          state: previous.state,
+          ...(connectionIssue ? { connectionIssue } : {}),
+          observation: 'deferred',
+          detail: `前回確認: ${previous.detail}。録画のみのため現在の配信状態は未確認です`,
+          checkedAt: previous.checkedAt,
+          viewerCount: null,
+          viewerCountState: 'unavailable',
+          viewerCountDetail: '録画のみのため視聴人数は取得していません',
+        }
+      }
+      return { state: 'unprepared', observation: 'deferred', ...(connectionIssue ? { connectionIssue } : {}),
+        detail: connectionIssue ? 'YouTube配信には再接続が必要です。録画のみの利用には接続不要です' : `録画のみのため${name}の配信状態は取得していません`, checkedAt: null }
+    }
+    // This is deliberately a snapshot only: no token refresh, completion retry,
+    // cache invalidation, or platform diagnostic mutation is needed to record.
+    return { youtube: status('youtube'), twitch: status('twitch') }
+  }
+
+  async getLiveStatus(config: AppConfig, profile: GameProfile | null, canRefresh: () => boolean = () => true): Promise<PlatformRuntimeStatuses> {
+    if (!canRefresh()) return this.getDeferredLiveStatus(config, profile)
     const key = this.statusKey(config, profile)
     if (this.platformStatusCache?.key === key && this.platformStatusCache.expiresAt > Date.now()) return this.platformStatusCache.value
     if (this.platformStatusRefresh?.key === key) return this.platformStatusRefresh.promise
     const generation = this.platformStatusGeneration
-    const promise = Promise.all([this.youtubeLiveStatus(config, profile), this.twitchLiveStatus(config, profile)]).then(([youtube, twitch]) => {
+    const promise = Promise.all([this.youtubeLiveStatus(config, profile), this.twitchLiveStatus(config, profile)]).then(async ([youtube, twitch]) => {
       const value = { youtube, twitch }
-      if (generation !== this.platformStatusGeneration) return this.getLiveStatus(config, profile)
+      // A local recording can supersede a request while its HTTP response is
+      // pending. Never let that old request start another OAuth refresh merely
+      // because a selection/config change invalidated the old cache generation.
+      const currentConfig = await this.latestConfig(config)
+      if (generation !== this.platformStatusGeneration || key !== this.statusKey(currentConfig, profile)) return this.getLiveStatus(currentConfig, profile, canRefresh)
       const realtime = [youtube.state, twitch.state].some((state) => ['starting', 'live', 'stopping'].includes(state))
-      this.platformStatusCache = { key, value, expiresAt: Date.now() + (realtime ? 30_000 : 60_000) }
+      this.platformStatusCache = { key, identityKey: this.statusKey(currentConfig, profile, false), value, expiresAt: Date.now() + (realtime ? 30_000 : 60_000) }
       this.recordLiveStatusDiagnostics(value)
       return value
     })
@@ -763,10 +863,12 @@ export class PlatformServices {
   }
 
   private async youtubeAccessToken(config: AppConfig): Promise<string> {
+    if (this.secrets.get('youtube-oauth-health') === 'reconnect_required') throw new YouTubeReconnectRequiredError()
     const refreshToken = this.secrets.get('youtube-refresh-token')
     const clientSecret = this.secrets.get('youtube-client-secret')
     if (!config.youtube.clientId || !refreshToken || !clientSecret) throw new Error('YouTube OAuth が未設定です。アプリを最新版へ更新し、再接続してください')
     const credentialKey = crypto.createHash('sha256').update(`${config.youtube.clientId}\0${refreshToken}\0${clientSecret}`).digest('hex')
+    const generation = this.youtubeAuthenticationGeneration
     if (this.youtubeToken?.credentialKey === credentialKey && this.youtubeToken.expiresAt > Date.now() + 60_000) return this.youtubeToken.value
     if (this.youtubeTokenRefresh?.credentialKey === credentialKey) return this.youtubeTokenRefresh.promise
     const promise = (async () => {
@@ -774,6 +876,8 @@ export class PlatformServices {
       const body = new URLSearchParams({ client_id: config.youtube.clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' })
       const response = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
       const raw = await response.text()
+      await this.assertYouTubeCredentialsCurrent(config, credentialKey, generation)
+      this.assertYouTubeAuthenticationCurrent(config, credentialKey, generation)
       let token: { access_token?: string; expires_in?: number; error?: string; error_description?: string } = {}
       try { token = JSON.parse(raw) as typeof token } catch { /* retain the HTTP response below */ }
       if (!response.ok || !token.access_token) {
@@ -1004,16 +1108,19 @@ export class PlatformServices {
     return results
   }
 
-  private async getYouTubeBroadcast(accessToken: string, broadcastId: string): Promise<YouTubeBroadcast> {
+  private async getYouTubeBroadcast(accessToken: string, broadcastId: string, beforeRead?: () => void): Promise<YouTubeBroadcast> {
     const url = new URL('https://www.googleapis.com/youtube/v3/liveBroadcasts')
     url.search = new URLSearchParams({ part: 'id,status,contentDetails', id: broadcastId }).toString()
     const deadline = Date.now() + this.youtubeLifecyclePolling.broadcastLookupTimeoutMs
     do {
+      beforeRead?.()
       const result = await apiJson<{ items: YouTubeBroadcast[] }>(url.toString(), { headers: { authorization: `Bearer ${accessToken}` } })
+      beforeRead?.()
       const broadcast = result.items[0]
       if (broadcast) return broadcast
       if (Date.now() >= deadline) break
       await wait(Math.min(this.youtubeLifecyclePolling.pollIntervalMs, Math.max(deadline - Date.now(), 0)))
+      beforeRead?.()
     } while (Date.now() <= deadline)
     throw new Error('YouTubeの配信枠が見つかりません。現在のゲーム設定は保持されます。配信開始をもう一度実行して自動再準備してください')
   }
@@ -1124,19 +1231,32 @@ export class PlatformServices {
     }
   }
 
-  async completeYouTubeBroadcast(config: AppConfig, profile: GameProfile | null): Promise<void> {
+  async completeYouTubeBroadcast(config: AppConfig, profile: GameProfile | null, beforeComplete?: () => void): Promise<void> {
     // `profile === null` is intentional for a manual OBS stop after an app restart.
     // Only a genuinely live lifecycle is completed below; stale ready/created IDs remain untouched.
     if (!config.features.youtube || profile?.youtube.enabled === false || !config.youtube.broadcastId) return
     const broadcastId = config.youtube.broadcastId
+    const clearPendingCompletion = () => {
+      if (this.youtubePendingCompletionId === broadcastId) this.setPendingYouTubeCompletion(null)
+    }
+    let cancelled = false
+    const assertCompletionAllowed = () => {
+      try {
+        beforeComplete?.()
+      } catch (error) {
+        cancelled = true
+        if (this.youtubeLocallyStopped?.broadcastId === broadcastId) this.youtubeLocallyStopped = null
+        clearPendingCompletion()
+        this.invalidateLiveStatus()
+        throw error
+      }
+    }
+    assertCompletionAllowed()
     // OBS has already been confirmed stopped by every caller. Reflect that
     // immediately instead of showing the cached/public YouTube "live" state
     // for another 30-60 seconds and inviting duplicate Stop operations.
     this.youtubeLocallyStopped = { broadcastId, expiresAt: Date.now() + 60_000 }
     this.invalidateLiveStatus()
-    const clearPendingCompletion = () => {
-      if (this.youtubePendingCompletionId === broadcastId) this.setPendingYouTubeCompletion(null)
-    }
     if (this.youtubeApiCooldownRemaining() > 0) {
       this.setPendingYouTubeCompletion(broadcastId)
       this.invalidateLiveStatus()
@@ -1144,7 +1264,10 @@ export class PlatformServices {
     }
     try {
       const accessToken = await this.youtubeAccessToken(config)
-      let broadcast = await this.getYouTubeBroadcast(accessToken, broadcastId)
+      assertCompletionAllowed()
+      const readBroadcast = () => this.getYouTubeBroadcast(accessToken, broadcastId, assertCompletionAllowed)
+      let broadcast = await readBroadcast()
+      assertCompletionAllowed()
       let lifeCycleStatus = String(broadcast.status.lifeCycleStatus ?? '')
       if (lifeCycleStatus === 'complete' || lifeCycleStatus === 'ready' || lifeCycleStatus === 'created') {
         clearPendingCompletion()
@@ -1157,11 +1280,12 @@ export class PlatformServices {
       }
       if (lifeCycleStatus === 'liveStarting' || lifeCycleStatus === 'testStarting') {
         broadcast = await this.waitForYouTubeState(
-          () => this.getYouTubeBroadcast(accessToken, broadcastId),
+          readBroadcast,
           (current) => ['live', 'testing', 'complete', 'ready'].includes(String(current.status.lifeCycleStatus ?? '')),
           this.youtubeLifecyclePolling.transitionTimeoutMs,
           (current) => `YouTube配信の開始処理が完了せず、終了できませんでした（lifeCycleStatus: ${String(current.status.lifeCycleStatus ?? 'unknown')}）`,
         )
+        assertCompletionAllowed()
         lifeCycleStatus = String(broadcast.status.lifeCycleStatus ?? '')
       }
       if (lifeCycleStatus === 'complete' || lifeCycleStatus === 'ready' || lifeCycleStatus === 'testing') {
@@ -1171,14 +1295,21 @@ export class PlatformServices {
       if (lifeCycleStatus !== 'live') {
         throw new Error(`YouTube配信を終了できない状態です（lifeCycleStatus: ${lifeCycleStatus || 'unknown'}）`)
       }
+      assertCompletionAllowed()
       await this.transitionYouTubeBroadcast(accessToken, broadcastId, 'complete')
+      assertCompletionAllowed()
       await this.waitForYouTubeState(
-        () => this.getYouTubeBroadcast(accessToken, broadcastId),
+        readBroadcast,
         (current) => current.status.lifeCycleStatus === 'complete',
         this.youtubeLifecyclePolling.transitionTimeoutMs,
         (current) => `YouTube配信の終了を確認できませんでした（lifeCycleStatus: ${String(current.status.lifeCycleStatus ?? 'unknown')}）`,
       )
+      assertCompletionAllowed()
     } catch (error) {
+      if (cancelled) throw error
+      // A request may fail after OBS has resumed. Recheck the user-confirmed
+      // output revision before classifying it as a retryable completion failure.
+      assertCompletionAllowed()
       if (!isYouTubeApiLimitError(error)) {
         this.setPendingYouTubeCompletion(broadcastId)
         this.invalidateLiveStatus()

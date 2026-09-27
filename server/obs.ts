@@ -126,6 +126,9 @@ export class ObsController {
   private started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null as string | null }
   private recordingOnlyActive = false
   private recordingGame: { id: string; name: string } | null = null
+  private outputSessionRevision = 0
+  private outputStartGeneration = 0
+  private observedOutputStates: Partial<Record<'stream' | 'record' | 'secondary', boolean>> = {}
 
   constructor(
     private readonly secrets: SecretStore,
@@ -143,14 +146,29 @@ export class ObsController {
       this.resetTransientOutputOwnership()
     })
     this.obs.on('StreamStateChanged', ({ outputActive, outputState }) => {
+      if (outputState === 'OBS_WEBSOCKET_OUTPUT_STARTING') {
+        this.outputSessionRevision += 1
+        this.outputStartGeneration += 1
+        return
+      }
       // STARTING/STOPPING/RECONNECTING are transitional. In particular OBS
       // reports outputActive=false while it is reconnecting; forwarding that
       // as a stop would end the YouTube broadcast and the linked outputs
       // before OBS gets the chance to reconnect.
-      if (outputState === 'OBS_WEBSOCKET_OUTPUT_STARTING'
-        || outputState === 'OBS_WEBSOCKET_OUTPUT_STOPPING'
+      if (outputState === 'OBS_WEBSOCKET_OUTPUT_STOPPING'
         || outputState === 'OBS_WEBSOCKET_OUTPUT_RECONNECTING') return
+      this.observeOutputSessionState('stream', outputActive)
       for (const listener of this.streamStateListeners) listener(outputActive)
+    })
+    this.obs.on('RecordStateChanged', ({ outputActive, outputState }) => {
+      if (outputState === 'OBS_WEBSOCKET_OUTPUT_STARTING') {
+        this.outputSessionRevision += 1
+        this.outputStartGeneration += 1
+        return
+      }
+      if (outputState === 'OBS_WEBSOCKET_OUTPUT_STARTED' || outputState === 'OBS_WEBSOCKET_OUTPUT_STOPPED') {
+        this.observeOutputSessionState('record', outputActive)
+      }
     })
   }
 
@@ -198,9 +216,33 @@ export class ObsController {
   }
 
   private resetTransientOutputOwnership(): void {
+    this.outputSessionRevision += 1
+    this.outputStartGeneration += 1
+    this.observedOutputStates = {}
     this.started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
     this.recordingOnlyActive = false
     this.recordingGame = null
+  }
+
+  getOutputSessionRevision(): number {
+    return this.outputSessionRevision
+  }
+
+  private observeOutputSessionState(output: 'stream' | 'record' | 'secondary', active: boolean): void {
+    if (this.observedOutputStates[output] !== active) {
+      this.observedOutputStates[output] = active
+      this.outputSessionRevision += 1
+      if (active) this.outputStartGeneration += 1
+    }
+  }
+
+  createOutputStopGuard(expectedRevision?: number): () => void {
+    if (expectedRevision === undefined) return () => undefined
+    if (expectedRevision !== this.outputSessionRevision) throw new Error('出力セッションが変わったため、以前の終了確認を取り消しました')
+    const generation = this.outputStartGeneration
+    return () => {
+      if (generation !== this.outputStartGeneration) throw new Error('新しい出力が開始されたため、以前の終了確認を取り消しました')
+    }
   }
 
   private captureSource(profile: GameProfile, method: CaptureMethod): string {
@@ -685,10 +727,11 @@ export class ObsController {
     return path.join(os.homedir(), 'Videos', 'OBS Stream Manager', recordingGameName(profile))
   }
 
-  private async restorePreviousRecordingProfile(warnings: string[] = []): Promise<void> {
+  private async restorePreviousRecordingProfile(warnings: string[] = [], guard: () => void = () => undefined): Promise<void> {
     const previous = this.secrets.get('obs-recording-previous-profile')?.trim()
     if (!previous) return
     const profiles = await this.obs.call('GetProfileList').catch(() => null)
+    guard()
     if (!profiles || profiles.currentProfileName !== recordingOnlyPreset.profileName) {
       this.secrets.set('obs-recording-previous-profile', '')
       return
@@ -1046,6 +1089,8 @@ export class ObsController {
       const server = credentials?.server ?? this.secrets.get('twitch-stream-server')
       if (!key || !server) throw new Error('Twitchへの映像送信準備が未完了です。Twitchを再接続してください')
       try {
+        this.outputSessionRevision += 1
+        this.outputStartGeneration += 1
         await this.callVendor(OBS_OUTPUT_PLUGIN_VENDOR, 'start_twitch', { server, key })
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
@@ -1114,6 +1159,7 @@ export class ObsController {
       // it unhealthy; leaving it active would keep the failed encoder load on
       // the primary stream while the orchestrator only reports a warning.
       try {
+        this.outputSessionRevision += 1
         await this.callVendor(OBS_OUTPUT_PLUGIN_VENDOR, 'stop_twitch')
       } catch (stopError) {
         const validationDetail = error instanceof Error ? error.message : String(error)
@@ -1125,10 +1171,12 @@ export class ObsController {
   }
 
   private async stopTwitchSecondary(): Promise<void> {
+    this.outputSessionRevision += 1
     await this.callVendor(OBS_OUTPUT_PLUGIN_VENDOR, 'stop_twitch')
   }
 
-  private async callVertical(requestType: 'start_recording' | 'stop_recording' | 'stop_backtrack'): Promise<void> {
+  private async callVertical(requestType: 'start_recording' | 'stop_recording' | 'stop_backtrack', requireKnownOutput = false, guard: () => void = () => undefined): Promise<void> {
+    guard()
     try {
       await this.callVendor('aitum-vertical-canvas', requestType)
     } catch (error) {
@@ -1140,6 +1188,7 @@ export class ObsController {
         stop_backtrack: 'VerticalCanvasDockStopBacktrack',
       } as const
       try {
+        guard()
         await this.obs.call('TriggerHotkeyByName', {
           hotkeyName: hotkeyNames[requestType],
         })
@@ -1148,7 +1197,7 @@ export class ObsController {
         const missingHotkey = hotkeyMessage.toLowerCase().includes('no hotkeys were found')
         // Stop operations are global, idempotent teardown. A missing Aitum vendor
         // and missing Aitum hotkey means there is simply no vertical output to stop.
-        if (requestType !== 'start_recording' && missingHotkey) return
+        if (requestType !== 'start_recording' && missingHotkey && !requireKnownOutput) return
         throw hotkeyError
       }
     }
@@ -1322,7 +1371,8 @@ export class ObsController {
     return this.stopOutputs()
   }
 
-  private async restorePreviousStreamService(): Promise<void> {
+  private async restorePreviousStreamService(guard: () => void = () => undefined): Promise<void> {
+    guard()
     const serialized = this.secrets.get('obs-previous-stream-service')
     if (!serialized) {
       this.streamServiceManaged = false
@@ -1345,6 +1395,7 @@ export class ObsController {
       throw new Error('保存したOBS配信サービス設定が壊れています')
     }
     const current = await this.obs.call('GetStreamServiceSettings')
+    guard()
     const currentSettings = current.streamServiceSettings as Record<string, unknown>
     const stillManagerApplied = current.streamServiceType === applied.streamServiceType
       && currentSettings.server === applied.server
@@ -2085,49 +2136,101 @@ export class ObsController {
     }
   }
 
-  async stopRecordingOnly(config: AppConfig): Promise<{ warnings: string[]; outputPath: string | null; remuxedPath: string | null }> {
+  async stopRecordingOnly(config: AppConfig, expectedRevision?: number, beforeStop?: () => void, onStopCommitted?: () => void): Promise<{ warnings: string[]; outputPath: string | null; remuxedPath: string | null }> {
     await this.connect(config)
+    const outputGuard = this.createOutputStopGuard(expectedRevision)
+    const guard = () => { outputGuard(); beforeStop?.() }
     const warnings: string[] = []
     const record = await this.obs.call('GetRecordStatus')
+    guard()
     let outputPath: string | null = null
+    let recordingStopped = !record.outputActive
     if (record.outputActive) {
       try {
+        onStopCommitted?.()
         const stopped = await this.obs.call('StopRecord')
         outputPath = typeof stopped.outputPath === 'string' && stopped.outputPath.trim() ? stopped.outputPath : null
-        if (!await this.waitForRecordInactive()) warnings.push('録画停止の完了を確認できませんでした')
+        recordingStopped = await this.waitForRecordInactive()
+        if (!recordingStopped) warnings.push('録画停止の完了を確認できませんでした')
       } catch (error) {
         warnings.push(`録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
       }
     } else {
       warnings.push('OBS録画はすでに停止しています')
     }
+    // Keep ownership and the active recording profile intact when StopRecord
+    // fails. An unattended retry must still target this exact recording.
+    if (!recordingStopped) return { warnings, outputPath, remuxedPath: null }
     this.started.record = false
     this.recordingOnlyActive = false
     this.recordingGame = null
     const remuxedPath = outputPath ? await this.waitForRemuxedMp4(outputPath) : null
     if (outputPath?.toLowerCase().endsWith('.mkv') && !remuxedPath) warnings.push('録画MKVは保存されましたが、自動変換したMP4を30秒以内に確認できませんでした')
-    await this.restorePreviousRecordingProfile(warnings).catch((error) => {
+    guard()
+    await this.restorePreviousRecordingProfile(warnings, guard).catch((error) => {
       warnings.push(`元のOBSプロファイルへ戻せませんでした: ${error instanceof Error ? error.message : String(error)}`)
     })
     return { warnings, outputPath, remuxedPath }
   }
 
-  private async stopOutputs(): Promise<string[]> {
+  async stopRecordingOutputs(config: AppConfig, expectedRevision?: number, beforeStop?: () => void, onStopCommitted?: () => void): Promise<string[]> {
+    await this.connect(config)
+    const outputGuard = this.createOutputStopGuard(expectedRevision)
+    const guard = () => { outputGuard(); beforeStop?.() }
+    const [stream, record, secondary] = await Promise.all([
+      this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.getTwitchOutputPluginStatus(),
+    ])
+    guard()
+    if (streamOutputRunning(stream) || secondary.outputActive) throw new Error('配信出力が開始されたため、録画終了確認を取り消しました')
+    const warnings: string[] = []
+    if (record.outputActive) {
+      try {
+        onStopCommitted?.()
+        await this.obs.call('StopRecord')
+        if (await this.waitForRecordInactive()) this.started.record = false
+        else warnings.push('通常録画の停止を確認できませんでした')
+      } catch (error) {
+        warnings.push(`通常録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    guard()
+    onStopCommitted?.()
+    await this.stopSourceRecord().then(() => {
+      this.started.sourceRecord = false
+      this.started.sourceRecordSource = null
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!this.started.sourceRecord && message.toLowerCase().includes('no vendor was found')) return
+      warnings.push(`Source Recordを停止できませんでした: ${message}`)
+    })
+    guard()
+    await this.callVertical('stop_recording', this.started.vertical, guard).then(() => {
+      this.started.vertical = false
+    }).catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    return warnings
+  }
+
+  private async stopOutputs(guard: () => void = () => undefined): Promise<string[]> {
     const warnings: string[] = []
     const [stream, record, replay] = await Promise.all([
       this.obs.call('GetStreamStatus'), this.obs.call('GetRecordStatus'), this.getReplayBufferStatus(),
     ])
     // The Stop action is a global teardown by design. OBS remains authoritative after this
     // process restarts, so do not rely on the controller's transient `started` flags here.
+    guard()
     await this.stopSourceRecord().catch((error) => warnings.push(`Source Recordを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    await this.callVertical('stop_recording').catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
-    await this.callVertical('stop_backtrack').catch((error) => warnings.push(`Aitum Vertical Backtrackを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    guard()
+    await this.callVertical('stop_recording', false, guard).catch((error) => warnings.push(`Aitum Vertical録画を停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    guard()
+    await this.callVertical('stop_backtrack', false, guard).catch((error) => warnings.push(`Aitum Vertical Backtrackを停止できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+    guard()
     await this.stopTwitchSecondary().catch((error) => {
       const message = error instanceof Error ? error.message : String(error)
       if (!message.toLowerCase().includes('no vendor was found')) warnings.push(`Twitch副出力を停止できませんでした: ${message}`)
     })
     const outputStopChecks: Promise<void>[] = []
     if (replay.outputActive) {
+      guard()
       try {
         await this.obs.call('StopReplayBuffer')
         outputStopChecks.push(this.waitForReplayInactive().then((stopped) => {
@@ -2140,6 +2243,7 @@ export class ObsController {
       }
     }
     if (record.outputActive) {
+      guard()
       try {
         await this.obs.call('StopRecord')
         outputStopChecks.push(this.waitForRecordInactive().then((stopped) => {
@@ -2153,6 +2257,7 @@ export class ObsController {
     }
     let streamStopped = !streamOutputRunning(stream)
     if (streamOutputRunning(stream)) {
+      guard()
       try {
         await this.obs.call('StopStream')
         outputStopChecks.push(this.waitForStreamInactive().then((stopped) => {
@@ -2168,8 +2273,9 @@ export class ObsController {
       }
     }
     await Promise.all(outputStopChecks)
+    guard()
     if (streamStopped) {
-      await this.restorePreviousStreamService().catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
+      await this.restorePreviousStreamService(guard).catch((error) => warnings.push(`OBS配信サービス設定を復元できませんでした: ${error instanceof Error ? error.message : String(error)}`))
     }
     this.started = { stream: false, twitch: false, record: false, replay: false, sourceRecord: false, vertical: false, sourceRecordSource: null }
     return warnings
@@ -2225,8 +2331,9 @@ export class ObsController {
     return warnings
   }
 
-  async stop(config: AppConfig, profile: GameProfile | null): Promise<string[]> {
+  async stop(config: AppConfig, profile: GameProfile | null, expectedRevision?: number): Promise<string[]> {
     await this.connect(config)
+    const guard = this.createOutputStopGuard(expectedRevision)
     const warnings: string[] = []
     const endingSceneSelected = await this.obs.call('SetCurrentProgramScene', { sceneName: profile?.obs.endingScene ?? '90_ENDING' })
       .then(() => true)
@@ -2235,7 +2342,8 @@ export class ObsController {
         return false
       })
     if (endingSceneSelected) await wait(config.obs.endDelaySeconds * 1000)
-    warnings.push(...await this.stopOutputs())
+    guard()
+    warnings.push(...await this.stopOutputs(guard))
     this.rollbackScene = null
     return warnings
   }
@@ -2271,6 +2379,9 @@ export class ObsController {
         this.obs.call('GetProfileList'),
       ])
       const recordingOnly = record.outputActive && (this.recordingOnlyActive || profiles.currentProfileName === recordingOnlyPreset.profileName)
+      this.observeOutputSessionState('stream', streamOutputRunning(stream))
+      this.observeOutputSessionState('record', record.outputActive)
+      this.observeOutputSessionState('secondary', twitchOutputPlugin.outputActive)
       if (!record.outputActive) this.recordingGame = null
       if (recordingOnly && !this.recordingGame) {
         const [id, name] = await Promise.all(['RecordingGameId', 'RecordingGameName'].map((parameterName) =>

@@ -57,6 +57,8 @@ export type RunningGameMatch = {
   windowTitle?: string
 }
 
+export type RunningGameState = 'running' | 'stopped' | 'unknown'
+
 type JavaGameWindow = { executableName: string; windowTitle: string }
 
 const javaExecutables = new Set(['java.exe', 'javaw.exe'])
@@ -238,6 +240,43 @@ export class CaptureDetector {
       gfnRunning,
       gfnWindowTitle,
     }
+  }
+
+  async probeRunningGame(profile: GameProfile, method: CaptureMethod): Promise<RunningGameState> {
+    if (profile.platformGroup === 'switch' || !['local', 'window', 'geforce_now'].includes(method)) return 'unknown'
+    // Keep failures local to this observation: the auto-selection warning is
+    // shared state and cannot prove that this particular inventory succeeded.
+    let processes: Set<string>
+    try {
+      processes = new Set((await this.runningProcesses()).map((name) => name.trim().toLowerCase()).filter(Boolean))
+    } catch {
+      return 'unknown'
+    }
+    if (!processes.size) return 'unknown'
+
+    if (method === 'geforce_now') {
+      const gfnRunning = [...processes].some((name) => name.includes('geforcenow') || name.includes('geforce now'))
+      if (!gfnRunning) return 'stopped'
+      try {
+        return geforceNowTitleForProfile(profile, await this.runningGeForceNowWindowTitles()) ? 'running' : 'unknown'
+      } catch {
+        return 'unknown'
+      }
+    }
+
+    const names = profile.capture.executableNames.map((name) => name.trim().toLowerCase()).filter(Boolean)
+    if (!names.length) return 'unknown'
+    if (configuredRunningMatch(profile, processes, [])) return 'running'
+    const minecraftJavaRunning = profile.id === 'minecraft' && names.some((name) => javaExecutables.has(name))
+      && [...javaExecutables].some((name) => processes.has(name))
+    if (minecraftJavaRunning) {
+      try {
+        return configuredRunningMatch(profile, processes, await this.runningJavaGameWindows()) ? 'running' : 'unknown'
+      } catch {
+        return 'unknown'
+      }
+    }
+    return 'stopped'
   }
 
   async detectRunningProfile(profiles: GameProfile[], preferredProfileId?: string | null): Promise<RunningGameMatch | null> {
